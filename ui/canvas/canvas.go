@@ -2,6 +2,7 @@
 package canvas
 
 import (
+	"fmt"
 	"image"
 	"image/color"
 
@@ -29,6 +30,14 @@ const (
 	ToolDraw
 )
 
+// ConnectorLabel represents a label to draw on a connector contact.
+type ConnectorLabel struct {
+	Label   string  // The text to display (e.g., "A0", "D7", "GND")
+	CenterX float64 // Center X in image coordinates
+	CenterY float64 // Center Y in image coordinates
+	Side    pcbimage.Side
+}
+
 // ImageCanvas provides an image display with pan, zoom, and selection.
 type ImageCanvas struct {
 	widget.BaseWidget
@@ -38,6 +47,9 @@ type ImageCanvas struct {
 
 	// Overlays (keyed by name, e.g., "front_contacts", "back_contacts")
 	overlays map[string]*Overlay
+
+	// Connector labels (drawn with layer opacity)
+	connectorLabels []ConnectorLabel
 
 	// Display state
 	raster *fynecanvas.Raster
@@ -386,6 +398,19 @@ func (ic *ImageCanvas) ClearAllOverlays() {
 	ic.Refresh()
 }
 
+// SetConnectorLabels sets the connector labels to draw on the image.
+// Labels are drawn with the same opacity as their corresponding layer.
+func (ic *ImageCanvas) SetConnectorLabels(labels []ConnectorLabel) {
+	ic.connectorLabels = labels
+	ic.Refresh()
+}
+
+// ClearConnectorLabels removes all connector labels.
+func (ic *ImageCanvas) ClearConnectorLabels() {
+	ic.connectorLabels = nil
+	ic.Refresh()
+}
+
 // SetImage sets a single image to display (convenience method).
 func (ic *ImageCanvas) SetImage(img image.Image) {
 	if img == nil {
@@ -584,12 +609,15 @@ func (ic *ImageCanvas) draw(w, h int) image.Image {
 		output.Pix[i] = 255
 	}
 
-	// Composite each visible layer
+	// Composite each visible layer and draw connector labels with matching opacity
 	for _, layer := range ic.layers {
 		if layer == nil || layer.Image == nil || !layer.Visible {
 			continue
 		}
 		ic.compositeLayer(output, layer, w, h)
+
+		// Draw connector labels for this layer's side with the layer's opacity
+		ic.drawConnectorLabelsForLayer(output, layer)
 	}
 
 	// Store for sampling
@@ -650,6 +678,45 @@ func (ic *ImageCanvas) compositeLayer(output *image.RGBA, layer *pcbimage.Layer,
 			}
 			// effectiveAlpha near 0: keep background (black)
 		}
+	}
+}
+
+// drawConnectorLabelsForLayer draws connector labels for a specific layer with opacity.
+func (ic *ImageCanvas) drawConnectorLabelsForLayer(output *image.RGBA, layer *pcbimage.Layer) {
+	if len(ic.connectorLabels) == 0 {
+		return
+	}
+
+	// Use black text color for labels (visible on gold contacts)
+	labelColor := color.RGBA{R: 0, G: 0, B: 0, A: 255}
+
+	// Calculate scale based on zoom - use larger minimum for readability
+	scale := int(ic.zoom * 3)
+	if scale < 2 {
+		scale = 2
+	}
+	if scale > 6 {
+		scale = 6
+	}
+
+	drawn := 0
+	for _, cl := range ic.connectorLabels {
+		// Only draw labels that match this layer's side
+		if cl.Side != layer.Side {
+			continue
+		}
+
+		// Convert image coordinates to canvas coordinates
+		canvasX := int(cl.CenterX * ic.zoom)
+		canvasY := int(cl.CenterY * ic.zoom)
+
+		// Draw the rotated label with the layer's opacity
+		DrawRotatedLabelWithOpacity(output, cl.Label, canvasX, canvasY, labelColor, scale, layer.Opacity)
+		drawn++
+	}
+	if drawn > 0 {
+		fmt.Printf("  drawConnectorLabelsForLayer: drew %d labels for side %v, scale=%d, opacity=%.2f\n",
+			drawn, layer.Side, scale, layer.Opacity)
 	}
 }
 

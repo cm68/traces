@@ -441,7 +441,6 @@ func (ip *ImportPanel) onDetectContacts() {
 				overlay.Rectangles[i] = canvas.OverlayRect{
 					X: contact.Bounds.X, Y: contact.Bounds.Y,
 					Width: contact.Bounds.Width, Height: contact.Bounds.Height,
-					Label:          fmt.Sprintf("%d", i+1),
 					Fill:           fill,
 					StripeInterval: contact.Bounds.Width, // Use contact width as stripe interval
 				}
@@ -492,7 +491,6 @@ func (ip *ImportPanel) onDetectContacts() {
 						Width:  pos.Width,
 						Height: pos.Height,
 						Fill:   canvas.FillNone, // Open square (no fill)
-						Label:  fmt.Sprintf("%d", i+1),
 					}
 				}
 				ip.canvas.SetOverlay(expectedOverlayName, expectedOverlay)
@@ -722,7 +720,6 @@ func (ip *ImportPanel) onAlignImages() {
 			overlay.Rectangles[i] = canvas.OverlayRect{
 				X: contact.Bounds.X, Y: contact.Bounds.Y,
 				Width: contact.Bounds.Width, Height: contact.Bounds.Height,
-				Label: fmt.Sprintf("%d", i+1),
 			}
 		}
 		ip.canvas.SetOverlay("back_contacts", overlay)
@@ -1181,7 +1178,6 @@ func (ip *ImportPanel) createContactOverlay(name string, contacts []alignment.Co
 		overlay.Rectangles[i] = canvas.OverlayRect{
 			X: contact.Bounds.X, Y: contact.Bounds.Y,
 			Width: contact.Bounds.Width, Height: contact.Bounds.Height,
-			Label: fmt.Sprintf("%d", i+1),
 			Fill:  fill,
 		}
 	}
@@ -1425,11 +1421,12 @@ func (cp *ComponentsPanel) showComponentDetail(comp interface{}) {
 	// TODO: Show component details
 }
 
-// Overlay name constants for via overlays.
+// Overlay name constants for via and connector overlays.
 const (
 	OverlayFrontVias     = "front_vias"
 	OverlayBackVias      = "back_vias"
 	OverlayConfirmedVias = "confirmed_vias"
+	OverlayConnectors    = "connectors"
 )
 
 // TracesPanel displays and manages detected vias and traces.
@@ -1516,8 +1513,15 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas) *TracesPanel {
 	tp.loadTrainingSet()
 	tp.updateTrainingLabel()
 
-	// Auto-match vias when alignment completes (if both sides have vias)
+	// Auto-match vias and create connectors when alignment completes
 	state.On(app.EventAlignmentComplete, func(data interface{}) {
+		// Create connectors from detected contacts
+		tp.state.CreateConnectorsFromAlignment()
+		connCount := tp.state.FeaturesLayer.ConnectorCount()
+		fmt.Printf("Created %d connectors from alignment contacts\n", connCount)
+		tp.createConnectorOverlay()
+
+		// Auto-match vias if both sides have vias
 		frontVias := tp.state.FeaturesLayer.GetViasBySide(pcbimage.SideFront)
 		backVias := tp.state.FeaturesLayer.GetViasBySide(pcbimage.SideBack)
 		if len(frontVias) > 0 && len(backVias) > 0 {
@@ -2175,6 +2179,52 @@ func (tp *TracesPanel) createConfirmedViaOverlay(confirmedVias []*via.ConfirmedV
 
 	fmt.Printf("  Setting overlay '%s': %d rects, %d polygons\n", OverlayConfirmedVias, len(overlay.Rectangles), len(overlay.Polygons))
 	tp.canvas.SetOverlay(OverlayConfirmedVias, overlay)
+}
+
+// createConnectorOverlay creates a canvas overlay for board edge connectors.
+// Connectors are displayed as green rectangles with signal name labels.
+// Labels are drawn rotated -90 degrees and fade with the layer opacity.
+func (tp *TracesPanel) createConnectorOverlay() {
+	connectors := tp.state.FeaturesLayer.GetConnectors()
+	fmt.Printf("  createConnectorOverlay: %d connectors\n", len(connectors))
+
+	overlay := &canvas.Overlay{
+		Color:      colorutil.Green,
+		Rectangles: make([]canvas.OverlayRect, 0, len(connectors)),
+		Polygons:   make([]canvas.OverlayPolygon, 0),
+	}
+
+	// Build connector labels for opacity-aware rendering
+	labels := make([]canvas.ConnectorLabel, 0, len(connectors))
+
+	for _, c := range connectors {
+		// Use signal name as label, or pin number if no signal name
+		label := c.SignalName
+		if label == "" {
+			label = fmt.Sprintf("P%d", c.PinNumber)
+		}
+
+		// Add rectangle overlay (no label - labels are drawn separately with opacity)
+		overlay.Rectangles = append(overlay.Rectangles, canvas.OverlayRect{
+			X:      c.Bounds.X,
+			Y:      c.Bounds.Y,
+			Width:  c.Bounds.Width,
+			Height: c.Bounds.Height,
+			Fill:   canvas.FillNone,
+		})
+
+		// Add connector label for opacity-aware rendering
+		labels = append(labels, canvas.ConnectorLabel{
+			Label:   label,
+			CenterX: c.Center.X,
+			CenterY: c.Center.Y,
+			Side:    c.Side,
+		})
+	}
+
+	fmt.Printf("  Setting overlay '%s': %d rects, %d labels\n", OverlayConnectors, len(overlay.Rectangles), len(labels))
+	tp.canvas.SetOverlay(OverlayConnectors, overlay)
+	tp.canvas.SetConnectorLabels(labels)
 }
 
 // tryMatchVias attempts to match front and back vias to create confirmed vias.

@@ -25,6 +25,57 @@ var digitPatterns = [10][5]uint8{
 	{0b111, 0b101, 0b111, 0b001, 0b111}, // 9
 }
 
+// letterPatterns contains 3x5 pixel patterns for letters A-Z and common symbols.
+// Each letter is represented as 5 rows of 3 bits.
+var letterPatterns = map[rune][5]uint8{
+	'A': {0b010, 0b101, 0b111, 0b101, 0b101},
+	'B': {0b110, 0b101, 0b110, 0b101, 0b110},
+	'C': {0b011, 0b100, 0b100, 0b100, 0b011},
+	'D': {0b110, 0b101, 0b101, 0b101, 0b110},
+	'E': {0b111, 0b100, 0b110, 0b100, 0b111},
+	'F': {0b111, 0b100, 0b110, 0b100, 0b100},
+	'G': {0b011, 0b100, 0b101, 0b101, 0b011},
+	'H': {0b101, 0b101, 0b111, 0b101, 0b101},
+	'I': {0b111, 0b010, 0b010, 0b010, 0b111},
+	'J': {0b001, 0b001, 0b001, 0b101, 0b010},
+	'K': {0b101, 0b101, 0b110, 0b101, 0b101},
+	'L': {0b100, 0b100, 0b100, 0b100, 0b111},
+	'M': {0b101, 0b111, 0b101, 0b101, 0b101},
+	'N': {0b101, 0b111, 0b111, 0b101, 0b101},
+	'O': {0b010, 0b101, 0b101, 0b101, 0b010},
+	'P': {0b110, 0b101, 0b110, 0b100, 0b100},
+	'Q': {0b010, 0b101, 0b101, 0b111, 0b011},
+	'R': {0b110, 0b101, 0b110, 0b101, 0b101},
+	'S': {0b011, 0b100, 0b010, 0b001, 0b110},
+	'T': {0b111, 0b010, 0b010, 0b010, 0b010},
+	'U': {0b101, 0b101, 0b101, 0b101, 0b111},
+	'V': {0b101, 0b101, 0b101, 0b101, 0b010},
+	'W': {0b101, 0b101, 0b101, 0b111, 0b101},
+	'X': {0b101, 0b101, 0b010, 0b101, 0b101},
+	'Y': {0b101, 0b101, 0b010, 0b010, 0b010},
+	'Z': {0b111, 0b001, 0b010, 0b100, 0b111},
+	'+': {0b000, 0b010, 0b111, 0b010, 0b000},
+	'-': {0b000, 0b000, 0b111, 0b000, 0b000},
+	'*': {0b000, 0b101, 0b010, 0b101, 0b000},
+	' ': {0b000, 0b000, 0b000, 0b000, 0b000},
+}
+
+// getCharPattern returns the 3x5 pixel pattern for a character.
+// Returns a zero pattern for unsupported characters.
+func getCharPattern(ch rune) [5]uint8 {
+	if ch >= '0' && ch <= '9' {
+		return digitPatterns[ch-'0']
+	}
+	// Convert lowercase to uppercase
+	if ch >= 'a' && ch <= 'z' {
+		ch = ch - 'a' + 'A'
+	}
+	if pattern, ok := letterPatterns[ch]; ok {
+		return pattern
+	}
+	return [5]uint8{} // Empty pattern for unsupported characters
+}
+
 // drawOverlay draws an overlay on the output image.
 func (ic *ImageCanvas) drawOverlay(output *image.RGBA, overlay *Overlay) {
 	col := overlay.Color
@@ -432,6 +483,124 @@ func (ic *ImageCanvas) drawLabel(output *image.RGBA, label string, x1, y1, x2, y
 							if px >= bounds.Min.X && px < bounds.Max.X &&
 								py >= bounds.Min.Y && py < bounds.Max.Y {
 								output.Set(px, py, col)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// DrawRotatedLabel draws a label rotated -90 degrees (text reads top-to-bottom).
+// The label is drawn at the specified image coordinates (not zoomed).
+// This function is intended for drawing onto layer images before compositing.
+func DrawRotatedLabel(output *image.RGBA, label string, centerX, centerY int, col color.RGBA, scale int) {
+	if scale < 1 {
+		scale = 1
+	}
+	if scale > 6 {
+		scale = 6
+	}
+
+	// For -90 degree rotation (counterclockwise):
+	// - Original character: 3 wide x 5 tall
+	// - Rotated character: 5 wide x 3 tall
+	charWidth := 5 * scale  // Rotated: original height becomes width
+	charHeight := 3 * scale // Rotated: original width becomes height
+	spacing := scale
+
+	// Total height of rotated label (characters stacked vertically)
+	labelHeight := len(label)*charHeight + (len(label)-1)*spacing
+
+	// Start position for first character at top, drawing downward
+	startX := centerX - charWidth/2
+	startY := centerY - labelHeight/2
+
+	bounds := output.Bounds()
+
+	// Draw each character (reverse order so text reads correctly top-to-bottom after -90 rotation)
+	runes := []rune(label)
+	for i := 0; i < len(runes); i++ {
+		ch := runes[len(runes)-1-i] // Reverse: last char at top
+		pattern := getCharPattern(ch)
+
+		// Character Y position (moving downward for each character)
+		charY := startY + i*(charHeight+spacing)
+
+		// Draw the character pattern rotated -90 degrees (counterclockwise)
+		// Original pattern: row 0-4 (top to bottom), col 0-2 (left to right)
+		// After -90 rotation: top->left, bottom->right, left->bottom, right->top
+		// Mapping: (col, row) -> (row, 2-col)
+		for row := 0; row < 5; row++ {
+			for c := 0; c < 3; c++ {
+				if (pattern[row] & (1 << (2 - c))) != 0 {
+					// px = row (0-4), py = 2-c (0-2)
+					for dy := 0; dy < scale; dy++ {
+						for dx := 0; dx < scale; dx++ {
+							px := startX + row*scale + dx
+							py := charY + (2-c)*scale + dy
+							if px >= bounds.Min.X && px < bounds.Max.X &&
+								py >= bounds.Min.Y && py < bounds.Max.Y {
+								output.Set(px, py, col)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// DrawRotatedLabelWithOpacity draws a label with alpha blending at the specified opacity.
+func DrawRotatedLabelWithOpacity(output *image.RGBA, label string, centerX, centerY int, col color.RGBA, scale int, opacity float64) {
+	if opacity <= 0 {
+		return
+	}
+	if opacity >= 1 {
+		DrawRotatedLabel(output, label, centerX, centerY, col, scale)
+		return
+	}
+
+	if scale < 1 {
+		scale = 1
+	}
+	if scale > 6 {
+		scale = 6
+	}
+
+	charWidth := 5 * scale  // Rotated width
+	charHeight := 3 * scale // Rotated height
+	spacing := scale
+	labelHeight := len(label)*charHeight + (len(label)-1)*spacing
+	startX := centerX - charWidth/2
+	startY := centerY - labelHeight/2
+
+	bounds := output.Bounds()
+
+	// Draw each character (reverse order so text reads correctly top-to-bottom after -90 rotation)
+	runes := []rune(label)
+	for i := 0; i < len(runes); i++ {
+		ch := runes[len(runes)-1-i] // Reverse: last char at top
+		pattern := getCharPattern(ch)
+		charY := startY + i*(charHeight+spacing)
+
+		for row := 0; row < 5; row++ {
+			for c := 0; c < 3; c++ {
+				if (pattern[row] & (1 << (2 - c))) != 0 {
+					for dy := 0; dy < scale; dy++ {
+						for dx := 0; dx < scale; dx++ {
+							px := startX + row*scale + dx
+							py := charY + (2-c)*scale + dy
+							if px >= bounds.Min.X && px < bounds.Max.X &&
+								py >= bounds.Min.Y && py < bounds.Max.Y {
+								// Alpha blend with existing pixel
+								existing := output.RGBAAt(px, py)
+								invAlpha := 1 - opacity
+								r := uint8(float64(col.R)*opacity + float64(existing.R)*invAlpha)
+								g := uint8(float64(col.G)*opacity + float64(existing.G)*invAlpha)
+								b := uint8(float64(col.B)*opacity + float64(existing.B)*invAlpha)
+								output.Set(px, py, color.RGBA{r, g, b, 255})
 							}
 						}
 					}

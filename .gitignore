@@ -30,3 +30,12 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Large scan files
+scans/
+
+# Build output
+build/
+
+# Claude Code settings
+.claude/

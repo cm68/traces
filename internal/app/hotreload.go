@@ -11,11 +11,12 @@ import (
 // when a newer version is detected. This is useful during development to
 // automatically prompt for restart after recompilation.
 type HotReloader struct {
-	execPath    string
-	startupTime time.Time
+	execPath      string
+	startupTime   time.Time
 	checkInterval time.Duration
-	stopCh      chan struct{}
-	onNewBinary func() // Called when newer binary detected
+	stopCh        chan struct{}
+	onNewBinary   func() // Called when newer binary detected
+	onTick        func() // Called on every tick (for periodic saves)
 }
 
 // NewHotReloader creates a new hot reloader that watches the current executable.
@@ -55,6 +56,13 @@ func (h *HotReloader) OnNewBinary(callback func()) {
 	h.onNewBinary = callback
 }
 
+// OnTick sets a callback to invoke on every check interval tick.
+// Use this for periodic saves (e.g., window geometry) that should happen
+// regardless of binary changes.
+func (h *HotReloader) OnTick(callback func()) {
+	h.onTick = callback
+}
+
 // Start begins watching for binary changes in a background goroutine.
 func (h *HotReloader) Start() {
 	// Create a fresh stop channel in case we're restarting
@@ -77,6 +85,12 @@ func (h *HotReloader) watchLoop() {
 		case <-h.stopCh:
 			return
 		case <-ticker.C:
+			// Run periodic tick callback (e.g., save window geometry)
+			if h.onTick != nil {
+				h.onTick()
+			}
+
+			// Check for binary update
 			if h.checkForUpdate() && h.onNewBinary != nil {
 				h.onNewBinary()
 				// Only trigger once - stop watching after detection

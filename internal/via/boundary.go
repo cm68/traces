@@ -1,9 +1,11 @@
 package via
 
 import (
+	"fmt"
 	"image"
 	"math"
 
+	"pcb-tracer/pkg/colorutil"
 	"pcb-tracer/pkg/geometry"
 )
 
@@ -27,21 +29,25 @@ type BoundaryResult struct {
 //
 // Returns the detected boundary, or a default circular result if detection fails.
 func DetectMetalBoundary(img image.Image, clickX, clickY float64, maxRadius float64) BoundaryResult {
+	fmt.Printf("    DetectMetalBoundary: click=(%.1f,%.1f) maxR=%.1f\n", clickX, clickY, maxRadius)
 	bounds := img.Bounds()
 	cx, cy := int(clickX), int(clickY)
 
 	// Clamp to image bounds
 	if cx < bounds.Min.X || cx >= bounds.Max.X || cy < bounds.Min.Y || cy >= bounds.Max.Y {
+		fmt.Printf("    DetectMetalBoundary: OUT OF BOUNDS, returning default\n")
 		return defaultResult(clickX, clickY, maxRadius*0.5)
 	}
 
 	// Check if we clicked on a dark area (inside an open via hole)
 	clickedOnDark := isDarkHole(img, cx, cy)
+	fmt.Printf("    DetectMetalBoundary: clickedOnDark=%v\n", clickedOnDark)
 
 	// Cast rays in many directions from the click point
 	numRays := 64
 	var boundaryPoints []geometry.Point2D
 	maxR := int(maxRadius)
+	foundCount := 0
 
 	for i := 0; i < numRays; i++ {
 		angle := float64(i) * 2.0 * math.Pi / float64(numRays)
@@ -61,22 +67,21 @@ func DetectMetalBoundary(img image.Image, clickX, clickY float64, maxRadius floa
 
 		if found {
 			boundaryPoints = append(boundaryPoints, geometry.Point2D{X: edgeX, Y: edgeY})
+			foundCount++
 		}
 	}
+	fmt.Printf("    DetectMetalBoundary: found %d/%d boundary points\n", foundCount, numRays)
 
 	if len(boundaryPoints) < 4 {
 		// Not enough boundary points found, use default
+		fmt.Printf("    DetectMetalBoundary: NOT ENOUGH POINTS (<4), returning default\n")
 		return defaultResult(clickX, clickY, maxRadius*0.5)
 	}
 
 	// Compute center and radius from boundary points
-	var sumX, sumY float64
-	for _, p := range boundaryPoints {
-		sumX += p.X
-		sumY += p.Y
-	}
-	centerX := sumX / float64(len(boundaryPoints))
-	centerY := sumY / float64(len(boundaryPoints))
+	center := geometry.Centroid(boundaryPoints)
+	centerX := center.X
+	centerY := center.Y
 
 	// Compute radius statistics
 	radii := make([]float64, len(boundaryPoints))
@@ -104,33 +109,35 @@ func DetectMetalBoundary(img image.Image, clickX, clickY float64, maxRadius floa
 	}
 	stdDev := math.Sqrt(sumSqDiff / float64(len(radii)))
 	coeffVar := stdDev / avgRadius
+	radiusSpread := maxRad - minR
+
+	fmt.Printf("    DetectMetalBoundary: center=(%.1f,%.1f)\n", centerX, centerY)
+	fmt.Printf("    DetectMetalBoundary: radii: avg=%.1f min=%.1f max=%.1f spread=%.1f\n",
+		avgRadius, minR, maxRad, radiusSpread)
+	fmt.Printf("    DetectMetalBoundary: circularity: stdDev=%.2f CV=%.3f (threshold=0.20)\n",
+		stdDev, coeffVar)
 
 	// If CV < 0.20, the shape is mostly circular - expand to containing circle
 	// This fills in gaps from visual artifacts (reflections, shadows, etc.)
 	isMostlyCircular := coeffVar < 0.20
 
 	if isMostlyCircular {
-		// Use the max radius (plus small padding) to create a circle that contains all points
-		containingRadius := maxRad
-
-		// Generate smooth circle boundary points
-		circlePoints := make([]geometry.Point2D, numRays)
-		for i := 0; i < numRays; i++ {
-			angle := float64(i) * 2.0 * math.Pi / float64(numRays)
-			circlePoints[i] = geometry.Point2D{
-				X: centerX + containingRadius*math.Cos(angle),
-				Y: centerY + containingRadius*math.Sin(angle),
-			}
-		}
+		fmt.Printf("    DetectMetalBoundary: DECISION: CIRCULAR (CV %.3f < 0.20) → expanding to circle r=%.1f\n",
+			coeffVar, maxRad)
+		fmt.Printf("    DetectMetalBoundary: PROMOTED from manual boundary points to full circle\n")
+		// Use the max radius to create a circle that contains all points
+		circlePoints := geometry.GenerateCirclePoints(centerX, centerY, maxRad, numRays)
 
 		return BoundaryResult{
 			Center:   geometry.Point2D{X: centerX, Y: centerY},
-			Radius:   containingRadius,
+			Radius:   maxRad,
 			Boundary: circlePoints,
 			IsCircle: true,
 		}
 	}
 
+	fmt.Printf("    DetectMetalBoundary: DECISION: IRREGULAR (CV %.3f >= 0.20) → keeping %d raw boundary points\n",
+		coeffVar, len(boundaryPoints))
 	// Not circular enough - keep the irregular boundary points
 	return BoundaryResult{
 		Center:   geometry.Point2D{X: centerX, Y: centerY},
@@ -198,7 +205,7 @@ func isDarkHole(img image.Image, x, y int) bool {
 	r, g, b, _ := img.At(x, y).RGBA()
 	r8, g8, b8 := float64(r>>8), float64(g>>8), float64(b>>8)
 
-	_, _, v := rgbToHSVBoundary(r8, g8, b8)
+	_, _, v := colorutil.RGBToHSV(r8, g8, b8)
 
 	// Dark holes have very low brightness
 	return v < 60
@@ -240,7 +247,7 @@ func isGreenBoard(img image.Image, x, y int) bool {
 	r, g, b, _ := img.At(x, y).RGBA()
 	r8, g8, b8 := float64(r>>8), float64(g>>8), float64(b>>8)
 
-	h, s, v := rgbToHSVBoundary(r8, g8, b8)
+	h, s, v := colorutil.RGBToHSV(r8, g8, b8)
 
 	// Green hue range: 30-75 in 0-180 scale (60-150 degrees)
 	// Allow some tolerance for different PCB colors
@@ -256,48 +263,17 @@ func isGreenBoard(img image.Image, x, y int) bool {
 }
 
 // defaultResult returns a default circular result when detection fails.
+// It generates circle boundary points to ensure consistent polygon rendering.
 func defaultResult(x, y, radius float64) BoundaryResult {
+	// Generate circle boundary points so we always have a polygon
+	// This ensures consistent rendering with black centered labels
+	circlePoints := geometry.GenerateCirclePoints(x, y, radius, 64)
 	return BoundaryResult{
 		Center:   geometry.Point2D{X: x, Y: y},
 		Radius:   radius,
+		Boundary: circlePoints,
 		IsCircle: true,
 	}
-}
-
-// rgbToHSVBoundary converts RGB (0-255) to HSV (H: 0-180, S: 0-255, V: 0-255).
-func rgbToHSVBoundary(r, g, b float64) (h, s, v float64) {
-	r /= 255.0
-	g /= 255.0
-	b /= 255.0
-
-	maxC := math.Max(r, math.Max(g, b))
-	minC := math.Min(r, math.Min(g, b))
-	diff := maxC - minC
-
-	v = maxC * 255.0
-
-	if maxC == 0 {
-		s = 0
-	} else {
-		s = (diff / maxC) * 255.0
-	}
-
-	if diff == 0 {
-		h = 0
-	} else if maxC == r {
-		h = 60 * math.Mod((g-b)/diff, 6)
-	} else if maxC == g {
-		h = 60 * ((b-r)/diff + 2)
-	} else {
-		h = 60 * ((r-g)/diff + 4)
-	}
-
-	if h < 0 {
-		h += 360
-	}
-	h = h / 2 // Convert to 0-180 range
-
-	return h, s, v
 }
 
 // MergeBoundaries combines two boundary results into one.
@@ -311,29 +287,14 @@ func MergeBoundaries(a, b BoundaryResult) BoundaryResult {
 	if len(a.Boundary) > 0 {
 		allPoints = append(allPoints, a.Boundary...)
 	} else if a.Radius > 0 {
-		// Generate circle points
-		numPoints := 32
-		for i := 0; i < numPoints; i++ {
-			angle := float64(i) * 2.0 * math.Pi / float64(numPoints)
-			allPoints = append(allPoints, geometry.Point2D{
-				X: a.Center.X + a.Radius*math.Cos(angle),
-				Y: a.Center.Y + a.Radius*math.Sin(angle),
-			})
-		}
+		allPoints = append(allPoints, geometry.GenerateCirclePoints(a.Center.X, a.Center.Y, a.Radius, 32)...)
 	}
 
 	// Add points from second boundary (or generate circle points if circular)
 	if len(b.Boundary) > 0 {
 		allPoints = append(allPoints, b.Boundary...)
 	} else if b.Radius > 0 {
-		numPoints := 32
-		for i := 0; i < numPoints; i++ {
-			angle := float64(i) * 2.0 * math.Pi / float64(numPoints)
-			allPoints = append(allPoints, geometry.Point2D{
-				X: b.Center.X + b.Radius*math.Cos(angle),
-				Y: b.Center.Y + b.Radius*math.Sin(angle),
-			})
-		}
+		allPoints = append(allPoints, geometry.GenerateCirclePoints(b.Center.X, b.Center.Y, b.Radius, 32)...)
 	}
 
 	if len(allPoints) < 3 {
@@ -348,18 +309,12 @@ func MergeBoundaries(a, b BoundaryResult) BoundaryResult {
 	hull := convexHull(allPoints)
 
 	// Compute center from all points (more stable than hull center)
-	var sumX, sumY float64
-	for _, p := range allPoints {
-		sumX += p.X
-		sumY += p.Y
-	}
-	centerX := sumX / float64(len(allPoints))
-	centerY := sumY / float64(len(allPoints))
+	center := geometry.Centroid(allPoints)
 
 	// Compute max radius from center to any point
 	var maxR float64
 	for _, p := range allPoints {
-		r := math.Sqrt((p.X-centerX)*(p.X-centerX) + (p.Y-centerY)*(p.Y-centerY))
+		r := center.Distance(p)
 		if r > maxR {
 			maxR = r
 		}
@@ -367,26 +322,17 @@ func MergeBoundaries(a, b BoundaryResult) BoundaryResult {
 
 	// If hull is degenerate (< 3 points), generate a circle instead
 	if len(hull) < 3 {
-		containingRadius := maxR
-		numPoints := 64
-		circlePoints := make([]geometry.Point2D, numPoints)
-		for i := 0; i < numPoints; i++ {
-			angle := float64(i) * 2.0 * math.Pi / float64(numPoints)
-			circlePoints[i] = geometry.Point2D{
-				X: centerX + containingRadius*math.Cos(angle),
-				Y: centerY + containingRadius*math.Sin(angle),
-			}
-		}
+		circlePoints := geometry.GenerateCirclePoints(center.X, center.Y, maxR, 64)
 		return BoundaryResult{
-			Center:   geometry.Point2D{X: centerX, Y: centerY},
-			Radius:   containingRadius,
+			Center:   center,
+			Radius:   maxR,
 			Boundary: circlePoints,
 			IsCircle: true,
 		}
 	}
 
 	return BoundaryResult{
-		Center:   geometry.Point2D{X: centerX, Y: centerY},
+		Center:   center,
 		Radius:   maxR,
 		Boundary: hull,
 		IsCircle: false,

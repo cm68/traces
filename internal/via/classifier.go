@@ -5,6 +5,7 @@ import (
 	"math"
 
 	pcbimage "pcb-tracer/internal/image"
+	"pcb-tracer/pkg/colorutil"
 	"pcb-tracer/pkg/geometry"
 )
 
@@ -173,7 +174,7 @@ func (c *ViaClassifier) extractFeatures(img image.Image, center geometry.Point2D
 			g8 := float64(g >> 8)
 			b8 := float64(b >> 8)
 
-			h, s, v := rgbToHSV(r8, g8, b8)
+			h, s, v := colorutil.RGBToHSV(r8, g8, b8)
 			hues = append(hues, h)
 			sats = append(sats, s)
 			vals = append(vals, v)
@@ -453,43 +454,6 @@ func stdDev(values []float64) float64 {
 		sumSq += diff * diff
 	}
 	return math.Sqrt(sumSq / float64(len(values)))
-}
-
-// rgbToHSV converts RGB (0-255) to HSV (OpenCV convention: H 0-180, S 0-255, V 0-255).
-func rgbToHSV(r, g, b float64) (h, s, v float64) {
-	r /= 255.0
-	g /= 255.0
-	b /= 255.0
-
-	maxC := math.Max(r, math.Max(g, b))
-	minC := math.Min(r, math.Min(g, b))
-	diff := maxC - minC
-
-	v = maxC * 255.0 // V in 0-255
-
-	if maxC == 0 {
-		s = 0
-	} else {
-		s = (diff / maxC) * 255.0 // S in 0-255
-	}
-
-	if diff == 0 {
-		h = 0
-	} else if maxC == r {
-		h = 60 * math.Mod((g-b)/diff, 6)
-	} else if maxC == g {
-		h = 60 * ((b-r)/diff + 2)
-	} else {
-		h = 60 * ((r-g)/diff + 4)
-	}
-
-	if h < 0 {
-		h += 360
-	}
-
-	h = h / 2 // Convert to OpenCV's 0-180 range
-
-	return h, s, v
 }
 
 // FilterWithClassifier re-scores detected vias using the classifier.

@@ -205,3 +205,54 @@ type Size struct {
 func NewSize(width, height float64) Size {
 	return Size{Width: width, Height: height}
 }
+
+// GenerateCirclePoints generates n evenly-spaced points around a circle.
+func GenerateCirclePoints(centerX, centerY, radius float64, n int) []Point2D {
+	points := make([]Point2D, n)
+	for i := 0; i < n; i++ {
+		angle := float64(i) * 2.0 * math.Pi / float64(n)
+		points[i] = Point2D{
+			X: centerX + radius*math.Cos(angle),
+			Y: centerY + radius*math.Sin(angle),
+		}
+	}
+	return points
+}
+
+// Centroid computes the centroid (average position) of a set of points.
+func Centroid(points []Point2D) Point2D {
+	if len(points) == 0 {
+		return Point2D{}
+	}
+	var sumX, sumY float64
+	for _, p := range points {
+		sumX += p.X
+		sumY += p.Y
+	}
+	n := float64(len(points))
+	return Point2D{X: sumX / n, Y: sumY / n}
+}
+
+// BoundingBox computes the axis-aligned bounding box of a set of points.
+func BoundingBox(points []Point2D) Rect {
+	if len(points) == 0 {
+		return Rect{}
+	}
+	minX, minY := points[0].X, points[0].Y
+	maxX, maxY := minX, minY
+	for _, p := range points[1:] {
+		if p.X < minX {
+			minX = p.X
+		}
+		if p.X > maxX {
+			maxX = p.X
+		}
+		if p.Y < minY {
+			minY = p.Y
+		}
+		if p.Y > maxY {
+			maxY = p.Y
+		}
+	}
+	return Rect{X: minX, Y: minY, Width: maxX - minX, Height: maxY - minY}
+}

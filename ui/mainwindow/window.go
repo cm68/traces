@@ -18,9 +18,12 @@ import (
 )
 
 const (
-	prefKeyLastDir    = "lastDirectory"
-	prefKeyFrontImage = "lastFrontImage"
-	prefKeyBackImage  = "lastBackImage"
+	prefKeyLastDir      = "lastDirectory"
+	prefKeyFrontImage   = "lastFrontImage"
+	prefKeyBackImage    = "lastBackImage"
+	prefKeyWindowWidth  = "windowWidth"
+	prefKeyWindowHeight = "windowHeight"
+	prefKeyZoom         = "zoom"
 )
 
 // MainWindow is the primary application window.
@@ -34,6 +37,10 @@ type MainWindow struct {
 
 	// Menu items that need state tracking
 	fitToWindowItem *fyne.MenuItem
+
+	// Track last saved size for change detection
+	lastSavedWidth  float32
+	lastSavedHeight float32
 }
 
 // New creates a new main window.
@@ -49,6 +56,12 @@ func New(fyneApp fyne.App, state *app.State) *MainWindow {
 	mw.setupUI()
 	mw.setupMenus()
 	mw.setupEventHandlers()
+
+	// Save window size on close
+	win.SetCloseIntercept(func() {
+		mw.saveWindowSize()
+		fyneApp.Quit()
+	})
 
 	return mw
 }
@@ -67,6 +80,18 @@ func (mw *MainWindow) setupUI() {
 
 	// Create toolbar with zoom controls
 	toolbar := mw.createToolbar()
+
+	// Restore window size from preferences
+	mw.restoreWindowSize()
+
+	// Set up zoom change callback to save zoom
+	mw.canvas.OnZoomChange(func(zoom float64) {
+		fmt.Printf("OnZoomChange: saving zoom=%.3f\n", zoom)
+		mw.app.Preferences().SetFloat(prefKeyZoom, zoom)
+	})
+
+	// Restore zoom from preferences
+	mw.restoreZoom()
 
 	// Restore last images from preferences
 	mw.restoreLastImages()
@@ -247,6 +272,68 @@ func (mw *MainWindow) getLastDir() fyne.ListableURI {
 func (mw *MainWindow) saveLastDir(filePath string) {
 	dir := filepath.Dir(filePath)
 	mw.app.Preferences().SetString(prefKeyLastDir, dir)
+}
+
+// restoreWindowSize restores the window size from preferences.
+func (mw *MainWindow) restoreWindowSize() {
+	width := mw.app.Preferences().Float(prefKeyWindowWidth)
+	height := mw.app.Preferences().Float(prefKeyWindowHeight)
+
+	fmt.Printf("restoreWindowSize: saved width=%.1f height=%.1f\n", width, height)
+
+	if width > 100 && height > 100 {
+		mw.Resize(fyne.NewSize(float32(width), float32(height)))
+		fmt.Printf("restoreWindowSize: restored to %.1fx%.1f\n", width, height)
+	} else {
+		// Default size
+		mw.Resize(fyne.NewSize(1200, 800))
+		fmt.Println("restoreWindowSize: using default 1200x800")
+	}
+}
+
+// saveWindowSize saves the current window size to preferences.
+func (mw *MainWindow) saveWindowSize() {
+	// Use window size, not canvas size (canvas is content area only)
+	size := mw.Window.Canvas().Size()
+	fmt.Printf("saveWindowSize: saving %.1fx%.1f\n", size.Width, size.Height)
+	mw.app.Preferences().SetFloat(prefKeyWindowWidth, float64(size.Width))
+	mw.app.Preferences().SetFloat(prefKeyWindowHeight, float64(size.Height))
+}
+
+// SavePreferences saves window size and zoom to preferences.
+// Call this before hot reload restart to preserve UI state.
+func (mw *MainWindow) SavePreferences() {
+	mw.saveWindowSize()
+	// Zoom is already saved on every change via OnZoomChange callback
+	fmt.Println("SavePreferences: saved window size and zoom")
+}
+
+// SavePreferencesIfChanged saves window geometry only if it has changed.
+// Called periodically by the hot reload timer.
+func (mw *MainWindow) SavePreferencesIfChanged() {
+	size := mw.Window.Canvas().Size()
+	if size.Width != mw.lastSavedWidth || size.Height != mw.lastSavedHeight {
+		if size.Width > 100 && size.Height > 100 {
+			fmt.Printf("SavePreferencesIfChanged: %.0fx%.0f -> %.0fx%.0f\n",
+				mw.lastSavedWidth, mw.lastSavedHeight, size.Width, size.Height)
+			mw.app.Preferences().SetFloat(prefKeyWindowWidth, float64(size.Width))
+			mw.app.Preferences().SetFloat(prefKeyWindowHeight, float64(size.Height))
+			mw.lastSavedWidth = size.Width
+			mw.lastSavedHeight = size.Height
+		}
+	}
+}
+
+// restoreZoom restores the zoom level from preferences.
+func (mw *MainWindow) restoreZoom() {
+	zoom := mw.app.Preferences().Float(prefKeyZoom)
+	fmt.Printf("restoreZoom: saved zoom=%.3f\n", zoom)
+	if zoom >= 0.1 && zoom <= 10.0 {
+		mw.canvas.SetZoom(zoom)
+		fmt.Printf("restoreZoom: restored to %.3f\n", zoom)
+	} else {
+		fmt.Println("restoreZoom: using default zoom (no valid saved value)")
+	}
 }
 
 // restoreLastImages loads the previously used front and back images.

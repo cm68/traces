@@ -7,12 +7,16 @@ import (
 	"image/color"
 	"math"
 	"path/filepath"
+	"runtime"
+	"sync"
+	"time"
 
 	"pcb-tracer/internal/alignment"
 	"pcb-tracer/internal/app"
 	"pcb-tracer/internal/board"
 	pcbimage "pcb-tracer/internal/image"
 	"pcb-tracer/internal/via"
+	"pcb-tracer/pkg/colorutil"
 	"pcb-tracer/pkg/geometry"
 	"pcb-tracer/ui/canvas"
 	"pcb-tracer/ui/dialogs"
@@ -385,7 +389,7 @@ func (ip *ImportPanel) onDetectContacts() {
 				searchColor = color.RGBA{R: 255, G: 105, B: 180, A: 255} // Pink
 				searchOverlayName = "front_search_area"
 			} else {
-				searchColor = color.RGBA{R: 255, G: 0, B: 255, A: 255} // Magenta
+				searchColor = colorutil.Magenta
 				searchOverlayName = "back_search_area"
 			}
 			searchOverlay := &canvas.Overlay{
@@ -925,7 +929,7 @@ func extractHSVStats(img image.Image, x1, y1, x2, y2 int) hsvStats {
 			g8 := float64(g >> 8)
 			b8 := float64(b >> 8)
 
-			h, s, v := rgbToHSV(r8, g8, b8)
+			h, s, v := colorutil.RGBToHSV(r8, g8, b8)
 			hues = append(hues, h)
 			sats = append(sats, s)
 			vals = append(vals, v)
@@ -998,43 +1002,6 @@ func maxFloat(a, b float64) float64 {
 		return a
 	}
 	return b
-}
-
-// rgbToHSV converts RGB (0-255) to HSV (OpenCV convention: H 0-180, S 0-255, V 0-255).
-func rgbToHSV(r, g, b float64) (h, s, v float64) {
-	r /= 255.0
-	g /= 255.0
-	b /= 255.0
-
-	maxC := math.Max(r, math.Max(g, b))
-	minC := math.Min(r, math.Min(g, b))
-	diff := maxC - minC
-
-	v = maxC * 255.0 // V in 0-255
-
-	if maxC == 0 {
-		s = 0
-	} else {
-		s = (diff / maxC) * 255.0 // S in 0-255
-	}
-
-	if diff == 0 {
-		h = 0
-	} else if maxC == r {
-		h = 60 * math.Mod((g-b)/diff, 6)
-	} else if maxC == g {
-		h = 60 * ((b-r)/diff + 2)
-	} else {
-		h = 60 * ((r-g)/diff + 4)
-	}
-
-	if h < 0 {
-		h += 360
-	}
-
-	h = h / 2 // Convert to OpenCV's 0-180 range
-
-	return h, s, v
 }
 
 // Container returns the panel container.
@@ -1194,7 +1161,7 @@ func (ip *ImportPanel) performAlignment(frontContacts, backContacts []alignment.
 
 	// Draw ejector mark overlays
 	ip.createEjectorOverlay("front_ejectors", frontMarks, color.RGBA{R: 255, G: 255, B: 0, A: 255})
-	ip.createEjectorOverlay("back_ejectors", backMarks, color.RGBA{R: 0, G: 255, B: 255, A: 255})
+	ip.createEjectorOverlay("back_ejectors", backMarks, colorutil.Cyan)
 
 	var finalImage image.Image = translatedBack
 	var alignInfo string
@@ -1537,7 +1504,14 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas) *TracesPanel {
 	}
 
 	// Via detection UI
-	tp.viaLayerSelect = widget.NewRadioGroup([]string{"Front", "Back"}, nil)
+	tp.viaLayerSelect = widget.NewRadioGroup([]string{"Front", "Back"}, func(selected string) {
+		// Raise the selected layer to the top
+		if selected == "Front" {
+			cvs.RaiseLayerBySide(pcbimage.SideFront)
+		} else {
+			cvs.RaiseLayerBySide(pcbimage.SideBack)
+		}
+	})
 	tp.viaLayerSelect.SetSelected("Front")
 	tp.viaLayerSelect.Horizontal = true
 
@@ -1649,6 +1623,49 @@ func (tp *TracesPanel) onDetectVias() {
 			return
 		}
 
+		// Post-process: detect metal boundaries for each via (parallel)
+		// This gives us polygon boundaries instead of just circles
+		numVias := len(result.Vias)
+		fmt.Printf("Post-processing %d detected vias to find metal boundaries (parallel)...\n", numVias)
+		maxRadius := 0.030 * dpi // 30 mil search radius
+
+		startTime := time.Now()
+		numWorkers := runtime.NumCPU()
+		if numWorkers > numVias {
+			numWorkers = numVias
+		}
+		if numWorkers < 1 {
+			numWorkers = 1
+		}
+
+		var wg sync.WaitGroup
+		viaChan := make(chan int, numVias)
+
+		// Start workers
+		for w := 0; w < numWorkers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := range viaChan {
+					v := &result.Vias[i]
+					boundary := via.DetectMetalBoundary(img.Image, v.Center.X, v.Center.Y, maxRadius)
+					v.PadBoundary = boundary.Boundary
+					v.Center = boundary.Center
+					v.Radius = boundary.Radius
+				}
+			}()
+		}
+
+		// Send work
+		for i := range result.Vias {
+			viaChan <- i
+		}
+		close(viaChan)
+
+		wg.Wait()
+		elapsed := time.Since(startTime)
+		fmt.Printf("Post-processing complete (%d workers, %.1fms)\n", numWorkers, float64(elapsed.Microseconds())/1000)
+
 		// Add to features layer
 		tp.state.FeaturesLayer.AddVias(result.Vias)
 
@@ -1682,15 +1699,16 @@ func (tp *TracesPanel) onDetectVias() {
 // createViaOverlay creates a canvas overlay to visualize detected vias.
 // Uses polygons for vias with boundary points, rectangles for circular vias.
 func (tp *TracesPanel) createViaOverlay(vias []via.Via, side pcbimage.Side) {
+	fmt.Printf("  createViaOverlay: %d vias for side=%v\n", len(vias), side)
 	var overlayName string
 	var overlayColor color.RGBA
 
 	if side == pcbimage.SideFront {
 		overlayName = "front_vias"
-		overlayColor = color.RGBA{R: 0, G: 255, B: 255, A: 255} // Cyan
+		overlayColor = colorutil.Cyan
 	} else {
 		overlayName = "back_vias"
-		overlayColor = color.RGBA{R: 255, G: 0, B: 255, A: 255} // Magenta
+		overlayColor = colorutil.Magenta
 	}
 
 	overlay := &canvas.Overlay{
@@ -1701,14 +1719,30 @@ func (tp *TracesPanel) createViaOverlay(vias []via.Via, side pcbimage.Side) {
 
 	for _, v := range vias {
 		// Extract via number from ID for label
+		// Handle both "via-001" (manual) and "via-f-001" (detected) formats
 		label := v.ID
 		var viaNum int
 		if _, err := fmt.Sscanf(v.ID, "via-%d", &viaNum); err == nil {
 			label = fmt.Sprintf("%d", viaNum)
+		} else {
+			// Try format with side letter: "via-f-001" or "via-b-001"
+			var side string
+			if _, err := fmt.Sscanf(v.ID, "via-%1s-%d", &side, &viaNum); err == nil {
+				label = fmt.Sprintf("%d", viaNum)
+			}
 		}
 
 		// Use polygon if we have boundary points, otherwise use rectangle
 		if len(v.PadBoundary) >= 3 {
+			fmt.Printf("    Via %s: POLYGON with %d points\n", v.ID, len(v.PadBoundary))
+			// Print first few boundary points for debugging
+			for i := 0; i < len(v.PadBoundary) && i < 3; i++ {
+				p := v.PadBoundary[i]
+				fmt.Printf("      pt[%d]: (%.1f, %.1f)\n", i, p.X, p.Y)
+			}
+			if len(v.PadBoundary) > 3 {
+				fmt.Printf("      ... and %d more points\n", len(v.PadBoundary)-3)
+			}
 			overlay.Polygons = append(overlay.Polygons, canvas.OverlayPolygon{
 				Points: v.PadBoundary,
 				Label:  label,
@@ -1717,6 +1751,7 @@ func (tp *TracesPanel) createViaOverlay(vias []via.Via, side pcbimage.Side) {
 		} else {
 			// Fall back to rectangle for circular vias without boundary
 			bounds := v.Bounds()
+			fmt.Printf("    Via %s: RECT at (%d,%d) %dx%d\n", v.ID, bounds.X, bounds.Y, bounds.Width, bounds.Height)
 
 			// Determine fill based on detection method
 			var fill canvas.FillPattern
@@ -1740,6 +1775,7 @@ func (tp *TracesPanel) createViaOverlay(vias []via.Via, side pcbimage.Side) {
 		}
 	}
 
+	fmt.Printf("  Setting overlay '%s': %d rects, %d polygons\n", overlayName, len(overlay.Rectangles), len(overlay.Polygons))
 	tp.canvas.SetOverlay(overlayName, overlay)
 }
 
@@ -1789,6 +1825,8 @@ func (tp *TracesPanel) updateTrainingLabel() {
 // onLeftClickVia handles left-click to add a via at the clicked location.
 // If the click is near an existing via, the new boundary is merged with it.
 func (tp *TracesPanel) onLeftClickVia(x, y float64) {
+	fmt.Printf("\n=== LEFT CLICK VIA at (%.1f, %.1f) ===\n", x, y)
+
 	// Determine which side based on current layer selection
 	isFront := tp.viaLayerSelect.Selected == "Front"
 	var side pcbimage.Side
@@ -1796,12 +1834,15 @@ func (tp *TracesPanel) onLeftClickVia(x, y float64) {
 	if isFront {
 		side = pcbimage.SideFront
 		img = tp.state.FrontImage
+		fmt.Printf("  Side: FRONT\n")
 	} else {
 		side = pcbimage.SideBack
 		img = tp.state.BackImage
+		fmt.Printf("  Side: BACK\n")
 	}
 
 	if img == nil {
+		fmt.Printf("  ERROR: No image loaded for this side\n")
 		tp.viaStatusLabel.SetText("No image loaded for this side")
 		return
 	}
@@ -1811,9 +1852,13 @@ func (tp *TracesPanel) onLeftClickVia(x, y float64) {
 	if tp.state.DPI > 0 {
 		maxRadius = 0.030 * tp.state.DPI // 30 mil search radius
 	}
+	fmt.Printf("  Max search radius: %.1f px (DPI=%.0f)\n", maxRadius, tp.state.DPI)
 
 	// Detect metal boundary around the clicked point
+	fmt.Printf("  Calling DetectMetalBoundary...\n")
 	boundary := via.DetectMetalBoundary(img.Image, x, y, maxRadius)
+	fmt.Printf("  Boundary result: center=(%.1f,%.1f) radius=%.1f isCircle=%v boundaryPts=%d\n",
+		boundary.Center.X, boundary.Center.Y, boundary.Radius, boundary.IsCircle, len(boundary.Boundary))
 
 	// Check if click is near an existing via - if so, merge boundaries
 	// Use 1mm tolerance (1mm = ~0.03937 inches)
@@ -1821,7 +1866,9 @@ func (tp *TracesPanel) onLeftClickVia(x, y float64) {
 	if tp.state.DPI > 0 {
 		mergeTolerance = 0.03937 * tp.state.DPI // 1mm in pixels
 	}
+	fmt.Printf("  Checking for nearby vias (tolerance=%.1f px)...\n", mergeTolerance)
 	vias := tp.state.FeaturesLayer.GetViasBySide(side)
+	fmt.Printf("  Existing vias on this side: %d\n", len(vias))
 	var nearestVia *via.Via
 	nearestDist := mergeTolerance * mergeTolerance
 
@@ -1837,6 +1884,7 @@ func (tp *TracesPanel) onLeftClickVia(x, y float64) {
 	}
 
 	if nearestVia != nil {
+		fmt.Printf("  MERGE: Found nearby via %s at dist=%.1f\n", nearestVia.ID, math.Sqrt(nearestDist))
 		// Merge with existing via
 		existingBoundary := via.BoundaryResult{
 			Center:   nearestVia.Center,
@@ -1844,8 +1892,12 @@ func (tp *TracesPanel) onLeftClickVia(x, y float64) {
 			Boundary: nearestVia.PadBoundary,
 			IsCircle: len(nearestVia.PadBoundary) == 0,
 		}
+		fmt.Printf("  Existing boundary: pts=%d radius=%.1f\n", len(existingBoundary.Boundary), existingBoundary.Radius)
 
+		fmt.Printf("  Calling MergeBoundaries...\n")
 		merged := via.MergeBoundaries(existingBoundary, boundary)
+		fmt.Printf("  Merged result: center=(%.1f,%.1f) radius=%.1f pts=%d\n",
+			merged.Center.X, merged.Center.Y, merged.Radius, len(merged.Boundary))
 
 		// Update the existing via with merged boundary
 		tp.state.FeaturesLayer.RemoveVia(nearestVia.ID)
@@ -1860,16 +1912,20 @@ func (tp *TracesPanel) onLeftClickVia(x, y float64) {
 			PadBoundary: merged.Boundary,
 		}
 		tp.state.FeaturesLayer.AddVia(updatedVia)
+		fmt.Printf("  Updated via %s with %d boundary points\n", updatedVia.ID, len(updatedVia.PadBoundary))
 
+		fmt.Printf("  Calling refreshViaOverlay...\n")
 		tp.refreshViaOverlay(side)
 		front, back := tp.state.FeaturesLayer.ViaCountBySide()
 		tp.viaCountLabel.SetText(fmt.Sprintf("Vias: %d front, %d back", front, back))
 		tp.viaStatusLabel.SetText(fmt.Sprintf("Expanded %s (r=%.0f)", nearestVia.ID, merged.Radius))
 		tp.state.Emit(app.EventFeaturesChanged, nil)
+		fmt.Printf("  MERGE COMPLETE\n")
 		return
 	}
 
 	// No nearby via - create a new one
+	fmt.Printf("  NEW VIA: No nearby via found, creating new one\n")
 	viaNum := tp.state.FeaturesLayer.NextViaNumber()
 
 	// Create manual via with detected boundary
@@ -1883,6 +1939,7 @@ func (tp *TracesPanel) onLeftClickVia(x, y float64) {
 		Circularity: 1.0,
 		PadBoundary: boundary.Boundary,
 	}
+	fmt.Printf("  Created via %s with %d boundary points\n", newVia.ID, len(newVia.PadBoundary))
 
 	// Add to features layer
 	tp.state.FeaturesLayer.AddVia(newVia)
@@ -1897,6 +1954,7 @@ func (tp *TracesPanel) onLeftClickVia(x, y float64) {
 	}
 
 	// Update overlay
+	fmt.Printf("  Calling refreshViaOverlay...\n")
 	tp.refreshViaOverlay(side)
 
 	// Update counts
@@ -1905,6 +1963,7 @@ func (tp *TracesPanel) onLeftClickVia(x, y float64) {
 
 	tp.viaStatusLabel.SetText(fmt.Sprintf("Added %s (r=%.0f)", newVia.ID, boundary.Radius))
 	tp.state.Emit(app.EventFeaturesChanged, nil)
+	fmt.Printf("  NEW VIA COMPLETE\n")
 }
 
 // onRightClickVia handles right-click to remove a via at the clicked location.

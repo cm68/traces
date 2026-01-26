@@ -9,7 +9,6 @@ import (
 	"pcb-tracer/internal/app"
 	"pcb-tracer/ui/mainwindow"
 
-	"fyne.io/fyne/v2"
 	fyneapp "fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/dialog"
 )
@@ -32,11 +31,9 @@ func main() {
 	// Create application state
 	appState := app.NewState()
 
-	// Create main window
+	// Create main window (size is restored from preferences in New())
 	mainWin := mainwindow.New(fyneApp, appState)
 	mainWin.SetTitle(appTitle)
-	mainWin.Resize(fyne.NewSize(1400, 900))
-	mainWin.CenterOnScreen()
 
 	// Handle command line arguments
 	if len(os.Args) > 1 {
@@ -54,7 +51,7 @@ func main() {
 }
 
 // setupHotReload configures automatic restart detection when the binary is recompiled.
-func setupHotReload(win fyne.Window) {
+func setupHotReload(win *mainwindow.MainWindow) {
 	reloader := app.NewHotReloader(2 * time.Second)
 	if reloader == nil {
 		log.Println("Hot reload: unable to determine executable path")
@@ -64,6 +61,11 @@ func setupHotReload(win fyne.Window) {
 	log.Printf("Hot reload: watching %s (modified %s)",
 		reloader.ExecPath(), reloader.StartupTime().Format("15:04:05"))
 
+	// Save window geometry on every tick (if changed)
+	reloader.OnTick(func() {
+		win.SavePreferencesIfChanged()
+	})
+
 	reloader.OnNewBinary(func() {
 		log.Println("Hot reload: newer binary detected")
 		// Show dialog on main thread
@@ -72,6 +74,8 @@ func setupHotReload(win fyne.Window) {
 			"The application binary has been updated.\nRestart now?",
 			func(restart bool) {
 				if restart {
+					log.Println("Hot reload: saving preferences before restart...")
+					win.SavePreferences()
 					log.Println("Hot reload: restarting...")
 					if err := reloader.Restart(); err != nil {
 						log.Printf("Hot reload: restart failed: %v", err)

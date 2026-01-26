@@ -87,6 +87,7 @@ const (
 	EventFeaturesChanged
 	EventSelectionChanged
 	EventBusChanged
+	EventConfirmedViasChanged
 )
 
 // EventListener is called when an event occurs.

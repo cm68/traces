@@ -23,6 +23,10 @@ type DetectedFeaturesLayer struct {
 	vias   []string // Via feature IDs
 	traces []string // Trace feature IDs
 
+	// Confirmed vias (detected on both sides)
+	confirmedVias    []string                    // Confirmed via IDs
+	confirmedViasMap map[string]*via.ConfirmedVia // ID -> ConfirmedVia
+
 	// Bus definitions
 	Buses map[string]*Bus
 
@@ -37,13 +41,15 @@ type DetectedFeaturesLayer struct {
 // NewDetectedFeaturesLayer creates a new empty features layer.
 func NewDetectedFeaturesLayer() *DetectedFeaturesLayer {
 	return &DetectedFeaturesLayer{
-		features: make(map[string]*FeatureRef),
-		vias:     make([]string, 0),
-		traces:   make([]string, 0),
-		Buses:    make(map[string]*Bus),
-		Opacity:  0.7, // Default 70% opacity
-		Visible:  true,
-		selected: make(map[string]bool),
+		features:         make(map[string]*FeatureRef),
+		vias:             make([]string, 0),
+		traces:           make([]string, 0),
+		confirmedVias:    make([]string, 0),
+		confirmedViasMap: make(map[string]*via.ConfirmedVia),
+		Buses:            make(map[string]*Bus),
+		Opacity:          0.7, // Default 70% opacity
+		Visible:          true,
+		selected:         make(map[string]bool),
 	}
 }
 
@@ -119,7 +125,133 @@ func (l *DetectedFeaturesLayer) Clear() {
 	l.features = make(map[string]*FeatureRef)
 	l.vias = l.vias[:0]
 	l.traces = l.traces[:0]
+	l.confirmedVias = l.confirmedVias[:0]
+	l.confirmedViasMap = make(map[string]*via.ConfirmedVia)
 	l.selected = make(map[string]bool)
+}
+
+// AddConfirmedVia adds a confirmed via to the layer.
+func (l *DetectedFeaturesLayer) AddConfirmedVia(cv *via.ConfirmedVia) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.confirmedViasMap[cv.ID] = cv
+	l.confirmedVias = append(l.confirmedVias, cv.ID)
+}
+
+// GetConfirmedVias returns all confirmed vias.
+func (l *DetectedFeaturesLayer) GetConfirmedVias() []*via.ConfirmedVia {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	result := make([]*via.ConfirmedVia, 0, len(l.confirmedVias))
+	for _, id := range l.confirmedVias {
+		if cv := l.confirmedViasMap[id]; cv != nil {
+			result = append(result, cv)
+		}
+	}
+	return result
+}
+
+// GetConfirmedViaByID returns a confirmed via by ID.
+func (l *DetectedFeaturesLayer) GetConfirmedViaByID(id string) *via.ConfirmedVia {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.confirmedViasMap[id]
+}
+
+// ClearConfirmedVias removes all confirmed vias from the layer.
+func (l *DetectedFeaturesLayer) ClearConfirmedVias() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.confirmedVias = l.confirmedVias[:0]
+	l.confirmedViasMap = make(map[string]*via.ConfirmedVia)
+}
+
+// RemoveConfirmedVia removes a confirmed via by ID.
+func (l *DetectedFeaturesLayer) RemoveConfirmedVia(id string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if _, exists := l.confirmedViasMap[id]; !exists {
+		return false
+	}
+
+	delete(l.confirmedViasMap, id)
+
+	// Remove from list
+	for i, cvid := range l.confirmedVias {
+		if cvid == id {
+			l.confirmedVias = append(l.confirmedVias[:i], l.confirmedVias[i+1:]...)
+			break
+		}
+	}
+
+	return true
+}
+
+// ConfirmedViaCount returns the number of confirmed vias.
+func (l *DetectedFeaturesLayer) ConfirmedViaCount() int {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return len(l.confirmedVias)
+}
+
+// NextConfirmedViaNumber returns the next sequential confirmed via number.
+func (l *DetectedFeaturesLayer) NextConfirmedViaNumber() int {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	maxNum := 0
+	for _, id := range l.confirmedVias {
+		var num int
+		if _, err := fmt.Sscanf(id, "cvia-%d", &num); err == nil {
+			if num > maxNum {
+				maxNum = num
+			}
+		}
+	}
+	return maxNum + 1
+}
+
+// HitTestConfirmedVia finds the confirmed via at the given coordinates.
+func (l *DetectedFeaturesLayer) HitTestConfirmedVia(x, y float64) *via.ConfirmedVia {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	for _, id := range l.confirmedVias {
+		if cv := l.confirmedViasMap[id]; cv != nil {
+			if cv.HitTest(x, y) {
+				return cv
+			}
+		}
+	}
+	return nil
+}
+
+// GetViaByID returns a via by its ID.
+func (l *DetectedFeaturesLayer) GetViaByID(id string) *via.Via {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	if ref := l.features[id]; ref != nil {
+		if vf, ok := ref.Feature.(ViaFeature); ok {
+			v := vf.Via
+			return &v
+		}
+	}
+	return nil
+}
+
+// UpdateVia updates a via in the layer.
+func (l *DetectedFeaturesLayer) UpdateVia(v via.Via) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if ref := l.features[v.ID]; ref != nil {
+		ref.Feature = ViaFeature{v}
+	}
 }
 
 // GetFeature returns a feature by ID.

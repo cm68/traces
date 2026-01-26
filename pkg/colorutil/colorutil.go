@@ -9,8 +9,10 @@ import (
 // Common overlay colors used throughout the application.
 var (
 	Black   = color.RGBA{R: 0, G: 0, B: 0, A: 255}
+	White   = color.RGBA{R: 255, G: 255, B: 255, A: 255}
 	Cyan    = color.RGBA{R: 0, G: 255, B: 255, A: 255}
 	Magenta = color.RGBA{R: 255, G: 0, B: 255, A: 255}
+	Blue    = color.RGBA{R: 0, G: 0, B: 255, A: 255}
 )
 
 // RGBToHSV converts RGB (0-255) to HSV (OpenCV convention: H 0-180, S 0-255, V 0-255).

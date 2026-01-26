@@ -26,39 +26,43 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// SidePanel provides the main side panel with tabbed sections.
+// Panel names for ShowPanel method.
+const (
+	PanelImport     = "import"
+	PanelComponents = "components"
+	PanelTraces     = "traces"
+)
+
+// SidePanel provides the main side panel with switchable views.
 type SidePanel struct {
 	state     *app.State
 	canvas    *canvas.ImageCanvas
-	container *container.AppTabs
+	container *fyne.Container
 
-	// Tab content
-	importPanel    *ImportPanel
-	layersPanel    *LayersPanel
+	// Individual panels
+	importPanel     *ImportPanel
 	componentsPanel *ComponentsPanel
-	tracesPanel    *TracesPanel
+	tracesPanel     *TracesPanel
+
+	// Currently visible panel name
+	currentPanel string
 }
 
 // NewSidePanel creates a new side panel.
 func NewSidePanel(state *app.State, canvas *canvas.ImageCanvas) *SidePanel {
 	sp := &SidePanel{
-		state:  state,
-		canvas: canvas,
+		state:        state,
+		canvas:       canvas,
+		currentPanel: PanelImport,
 	}
 
 	// Create individual panels
 	sp.importPanel = NewImportPanel(state, canvas)
-	sp.layersPanel = NewLayersPanel(state, canvas)
 	sp.componentsPanel = NewComponentsPanel(state)
 	sp.tracesPanel = NewTracesPanel(state, canvas)
 
-	// Create tabbed container
-	sp.container = container.NewAppTabs(
-		container.NewTabItem("Import", sp.importPanel.Container()),
-		container.NewTabItem("Layers", sp.layersPanel.Container()),
-		container.NewTabItem("Components", sp.componentsPanel.Container()),
-		container.NewTabItem("Traces", sp.tracesPanel.Container()),
-	)
+	// Create container showing import panel by default
+	sp.container = container.NewStack(sp.importPanel.Container())
 
 	return sp
 }
@@ -68,9 +72,66 @@ func (sp *SidePanel) Container() fyne.CanvasObject {
 	return sp.container
 }
 
+// ShowPanel switches to the specified panel.
+func (sp *SidePanel) ShowPanel(name string) {
+	if name == sp.currentPanel {
+		return
+	}
+
+	var panel fyne.CanvasObject
+	switch name {
+	case PanelImport:
+		panel = sp.importPanel.Container()
+	case PanelComponents:
+		panel = sp.componentsPanel.Container()
+	case PanelTraces:
+		panel = sp.tracesPanel.Container()
+	default:
+		return
+	}
+
+	sp.currentPanel = name
+	sp.container.Objects = []fyne.CanvasObject{panel}
+	sp.container.Refresh()
+}
+
+// CurrentPanel returns the name of the currently visible panel.
+func (sp *SidePanel) CurrentPanel() string {
+	return sp.currentPanel
+}
+
 // SyncLayers updates the canvas with layers from state.
 func (sp *SidePanel) SyncLayers() {
-	sp.layersPanel.SyncLayers()
+	// Update canvas with current layers
+	var layers []*pcbimage.Layer
+	if sp.state.FrontImage != nil {
+		layers = append(layers, sp.state.FrontImage)
+	}
+	if sp.state.BackImage != nil {
+		layers = append(layers, sp.state.BackImage)
+	}
+	sp.canvas.SetLayers(layers)
+
+	// Set board bounds overlays
+	if sp.state.FrontBoardBounds != nil {
+		bounds := sp.state.FrontBoardBounds
+		sp.canvas.SetOverlay("front_board_bounds", &canvas.Overlay{
+			Rectangles: []canvas.OverlayRect{{
+				X: bounds.X, Y: bounds.Y, Width: bounds.Width, Height: bounds.Height,
+			}},
+			Color: color.RGBA{R: 0, G: 255, B: 0, A: 128}, // Green
+		})
+	}
+	if sp.state.BackBoardBounds != nil {
+		bounds := sp.state.BackBoardBounds
+		sp.canvas.SetOverlay("back_board_bounds", &canvas.Overlay{
+			Rectangles: []canvas.OverlayRect{{
+				X: bounds.X, Y: bounds.Y, Width: bounds.Width, Height: bounds.Height,
+			}},
+			Color: color.RGBA{R: 0, G: 0, B: 255, A: 128}, // Blue
+		})
+	}
+
 	sp.importPanel.ApplyLayerSelection()
 }
 
@@ -83,6 +144,11 @@ func (sp *SidePanel) SetWindow(w fyne.Window) {
 // This is called on startup after restoring images from preferences.
 func (sp *SidePanel) AutoDetectAndAlign() {
 	sp.importPanel.AutoDetectAndAlign()
+}
+
+// SetTracesEnabled enables or disables the traces panel interactive widgets.
+func (sp *SidePanel) SetTracesEnabled(enabled bool) {
+	sp.tracesPanel.SetEnabled(enabled)
 }
 
 // ImportPanel handles image import and board selection.
@@ -1290,120 +1356,6 @@ func (ip *ImportPanel) updateImageStatus() {
 	}
 }
 
-// LayersPanel controls layer visibility and blending.
-type LayersPanel struct {
-	state     *app.State
-	canvas    *canvas.ImageCanvas
-	container fyne.CanvasObject
-
-	frontCheck   *widget.Check
-	backCheck    *widget.Check
-	frontOpacity *widget.Slider
-	backOpacity  *widget.Slider
-}
-
-// NewLayersPanel creates a new layers panel.
-func NewLayersPanel(state *app.State, canvas *canvas.ImageCanvas) *LayersPanel {
-	lp := &LayersPanel{
-		state:  state,
-		canvas: canvas,
-	}
-
-	// Visibility checkboxes
-	lp.frontCheck = widget.NewCheck("Show Front Layer", func(checked bool) {
-		if state.FrontImage != nil {
-			state.FrontImage.Visible = checked
-			lp.syncLayersToCanvas()
-		}
-	})
-	lp.frontCheck.SetChecked(true)
-
-	lp.backCheck = widget.NewCheck("Show Back Layer", func(checked bool) {
-		if state.BackImage != nil {
-			state.BackImage.Visible = checked
-			lp.syncLayersToCanvas()
-		}
-	})
-	lp.backCheck.SetChecked(true)
-
-	// Opacity sliders
-	lp.frontOpacity = widget.NewSlider(0, 100)
-	lp.frontOpacity.SetValue(100)
-	lp.frontOpacity.OnChanged = func(val float64) {
-		if state.FrontImage != nil {
-			state.FrontImage.Opacity = val / 100.0
-			lp.syncLayersToCanvas()
-		}
-	}
-
-	lp.backOpacity = widget.NewSlider(0, 100)
-	lp.backOpacity.SetValue(100)
-	lp.backOpacity.OnChanged = func(val float64) {
-		if state.BackImage != nil {
-			state.BackImage.Opacity = val / 100.0
-			lp.syncLayersToCanvas()
-		}
-	}
-
-	// Layout
-	lp.container = container.NewVBox(
-		widget.NewCard("Front Layer", "", container.NewVBox(
-			lp.frontCheck,
-			widget.NewLabel("Opacity:"),
-			lp.frontOpacity,
-		)),
-		widget.NewCard("Back Layer", "", container.NewVBox(
-			lp.backCheck,
-			widget.NewLabel("Opacity:"),
-			lp.backOpacity,
-		)),
-	)
-
-	return lp
-}
-
-// Container returns the panel container.
-func (lp *LayersPanel) Container() fyne.CanvasObject {
-	return lp.container
-}
-
-// syncLayersToCanvas updates the canvas with the current state layers.
-func (lp *LayersPanel) syncLayersToCanvas() {
-	var layers []*pcbimage.Layer
-	if lp.state.FrontImage != nil {
-		layers = append(layers, lp.state.FrontImage)
-	}
-	if lp.state.BackImage != nil {
-		layers = append(layers, lp.state.BackImage)
-	}
-	lp.canvas.SetLayers(layers)
-
-	// Set board bounds overlays
-	if lp.state.FrontBoardBounds != nil {
-		bounds := lp.state.FrontBoardBounds
-		lp.canvas.SetOverlay("front_board_bounds", &canvas.Overlay{
-			Rectangles: []canvas.OverlayRect{{
-				X: bounds.X, Y: bounds.Y, Width: bounds.Width, Height: bounds.Height,
-			}},
-			Color: color.RGBA{R: 0, G: 255, B: 0, A: 128}, // Green
-		})
-	}
-	if lp.state.BackBoardBounds != nil {
-		bounds := lp.state.BackBoardBounds
-		lp.canvas.SetOverlay("back_board_bounds", &canvas.Overlay{
-			Rectangles: []canvas.OverlayRect{{
-				X: bounds.X, Y: bounds.Y, Width: bounds.Width, Height: bounds.Height,
-			}},
-			Color: color.RGBA{R: 0, G: 0, B: 255, A: 128}, // Blue
-		})
-	}
-}
-
-// SyncLayers is called externally to refresh layers from state.
-func (lp *LayersPanel) SyncLayers() {
-	lp.syncLayersToCanvas()
-}
-
 // ComponentsPanel displays and manages detected components.
 type ComponentsPanel struct {
 	state     *app.State
@@ -1473,6 +1425,13 @@ func (cp *ComponentsPanel) showComponentDetail(comp interface{}) {
 	// TODO: Show component details
 }
 
+// Overlay name constants for via overlays.
+const (
+	OverlayFrontVias     = "front_vias"
+	OverlayBackVias      = "back_vias"
+	OverlayConfirmedVias = "confirmed_vias"
+)
+
 // TracesPanel displays and manages detected vias and traces.
 type TracesPanel struct {
 	state     *app.State
@@ -1480,12 +1439,14 @@ type TracesPanel struct {
 	container fyne.CanvasObject
 
 	// Via detection UI
-	viaLayerSelect    *widget.RadioGroup
-	detectViasBtn     *widget.Button
-	clearViasBtn      *widget.Button
-	viaStatusLabel    *widget.Label
-	viaCountLabel     *widget.Label
-	trainingLabel     *widget.Label
+	viaLayerSelect     *widget.RadioGroup
+	detectViasBtn      *widget.Button
+	clearViasBtn       *widget.Button
+	matchViasBtn       *widget.Button
+	viaStatusLabel     *widget.Label
+	viaCountLabel      *widget.Label
+	confirmedCountLabel *widget.Label
+	trainingLabel      *widget.Label
 
 	// Trace detection UI
 	detectTracesBtn   *widget.Button
@@ -1523,10 +1484,15 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas) *TracesPanel {
 		tp.onClearVias()
 	})
 
+	tp.matchViasBtn = widget.NewButton("Match Vias", func() {
+		tp.tryMatchVias()
+	})
+
 	tp.viaStatusLabel = widget.NewLabel("")
 	tp.viaStatusLabel.Wrapping = fyne.TextWrapWord
 
 	tp.viaCountLabel = widget.NewLabel("No vias detected")
+	tp.confirmedCountLabel = widget.NewLabel("Confirmed: 0")
 
 	tp.trainingLabel = widget.NewLabel("Training: 0 pos, 0 neg")
 
@@ -1550,14 +1516,26 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas) *TracesPanel {
 	tp.loadTrainingSet()
 	tp.updateTrainingLabel()
 
+	// Auto-match vias when alignment completes (if both sides have vias)
+	state.On(app.EventAlignmentComplete, func(data interface{}) {
+		frontVias := tp.state.FeaturesLayer.GetViasBySide(pcbimage.SideFront)
+		backVias := tp.state.FeaturesLayer.GetViasBySide(pcbimage.SideBack)
+		if len(frontVias) > 0 && len(backVias) > 0 {
+			fmt.Printf("Auto-matching vias after alignment complete...\n")
+			tp.tryMatchVias()
+		}
+	})
+
 	// Layout
 	tp.container = container.NewVBox(
 		widget.NewCard("Via Detection", "", container.NewVBox(
 			widget.NewLabel("Layer:"),
 			tp.viaLayerSelect,
 			container.NewHBox(tp.detectViasBtn, tp.clearViasBtn),
+			tp.matchViasBtn,
 			tp.viaStatusLabel,
 			tp.viaCountLabel,
+			tp.confirmedCountLabel,
 		)),
 		widget.NewCard("Training Data", "", container.NewVBox(
 			widget.NewLabel("Left-click: add via"),
@@ -1670,7 +1648,7 @@ func (tp *TracesPanel) onDetectVias() {
 		tp.state.FeaturesLayer.AddVias(result.Vias)
 
 		// Create overlay for visualization
-		tp.createViaOverlay(result.Vias, side)
+		tp.createViaOverlay(result.Vias, side, false)
 
 		// Update counts
 		front, back := tp.state.FeaturesLayer.ViaCountBySide()
@@ -1698,16 +1676,17 @@ func (tp *TracesPanel) onDetectVias() {
 
 // createViaOverlay creates a canvas overlay to visualize detected vias.
 // Uses polygons for vias with boundary points, rectangles for circular vias.
-func (tp *TracesPanel) createViaOverlay(vias []via.Via, side pcbimage.Side) {
-	fmt.Printf("  createViaOverlay: %d vias for side=%v\n", len(vias), side)
+// If skipMatched is true, vias with BothSidesConfirmed are excluded (they're in confirmed overlay).
+func (tp *TracesPanel) createViaOverlay(vias []via.Via, side pcbimage.Side, skipMatched bool) {
+	fmt.Printf("  createViaOverlay: %d vias for side=%v skipMatched=%v\n", len(vias), side, skipMatched)
 	var overlayName string
 	var overlayColor color.RGBA
 
 	if side == pcbimage.SideFront {
-		overlayName = "front_vias"
+		overlayName = OverlayFrontVias
 		overlayColor = colorutil.Cyan
 	} else {
-		overlayName = "back_vias"
+		overlayName = OverlayBackVias
 		overlayColor = colorutil.Magenta
 	}
 
@@ -1718,6 +1697,11 @@ func (tp *TracesPanel) createViaOverlay(vias []via.Via, side pcbimage.Side) {
 	}
 
 	for _, v := range vias {
+		// Skip matched vias if they're shown in the confirmed overlay
+		if skipMatched && v.BothSidesConfirmed {
+			continue
+		}
+
 		// Extract via number from ID for label
 		// Handle both "via-001" (manual) and "via-f-001" (detected) formats
 		label := v.ID
@@ -1726,8 +1710,8 @@ func (tp *TracesPanel) createViaOverlay(vias []via.Via, side pcbimage.Side) {
 			label = fmt.Sprintf("%d", viaNum)
 		} else {
 			// Try format with side letter: "via-f-001" or "via-b-001"
-			var side string
-			if _, err := fmt.Sscanf(v.ID, "via-%1s-%d", &side, &viaNum); err == nil {
+			var sideStr string
+			if _, err := fmt.Sscanf(v.ID, "via-%1s-%d", &sideStr, &viaNum); err == nil {
 				label = fmt.Sprintf("%d", viaNum)
 			}
 		}
@@ -1782,9 +1766,12 @@ func (tp *TracesPanel) createViaOverlay(vias []via.Via, side pcbimage.Side) {
 // onClearVias clears all detected vias.
 func (tp *TracesPanel) onClearVias() {
 	tp.state.FeaturesLayer.ClearVias()
-	tp.canvas.ClearOverlay("front_vias")
-	tp.canvas.ClearOverlay("back_vias")
+	tp.state.FeaturesLayer.ClearConfirmedVias()
+	tp.canvas.ClearOverlay(OverlayFrontVias)
+	tp.canvas.ClearOverlay(OverlayBackVias)
+	tp.canvas.ClearOverlay(OverlayConfirmedVias)
 	tp.viaCountLabel.SetText("No vias detected")
+	tp.confirmedCountLabel.SetText("Confirmed: 0")
 	tp.viaStatusLabel.SetText("Cleared")
 	tp.state.Emit(app.EventFeaturesChanged, nil)
 }
@@ -1792,6 +1779,21 @@ func (tp *TracesPanel) onClearVias() {
 // Container returns the panel container.
 func (tp *TracesPanel) Container() fyne.CanvasObject {
 	return tp.container
+}
+
+// SetEnabled enables or disables the panel's interactive widgets.
+func (tp *TracesPanel) SetEnabled(enabled bool) {
+	if enabled {
+		tp.detectViasBtn.Enable()
+		tp.clearViasBtn.Enable()
+		tp.matchViasBtn.Enable()
+		tp.detectTracesBtn.Enable()
+	} else {
+		tp.detectViasBtn.Disable()
+		tp.clearViasBtn.Disable()
+		tp.matchViasBtn.Disable()
+		tp.detectTracesBtn.Disable()
+	}
 }
 
 // loadTrainingSet loads the training set from the default location.
@@ -1824,6 +1826,7 @@ func (tp *TracesPanel) updateTrainingLabel() {
 
 // onLeftClickVia handles left-click to add a via at the clicked location.
 // If the click is near an existing via, the new boundary is merged with it.
+// If the click is inside a confirmed via, the underlying via on the selected side is expanded.
 func (tp *TracesPanel) onLeftClickVia(x, y float64) {
 	fmt.Printf("\n=== LEFT CLICK VIA at (%.1f, %.1f) ===\n", x, y)
 
@@ -1853,6 +1856,14 @@ func (tp *TracesPanel) onLeftClickVia(x, y float64) {
 		maxRadius = 0.030 * tp.state.DPI // 30 mil search radius
 	}
 	fmt.Printf("  Max search radius: %.1f px (DPI=%.0f)\n", maxRadius, tp.state.DPI)
+
+	// First, check if click is inside a confirmed via
+	confirmedVia := tp.state.FeaturesLayer.HitTestConfirmedVia(x, y)
+	if confirmedVia != nil {
+		fmt.Printf("  HIT CONFIRMED VIA: %s\n", confirmedVia.ID)
+		tp.expandConfirmedVia(confirmedVia, x, y, side, img, maxRadius)
+		return
+	}
 
 	// Detect metal boundary around the clicked point
 	fmt.Printf("  Calling DetectMetalBoundary...\n")
@@ -2029,10 +2040,189 @@ func (tp *TracesPanel) onRightClickVia(x, y float64) {
 	tp.state.Emit(app.EventFeaturesChanged, nil)
 }
 
+// expandConfirmedVia handles expanding a confirmed via when it's clicked.
+// The underlying via on the selected side is expanded, then the intersection is recomputed.
+func (tp *TracesPanel) expandConfirmedVia(cv *via.ConfirmedVia, x, y float64, side pcbimage.Side, img *pcbimage.Layer, maxRadius float64) {
+	fmt.Printf("  expandConfirmedVia: %s on %s side\n", cv.ID, side.String())
+
+	// Detect metal boundary at click point
+	boundary := via.DetectMetalBoundary(img.Image, x, y, maxRadius)
+	fmt.Printf("  Detected boundary: center=(%.1f,%.1f) radius=%.1f pts=%d\n",
+		boundary.Center.X, boundary.Center.Y, boundary.Radius, len(boundary.Boundary))
+
+	// Get the underlying via on the selected side
+	var underlyingViaID string
+	if side == pcbimage.SideFront {
+		underlyingViaID = cv.FrontViaID
+	} else {
+		underlyingViaID = cv.BackViaID
+	}
+
+	underlyingVia := tp.state.FeaturesLayer.GetViaByID(underlyingViaID)
+	if underlyingVia == nil {
+		fmt.Printf("  ERROR: Could not find underlying via %s\n", underlyingViaID)
+		tp.viaStatusLabel.SetText(fmt.Sprintf("Error: via %s not found", underlyingViaID))
+		return
+	}
+	fmt.Printf("  Underlying via: %s center=(%.1f,%.1f) radius=%.1f pts=%d\n",
+		underlyingVia.ID, underlyingVia.Center.X, underlyingVia.Center.Y,
+		underlyingVia.Radius, len(underlyingVia.PadBoundary))
+
+	// Merge the new boundary with the existing via boundary
+	existingBoundary := via.BoundaryResult{
+		Center:   underlyingVia.Center,
+		Radius:   underlyingVia.Radius,
+		Boundary: underlyingVia.PadBoundary,
+		IsCircle: len(underlyingVia.PadBoundary) == 0,
+	}
+	merged := via.MergeBoundaries(existingBoundary, boundary)
+	fmt.Printf("  Merged boundary: center=(%.1f,%.1f) radius=%.1f pts=%d\n",
+		merged.Center.X, merged.Center.Y, merged.Radius, len(merged.Boundary))
+
+	// Update the underlying via
+	updatedVia := *underlyingVia
+	updatedVia.Center = merged.Center
+	updatedVia.Radius = merged.Radius
+	updatedVia.PadBoundary = merged.Boundary
+	tp.state.FeaturesLayer.UpdateVia(updatedVia)
+
+	// Get both front and back vias for intersection update
+	frontVia := tp.state.FeaturesLayer.GetViaByID(cv.FrontViaID)
+	backVia := tp.state.FeaturesLayer.GetViaByID(cv.BackViaID)
+	if frontVia != nil && backVia != nil {
+		// Recompute the intersection
+		cv.UpdateIntersection(frontVia, backVia)
+		fmt.Printf("  Updated intersection: center=(%.1f,%.1f) pts=%d\n",
+			cv.Center.X, cv.Center.Y, len(cv.IntersectionBoundary))
+	}
+
+	// Refresh all overlays to show the updated boundaries
+	tp.refreshAllViaOverlays()
+
+	tp.viaStatusLabel.SetText(fmt.Sprintf("Expanded %s via %s (r=%.0f)", cv.ID, underlyingViaID, merged.Radius))
+	tp.state.Emit(app.EventFeaturesChanged, nil)
+	tp.state.Emit(app.EventConfirmedViasChanged, nil)
+	fmt.Printf("  expandConfirmedVia COMPLETE\n")
+}
+
 // refreshViaOverlay recreates the via overlay for the specified side.
 func (tp *TracesPanel) refreshViaOverlay(side pcbimage.Side) {
 	vias := tp.state.FeaturesLayer.GetViasBySide(side)
-	tp.createViaOverlay(vias, side)
+	// Don't skip matched vias if there are no confirmed vias
+	skipMatched := tp.state.FeaturesLayer.ConfirmedViaCount() > 0
+	tp.createViaOverlay(vias, side, skipMatched)
+}
+
+// refreshAllViaOverlays recreates all via overlays (front, back, and confirmed).
+func (tp *TracesPanel) refreshAllViaOverlays() {
+	// Create confirmed via overlay first (so we know which vias to skip)
+	confirmedVias := tp.state.FeaturesLayer.GetConfirmedVias()
+	tp.createConfirmedViaOverlay(confirmedVias)
+
+	// Create front and back overlays, skipping matched vias
+	skipMatched := len(confirmedVias) > 0
+	frontVias := tp.state.FeaturesLayer.GetViasBySide(pcbimage.SideFront)
+	tp.createViaOverlay(frontVias, pcbimage.SideFront, skipMatched)
+
+	backVias := tp.state.FeaturesLayer.GetViasBySide(pcbimage.SideBack)
+	tp.createViaOverlay(backVias, pcbimage.SideBack, skipMatched)
+
+	// Update count labels
+	front, back := tp.state.FeaturesLayer.ViaCountBySide()
+	tp.viaCountLabel.SetText(fmt.Sprintf("Vias: %d front, %d back", front, back))
+	tp.confirmedCountLabel.SetText(fmt.Sprintf("Confirmed: %d", len(confirmedVias)))
+}
+
+// createConfirmedViaOverlay creates a canvas overlay for confirmed vias (blue).
+func (tp *TracesPanel) createConfirmedViaOverlay(confirmedVias []*via.ConfirmedVia) {
+	fmt.Printf("  createConfirmedViaOverlay: %d confirmed vias\n", len(confirmedVias))
+
+	overlay := &canvas.Overlay{
+		Color:      colorutil.Blue,
+		Rectangles: make([]canvas.OverlayRect, 0),
+		Polygons:   make([]canvas.OverlayPolygon, 0),
+	}
+
+	for _, cv := range confirmedVias {
+		// Extract via number from ID for label
+		label := cv.ID
+		var viaNum int
+		if _, err := fmt.Sscanf(cv.ID, "cvia-%d", &viaNum); err == nil {
+			label = fmt.Sprintf("%d", viaNum)
+		}
+
+		if len(cv.IntersectionBoundary) >= 3 {
+			fmt.Printf("    Confirmed %s: POLYGON with %d points\n", cv.ID, len(cv.IntersectionBoundary))
+			overlay.Polygons = append(overlay.Polygons, canvas.OverlayPolygon{
+				Points: cv.IntersectionBoundary,
+				Label:  label,
+				Filled: true,
+			})
+		} else {
+			// Fall back to rectangle for confirmed vias without boundary
+			bounds := cv.Bounds()
+			fmt.Printf("    Confirmed %s: RECT at (%d,%d) %dx%d\n", cv.ID, bounds.X, bounds.Y, bounds.Width, bounds.Height)
+			overlay.Rectangles = append(overlay.Rectangles, canvas.OverlayRect{
+				X:      bounds.X,
+				Y:      bounds.Y,
+				Width:  bounds.Width,
+				Height: bounds.Height,
+				Fill:   canvas.FillSolid,
+				Label:  label,
+			})
+		}
+	}
+
+	fmt.Printf("  Setting overlay '%s': %d rects, %d polygons\n", OverlayConfirmedVias, len(overlay.Rectangles), len(overlay.Polygons))
+	tp.canvas.SetOverlay(OverlayConfirmedVias, overlay)
+}
+
+// tryMatchVias attempts to match front and back vias to create confirmed vias.
+func (tp *TracesPanel) tryMatchVias() {
+	frontVias := tp.state.FeaturesLayer.GetViasBySide(pcbimage.SideFront)
+	backVias := tp.state.FeaturesLayer.GetViasBySide(pcbimage.SideBack)
+
+	if len(frontVias) == 0 || len(backVias) == 0 {
+		tp.viaStatusLabel.SetText("Need vias on both sides to match")
+		return
+	}
+
+	if !tp.state.Aligned {
+		tp.viaStatusLabel.SetText("Images must be aligned before matching")
+		return
+	}
+
+	tp.viaStatusLabel.SetText("Matching vias...")
+
+	// Clear existing confirmed vias
+	tp.state.FeaturesLayer.ClearConfirmedVias()
+
+	// Calculate matching tolerance based on DPI
+	tolerance := via.SuggestMatchTolerance(tp.state.DPI)
+	fmt.Printf("tryMatchVias: %d front, %d back, tolerance=%.1f px\n", len(frontVias), len(backVias), tolerance)
+
+	// Match vias
+	result := via.MatchViasAcrossSides(frontVias, backVias, tolerance)
+
+	// Add confirmed vias to features layer
+	for _, cv := range result.ConfirmedVias {
+		tp.state.FeaturesLayer.AddConfirmedVia(cv)
+	}
+
+	// Update the underlying vias with match info (they were modified in place)
+	// We need to update them in the features layer
+	for _, v := range frontVias {
+		tp.state.FeaturesLayer.UpdateVia(v)
+	}
+	for _, v := range backVias {
+		tp.state.FeaturesLayer.UpdateVia(v)
+	}
+
+	// Refresh all overlays
+	tp.refreshAllViaOverlays()
+
+	tp.viaStatusLabel.SetText(fmt.Sprintf("Matched %d vias (avg err: %.1f px)", result.Matched, result.AvgError))
+	tp.state.Emit(app.EventConfirmedViasChanged, nil)
 }
 
 // printContactStats prints contact statistics to stdout.

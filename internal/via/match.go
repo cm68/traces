@@ -1,6 +1,7 @@
 package via
 
 import (
+	"fmt"
 	"math"
 
 	"pcb-tracer/internal/image"
@@ -9,10 +10,11 @@ import (
 
 // MatchResult holds the results of cross-side via matching.
 type MatchResult struct {
-	Matched    int     // Number of vias matched on both sides
-	Unmatched  int     // Number of vias only detected on one side
-	AvgError   float64 // Average center distance for matched pairs (pixels)
-	MaxError   float64 // Maximum center distance for matched pairs (pixels)
+	Matched       int             // Number of vias matched on both sides
+	Unmatched     int             // Number of vias only detected on one side
+	AvgError      float64         // Average center distance for matched pairs (pixels)
+	MaxError      float64         // Maximum center distance for matched pairs (pixels)
+	ConfirmedVias []*ConfirmedVia // Created confirmed vias for matched pairs
 }
 
 // MatchViasAcrossSides matches vias detected on front and back images.
@@ -26,10 +28,13 @@ type MatchResult struct {
 //
 // Returns match statistics.
 func MatchViasAcrossSides(frontVias, backVias []Via, tolerancePixels float64) MatchResult {
-	result := MatchResult{}
+	result := MatchResult{
+		ConfirmedVias: make([]*ConfirmedVia, 0),
+	}
 
 	// Track which back vias have been matched
 	backMatched := make([]bool, len(backVias))
+	confirmedNum := 1
 
 	for i := range frontVias {
 		front := &frontVias[i]
@@ -57,6 +62,12 @@ func MatchViasAcrossSides(frontVias, backVias []Via, tolerancePixels float64) Ma
 			back.MatchedViaID = front.ID
 			back.BothSidesConfirmed = true
 			backMatched[bestMatch] = true
+
+			// Create confirmed via for this match
+			cvID := fmt.Sprintf("cvia-%03d", confirmedNum)
+			cv := NewConfirmedVia(cvID, front, back)
+			result.ConfirmedVias = append(result.ConfirmedVias, cv)
+			confirmedNum++
 
 			result.Matched++
 			result.AvgError += bestDist
@@ -116,13 +127,14 @@ func FilterUnmatchedVias(vias []Via) []Via {
 }
 
 // SuggestMatchTolerance calculates a reasonable matching tolerance based on DPI.
-// Vias should match within about 0.005" (5 mil) for well-aligned boards.
+// Vias should match within about 0.015" (15 mil) to account for alignment errors
+// and differences in via pad shapes between front and back.
 func SuggestMatchTolerance(dpi float64) float64 {
 	if dpi <= 0 {
-		return 10.0 // Default fallback
+		return 15.0 // Default fallback
 	}
-	// 5 mil tolerance for well-aligned boards
-	return 0.005 * dpi
+	// 15 mil tolerance - allows for small alignment errors and pad shape differences
+	return 0.015 * dpi
 }
 
 // FindUnmatchedVias returns vias that exist on only one side.

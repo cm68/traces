@@ -38,6 +38,15 @@ type MainWindow struct {
 	// Menu items that need state tracking
 	fitToWindowItem *fyne.MenuItem
 
+	// View menu items for panel switching (some need disable until aligned)
+	viewImportItem     *fyne.MenuItem
+	viewComponentsItem *fyne.MenuItem
+	viewTracesItem     *fyne.MenuItem
+
+	// Opacity sliders in toolbar
+	frontOpacitySlider *widget.Slider
+	backOpacitySlider  *widget.Slider
+
 	// Track last saved size for change detection
 	lastSavedWidth  float32
 	lastSavedHeight float32
@@ -124,7 +133,7 @@ func (mw *MainWindow) setupUI() {
 	mw.SetContent(content)
 }
 
-// createToolbar creates the toolbar with zoom controls.
+// createToolbar creates the toolbar with zoom and opacity controls.
 func (mw *MainWindow) createToolbar() fyne.CanvasObject {
 	zoomOutBtn := widget.NewButton("-", func() {
 		mw.onZoomOut()
@@ -139,12 +148,36 @@ func (mw *MainWindow) createToolbar() fyne.CanvasObject {
 		mw.onActualSize()
 	})
 
+	// Opacity sliders for front and back layers
+	mw.frontOpacitySlider = widget.NewSlider(0, 100)
+	mw.frontOpacitySlider.SetValue(100)
+	mw.frontOpacitySlider.OnChanged = func(val float64) {
+		if mw.state.FrontImage != nil {
+			mw.state.FrontImage.Opacity = val / 100.0
+			mw.sidePanel.SyncLayers()
+		}
+	}
+
+	mw.backOpacitySlider = widget.NewSlider(0, 100)
+	mw.backOpacitySlider.SetValue(100)
+	mw.backOpacitySlider.OnChanged = func(val float64) {
+		if mw.state.BackImage != nil {
+			mw.state.BackImage.Opacity = val / 100.0
+			mw.sidePanel.SyncLayers()
+		}
+	}
+
 	return container.NewHBox(
 		widget.NewLabel("Zoom:"),
 		zoomOutBtn,
 		zoomInBtn,
 		fitBtn,
 		actualBtn,
+		widget.NewSeparator(),
+		widget.NewLabel("Front:"),
+		container.NewGridWrap(fyne.NewSize(80, 30), mw.frontOpacitySlider),
+		widget.NewLabel("Back:"),
+		container.NewGridWrap(fyne.NewSize(80, 30), mw.backOpacitySlider),
 	)
 }
 
@@ -174,17 +207,41 @@ func (mw *MainWindow) setupMenus() {
 		fyne.NewMenuItem("Preferences...", mw.onPreferences),
 	)
 
-	// View menu
+	// View menu - panel switching and zoom controls
+	mw.viewImportItem = fyne.NewMenuItem("Import && Align", func() {
+		mw.sidePanel.ShowPanel(panels.PanelImport)
+		mw.updateViewMenuChecks()
+	})
+	mw.viewComponentsItem = fyne.NewMenuItem("Components", func() {
+		mw.sidePanel.ShowPanel(panels.PanelComponents)
+		mw.updateViewMenuChecks()
+	})
+	mw.viewTracesItem = fyne.NewMenuItem("Traces", func() {
+		mw.sidePanel.ShowPanel(panels.PanelTraces)
+		mw.updateViewMenuChecks()
+	})
+
+	// Disable alignment-dependent items initially
+	if !mw.state.Aligned {
+		mw.viewComponentsItem.Disabled = true
+		mw.viewTracesItem.Disabled = true
+		mw.sidePanel.SetTracesEnabled(false)
+	}
+
+	// Mark current panel
+	mw.updateViewMenuChecks()
+
 	mw.fitToWindowItem = fyne.NewMenuItem("  Fit to Window", mw.onToggleFitToWindow)
 
 	viewMenu := fyne.NewMenu("View",
+		mw.viewImportItem,
+		mw.viewComponentsItem,
+		mw.viewTracesItem,
+		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Zoom In", mw.onZoomIn),
 		fyne.NewMenuItem("Zoom Out", mw.onZoomOut),
 		mw.fitToWindowItem,
 		fyne.NewMenuItem("Actual Size", mw.onActualSize),
-		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("Show Front Layer", mw.onToggleFront),
-		fyne.NewMenuItem("Show Back Layer", mw.onToggleBack),
 	)
 
 	// Tools menu
@@ -246,7 +303,36 @@ func (mw *MainWindow) setupEventHandlers() {
 	mw.state.On(app.EventAlignmentComplete, func(data interface{}) {
 		mw.canvas.Refresh()
 		mw.updateStatus("Alignment complete")
+
+		// Enable alignment-dependent menu items
+		mw.viewComponentsItem.Disabled = false
+		mw.viewTracesItem.Disabled = false
+		mw.sidePanel.SetTracesEnabled(true)
 	})
+}
+
+// updateViewMenuChecks updates the checkmarks on View menu panel items.
+func (mw *MainWindow) updateViewMenuChecks() {
+	current := mw.sidePanel.CurrentPanel()
+
+	// Use checkmark prefix to indicate current panel
+	if current == panels.PanelImport {
+		mw.viewImportItem.Label = "✓ Import & Align"
+	} else {
+		mw.viewImportItem.Label = "  Import & Align"
+	}
+
+	if current == panels.PanelComponents {
+		mw.viewComponentsItem.Label = "✓ Components"
+	} else {
+		mw.viewComponentsItem.Label = "  Components"
+	}
+
+	if current == panels.PanelTraces {
+		mw.viewTracesItem.Label = "✓ Traces"
+	} else {
+		mw.viewTracesItem.Label = "  Traces"
+	}
 }
 
 // updateStatus updates the status bar text.
@@ -530,20 +616,6 @@ func (mw *MainWindow) disableFitToWindow() {
 	if mw.canvas.GetFitToWindow() {
 		mw.canvas.SetFitToWindow(false)
 		mw.fitToWindowItem.Label = "  Fit to Window"
-	}
-}
-
-func (mw *MainWindow) onToggleFront() {
-	if mw.state.FrontImage != nil {
-		mw.state.FrontImage.Visible = !mw.state.FrontImage.Visible
-		mw.canvas.Refresh()
-	}
-}
-
-func (mw *MainWindow) onToggleBack() {
-	if mw.state.BackImage != nil {
-		mw.state.BackImage.Visible = !mw.state.BackImage.Visible
-		mw.canvas.Refresh()
 	}
 }
 

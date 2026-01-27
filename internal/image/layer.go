@@ -46,13 +46,32 @@ type Layer struct {
 	Visible bool           // Layer visibility
 	Opacity float64        // Layer opacity (0.0 - 1.0)
 	Bounds  geometry.Rect  // Board bounds within image (if detected)
+
+	// Manual alignment offset (pixels, applied during rendering)
+	ManualOffsetX int
+	ManualOffsetY int
+
+	// Manual rotation (degrees, positive = clockwise)
+	ManualRotation float64
+
+	// Shear/scale factors (1.0 = no change)
+	// Different values at top vs bottom create horizontal shear
+	// Different values at left vs right create vertical shear
+	ShearTopX    float64 // X scale at top edge
+	ShearBottomX float64 // X scale at bottom edge
+	ShearLeftY   float64 // Y scale at left edge
+	ShearRightY  float64 // Y scale at right edge
 }
 
 // NewLayer creates a new Layer with default settings.
 func NewLayer() *Layer {
 	return &Layer{
-		Visible: true,
-		Opacity: 1.0,
+		Visible:      true,
+		Opacity:      1.0,
+		ShearTopX:    1.0,
+		ShearBottomX: 1.0,
+		ShearLeftY:   1.0,
+		ShearRightY:  1.0,
 	}
 }
 

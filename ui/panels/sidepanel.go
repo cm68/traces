@@ -23,6 +23,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -171,6 +172,11 @@ type ImportPanel struct {
 	sampleButton      *widget.Button
 	alignButton       *widget.Button
 	alignStatus       *widget.Label
+
+	// Manual alignment nudge
+	offsetLabel   *widget.Label
+	rotationLabel *widget.Label
+	shearLabel    *widget.Label
 }
 
 // NewImportPanel creates a new import panel.
@@ -234,6 +240,52 @@ func NewImportPanel(state *app.State, cvs *canvas.ImageCanvas) *ImportPanel {
 		ip.onAlignImages()
 	})
 
+	// Manual alignment nudge - compass rose
+	ip.offsetLabel = widget.NewLabel("Offset: (0, 0)")
+	compassRose := container.NewGridWithColumns(3,
+		layout.NewSpacer(),
+		widget.NewButton("N", func() { ip.onNudgeAlignment(0, -1) }),
+		layout.NewSpacer(),
+		widget.NewButton("W", func() { ip.onNudgeAlignment(-1, 0) }),
+		layout.NewSpacer(),
+		widget.NewButton("E", func() { ip.onNudgeAlignment(1, 0) }),
+		layout.NewSpacer(),
+		widget.NewButton("S", func() { ip.onNudgeAlignment(0, 1) }),
+		layout.NewSpacer(),
+	)
+
+	// Rotation controls (0.1 degree increments)
+	ip.rotationLabel = widget.NewLabel("Rotation: 0.000°")
+	rotationButtons := container.NewHBox(
+		widget.NewButton("↺ CCW", func() { ip.onNudgeRotation(-0.1) }),
+		widget.NewButton("CW ↻", func() { ip.onNudgeRotation(0.1) }),
+	)
+
+	// Shear controls - separate buttons for each edge
+	// Top/Bottom control horizontal shear (X scale at each edge)
+	// Left/Right control vertical shear (Y scale at each edge)
+	ip.shearLabel = widget.NewLabel("Shear: T=1.000 B=1.000 L=1.000 R=1.000")
+	shearTopButtons := container.NewHBox(
+		widget.NewLabel("Top X:"),
+		widget.NewButton("-", func() { ip.onNudgeShear("topX", -0.001) }),
+		widget.NewButton("+", func() { ip.onNudgeShear("topX", 0.001) }),
+	)
+	shearBottomButtons := container.NewHBox(
+		widget.NewLabel("Bot X:"),
+		widget.NewButton("-", func() { ip.onNudgeShear("bottomX", -0.001) }),
+		widget.NewButton("+", func() { ip.onNudgeShear("bottomX", 0.001) }),
+	)
+	shearLeftButtons := container.NewHBox(
+		widget.NewLabel("Left Y:"),
+		widget.NewButton("-", func() { ip.onNudgeShear("leftY", -0.001) }),
+		widget.NewButton("+", func() { ip.onNudgeShear("leftY", 0.001) }),
+	)
+	shearRightButtons := container.NewHBox(
+		widget.NewLabel("Right Y:"),
+		widget.NewButton("-", func() { ip.onNudgeShear("rightY", -0.001) }),
+		widget.NewButton("+", func() { ip.onNudgeShear("rightY", 0.001) }),
+	)
+
 	// Layout
 	ip.container = container.NewVBox(
 		widget.NewCard("Board Type", "", container.NewVBox(
@@ -257,6 +309,19 @@ func NewImportPanel(state *app.State, cvs *canvas.ImageCanvas) *ImportPanel {
 		widget.NewCard("Alignment", "", container.NewVBox(
 			ip.alignButton,
 			ip.alignStatus,
+			widget.NewSeparator(),
+			widget.NewLabel("Manual Adjust (use Layer above):"),
+			compassRose,
+			ip.offsetLabel,
+			widget.NewSeparator(),
+			rotationButtons,
+			ip.rotationLabel,
+			widget.NewSeparator(),
+			shearTopButtons,
+			shearBottomButtons,
+			shearLeftButtons,
+			shearRightButtons,
+			ip.shearLabel,
 		)),
 	)
 
@@ -581,6 +646,123 @@ func (ip *ImportPanel) onDetectContacts() {
 			ip.alignStatus.SetText(fmt.Sprintf("%s: %d contacts%s", layerName, contactCount, sizeInfo))
 		}
 	}()
+}
+
+// onNudgeAlignment adjusts the manual alignment offset for the selected layer.
+func (ip *ImportPanel) onNudgeAlignment(dx, dy int) {
+	isFront := ip.layerSelect.Selected == "Front"
+
+	var layer *pcbimage.Layer
+	if isFront {
+		layer = ip.state.FrontImage
+		ip.state.FrontManualOffset.X += dx
+		ip.state.FrontManualOffset.Y += dy
+	} else {
+		layer = ip.state.BackImage
+		ip.state.BackManualOffset.X += dx
+		ip.state.BackManualOffset.Y += dy
+	}
+
+	if layer == nil {
+		ip.alignStatus.SetText("No image loaded for " + ip.layerSelect.Selected)
+		return
+	}
+
+	// Apply offset to layer for rendering
+	layer.ManualOffsetX += dx
+	layer.ManualOffsetY += dy
+
+	ip.state.SetModified(true)
+	ip.canvas.Refresh()
+
+	// Update offset label
+	ip.offsetLabel.SetText(fmt.Sprintf("Offset: (%d, %d)",
+		layer.ManualOffsetX, layer.ManualOffsetY))
+}
+
+// onNudgeRotation adjusts the manual rotation for the selected layer.
+func (ip *ImportPanel) onNudgeRotation(degrees float64) {
+	isFront := ip.layerSelect.Selected == "Front"
+
+	var layer *pcbimage.Layer
+	if isFront {
+		layer = ip.state.FrontImage
+		ip.state.FrontManualRotation += degrees
+	} else {
+		layer = ip.state.BackImage
+		ip.state.BackManualRotation += degrees
+	}
+
+	if layer == nil {
+		ip.alignStatus.SetText("No image loaded for " + ip.layerSelect.Selected)
+		return
+	}
+
+	// Apply rotation to layer for rendering
+	layer.ManualRotation += degrees
+
+	ip.state.SetModified(true)
+	ip.canvas.Refresh()
+
+	// Update rotation label
+	ip.rotationLabel.SetText(fmt.Sprintf("Rotation: %.3f°", layer.ManualRotation))
+}
+
+// onNudgeShear adjusts the shear for the selected layer.
+// edge is one of: "topX", "bottomX", "leftY", "rightY"
+func (ip *ImportPanel) onNudgeShear(edge string, delta float64) {
+	isFront := ip.layerSelect.Selected == "Front"
+
+	var layer *pcbimage.Layer
+	if isFront {
+		layer = ip.state.FrontImage
+	} else {
+		layer = ip.state.BackImage
+	}
+
+	if layer == nil {
+		ip.alignStatus.SetText("No image loaded for " + ip.layerSelect.Selected)
+		return
+	}
+
+	// Apply shear delta to the appropriate edge
+	switch edge {
+	case "topX":
+		layer.ShearTopX += delta
+		if isFront {
+			ip.state.FrontShearTopX += delta
+		} else {
+			ip.state.BackShearTopX += delta
+		}
+	case "bottomX":
+		layer.ShearBottomX += delta
+		if isFront {
+			ip.state.FrontShearBottomX += delta
+		} else {
+			ip.state.BackShearBottomX += delta
+		}
+	case "leftY":
+		layer.ShearLeftY += delta
+		if isFront {
+			ip.state.FrontShearLeftY += delta
+		} else {
+			ip.state.BackShearLeftY += delta
+		}
+	case "rightY":
+		layer.ShearRightY += delta
+		if isFront {
+			ip.state.FrontShearRightY += delta
+		} else {
+			ip.state.BackShearRightY += delta
+		}
+	}
+
+	ip.state.SetModified(true)
+	ip.canvas.Refresh()
+
+	// Update shear label
+	ip.shearLabel.SetText(fmt.Sprintf("Shear: T=%.3f B=%.3f L=%.3f R=%.3f",
+		layer.ShearTopX, layer.ShearBottomX, layer.ShearLeftY, layer.ShearRightY))
 }
 
 func (ip *ImportPanel) onAlignImages() {
@@ -1436,18 +1618,22 @@ type TracesPanel struct {
 	container fyne.CanvasObject
 
 	// Via detection UI
-	viaLayerSelect     *widget.RadioGroup
-	detectViasBtn      *widget.Button
-	clearViasBtn       *widget.Button
-	matchViasBtn       *widget.Button
-	viaStatusLabel     *widget.Label
-	viaCountLabel      *widget.Label
+	viaLayerSelect      *widget.RadioGroup
+	detectViasBtn       *widget.Button
+	clearViasBtn        *widget.Button
+	matchViasBtn        *widget.Button
+	viaStatusLabel      *widget.Label
+	viaCountLabel       *widget.Label
 	confirmedCountLabel *widget.Label
-	trainingLabel      *widget.Label
+	trainingLabel       *widget.Label
+
+	// Via edit mode (when enabled, clicks add/remove vias)
+	viaEditMode      bool
+	viaEditModeCheck *widget.Check
 
 	// Trace detection UI
-	detectTracesBtn   *widget.Button
-	traceStatusLabel  *widget.Label
+	detectTracesBtn  *widget.Button
+	traceStatusLabel *widget.Label
 
 	// Default via radius for manual addition (pixels at current DPI)
 	defaultViaRadius float64
@@ -1530,6 +1716,16 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas) *TracesPanel {
 		}
 	})
 
+	// Via edit mode checkbox
+	tp.viaEditModeCheck = widget.NewCheck("Enable via edit mode", func(checked bool) {
+		tp.viaEditMode = checked
+		if checked {
+			tp.viaStatusLabel.SetText("Edit mode: click to add, right-click to remove")
+		} else {
+			tp.viaStatusLabel.SetText("")
+		}
+	})
+
 	// Layout
 	tp.container = container.NewVBox(
 		widget.NewCard("Via Detection", "", container.NewVBox(
@@ -1541,7 +1737,8 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas) *TracesPanel {
 			tp.viaCountLabel,
 			tp.confirmedCountLabel,
 		)),
-		widget.NewCard("Training Data", "", container.NewVBox(
+		widget.NewCard("Manual Via Editing", "", container.NewVBox(
+			tp.viaEditModeCheck,
 			widget.NewLabel("Left-click: add via"),
 			widget.NewLabel("Right-click: remove via"),
 			tp.trainingLabel,
@@ -1706,59 +1903,29 @@ func (tp *TracesPanel) createViaOverlay(vias []via.Via, side pcbimage.Side, skip
 			continue
 		}
 
-		// Extract via number from ID for label
-		// Handle both "via-001" (manual) and "via-f-001" (detected) formats
-		label := v.ID
-		var viaNum int
-		if _, err := fmt.Sscanf(v.ID, "via-%d", &viaNum); err == nil {
-			label = fmt.Sprintf("%d", viaNum)
-		} else {
-			// Try format with side letter: "via-f-001" or "via-b-001"
-			var sideStr string
-			if _, err := fmt.Sscanf(v.ID, "via-%1s-%d", &sideStr, &viaNum); err == nil {
-				label = fmt.Sprintf("%d", viaNum)
-			}
-		}
+		// Unmatched (half) vias: no label, outline only
+		// Only confirmed vias get IDs and filled rendering
 
 		// Use polygon if we have boundary points, otherwise use rectangle
 		if len(v.PadBoundary) >= 3 {
-			fmt.Printf("    Via %s: POLYGON with %d points\n", v.ID, len(v.PadBoundary))
-			// Print first few boundary points for debugging
-			for i := 0; i < len(v.PadBoundary) && i < 3; i++ {
-				p := v.PadBoundary[i]
-				fmt.Printf("      pt[%d]: (%.1f, %.1f)\n", i, p.X, p.Y)
-			}
-			if len(v.PadBoundary) > 3 {
-				fmt.Printf("      ... and %d more points\n", len(v.PadBoundary)-3)
-			}
+			fmt.Printf("    Via %s: POLYGON outline with %d points\n", v.ID, len(v.PadBoundary))
 			overlay.Polygons = append(overlay.Polygons, canvas.OverlayPolygon{
 				Points: v.PadBoundary,
-				Label:  label,
-				Filled: true,
+				Label:  "", // No label for unmatched vias
+				Filled: false, // Outline only
 			})
 		} else {
 			// Fall back to rectangle for circular vias without boundary
 			bounds := v.Bounds()
-			fmt.Printf("    Via %s: RECT at (%d,%d) %dx%d\n", v.ID, bounds.X, bounds.Y, bounds.Width, bounds.Height)
-
-			// Determine fill based on detection method
-			var fill canvas.FillPattern
-			switch v.Method {
-			case via.MethodManual:
-				fill = canvas.FillTarget // Crosshair for manual vias
-			case via.MethodHoughCircle:
-				fill = canvas.FillSolid
-			default:
-				fill = canvas.FillStripe
-			}
+			fmt.Printf("    Via %s: RECT outline at (%d,%d) %dx%d\n", v.ID, bounds.X, bounds.Y, bounds.Width, bounds.Height)
 
 			overlay.Rectangles = append(overlay.Rectangles, canvas.OverlayRect{
 				X:      bounds.X,
 				Y:      bounds.Y,
 				Width:  bounds.Width,
 				Height: bounds.Height,
-				Fill:   fill,
-				Label:  label,
+				Fill:   canvas.FillNone, // Outline only
+				Label:  "", // No label for unmatched vias
 			})
 		}
 	}
@@ -1832,6 +1999,10 @@ func (tp *TracesPanel) updateTrainingLabel() {
 // If the click is near an existing via, the new boundary is merged with it.
 // If the click is inside a confirmed via, the underlying via on the selected side is expanded.
 func (tp *TracesPanel) onLeftClickVia(x, y float64) {
+	// Only process clicks when via edit mode is enabled
+	if !tp.viaEditMode {
+		return
+	}
 	fmt.Printf("\n=== LEFT CLICK VIA at (%.1f, %.1f) ===\n", x, y)
 
 	// Determine which side based on current layer selection
@@ -1914,6 +2085,16 @@ func (tp *TracesPanel) onLeftClickVia(x, y float64) {
 		fmt.Printf("  Merged result: center=(%.1f,%.1f) radius=%.1f pts=%d\n",
 			merged.Center.X, merged.Center.Y, merged.Radius, len(merged.Boundary))
 
+		// Filter out any green points from the merged boundary
+		merged.Boundary = via.FilterGreenPoints(img.Image, merged.Boundary)
+		fmt.Printf("  After green filter: %d pts\n", len(merged.Boundary))
+
+		// Debug: dump pixel colors and PNG for merged boundary
+		if false {
+			via.DumpBoundaryPixels(img.Image, merged.Boundary, nearestVia.ID+"-merged")
+			via.DumpBoundaryPNG(img.Image, merged.Boundary, nearestVia.ID+"-merged")
+		}
+
 		// Update the existing via with merged boundary
 		tp.state.FeaturesLayer.RemoveVia(nearestVia.ID)
 		updatedVia := via.Via{
@@ -1956,8 +2137,28 @@ func (tp *TracesPanel) onLeftClickVia(x, y float64) {
 	}
 	fmt.Printf("  Created via %s with %d boundary points\n", newVia.ID, len(newVia.PadBoundary))
 
+	// Debug: dump pixel colors and PNG for manual vias
+	if false {
+		via.DumpBoundaryPixels(img.Image, boundary.Boundary, newVia.ID)
+		via.DumpBoundaryPNG(img.Image, boundary.Boundary, newVia.ID)
+	}
+
 	// Add to features layer
 	tp.state.FeaturesLayer.AddVia(newVia)
+
+	// Quick-match: check if there's a matching via on the opposite side
+	var matchedVia *via.Via
+	var statusMsg string
+	if tp.state.Aligned {
+		matchedVia = tp.tryQuickMatchVia(&newVia)
+		if matchedVia != nil {
+			statusMsg = fmt.Sprintf("Added %s + matched %s → confirmed", newVia.ID, matchedVia.ID)
+		} else {
+			statusMsg = fmt.Sprintf("Added %s (r=%.0f)", newVia.ID, boundary.Radius)
+		}
+	} else {
+		statusMsg = fmt.Sprintf("Added %s (r=%.0f)", newVia.ID, boundary.Radius)
+	}
 
 	// Add positive training sample
 	if tp.state.ViaTrainingSet != nil {
@@ -1971,18 +2172,34 @@ func (tp *TracesPanel) onLeftClickVia(x, y float64) {
 	// Update overlay
 	fmt.Printf("  Calling refreshViaOverlay...\n")
 	tp.refreshViaOverlay(side)
+	if matchedVia != nil {
+		// Also refresh the other side and confirmed vias overlay
+		if side == pcbimage.SideFront {
+			tp.refreshViaOverlay(pcbimage.SideBack)
+		} else {
+			tp.refreshViaOverlay(pcbimage.SideFront)
+		}
+		tp.refreshConfirmedViaOverlay()
+	}
 
 	// Update counts
 	front, back := tp.state.FeaturesLayer.ViaCountBySide()
 	tp.viaCountLabel.SetText(fmt.Sprintf("Vias: %d front, %d back", front, back))
 
-	tp.viaStatusLabel.SetText(fmt.Sprintf("Added %s (r=%.0f)", newVia.ID, boundary.Radius))
+	tp.viaStatusLabel.SetText(statusMsg)
 	tp.state.Emit(app.EventFeaturesChanged, nil)
+	if matchedVia != nil {
+		tp.state.Emit(app.EventConfirmedViasChanged, nil)
+	}
 	fmt.Printf("  NEW VIA COMPLETE\n")
 }
 
 // onRightClickVia handles right-click to remove a via at the clicked location.
 func (tp *TracesPanel) onRightClickVia(x, y float64) {
+	// Only process clicks when via edit mode is enabled
+	if !tp.viaEditMode {
+		return
+	}
 	// Determine which side based on current layer selection
 	isFront := tp.viaLayerSelect.Selected == "Front"
 	var side pcbimage.Side
@@ -2083,6 +2300,15 @@ func (tp *TracesPanel) expandConfirmedVia(cv *via.ConfirmedVia, x, y float64, si
 	fmt.Printf("  Merged boundary: center=(%.1f,%.1f) radius=%.1f pts=%d\n",
 		merged.Center.X, merged.Center.Y, merged.Radius, len(merged.Boundary))
 
+	// Filter out any green points from the merged boundary
+	merged.Boundary = via.FilterGreenPoints(img.Image, merged.Boundary)
+	fmt.Printf("  After green filter: %d pts\n", len(merged.Boundary))
+
+	// Debug: dump pixel colors inside the merged boundary
+	if false {
+		via.DumpBoundaryPixels(img.Image, merged.Boundary, underlyingVia.ID+"-expanded")
+	}
+
 	// Update the underlying via
 	updatedVia := *underlyingVia
 	updatedVia.Center = merged.Center
@@ -2115,6 +2341,13 @@ func (tp *TracesPanel) refreshViaOverlay(side pcbimage.Side) {
 	// Don't skip matched vias if there are no confirmed vias
 	skipMatched := tp.state.FeaturesLayer.ConfirmedViaCount() > 0
 	tp.createViaOverlay(vias, side, skipMatched)
+}
+
+// refreshConfirmedViaOverlay recreates just the confirmed via overlay.
+func (tp *TracesPanel) refreshConfirmedViaOverlay() {
+	confirmedVias := tp.state.FeaturesLayer.GetConfirmedVias()
+	tp.createConfirmedViaOverlay(confirmedVias)
+	tp.confirmedCountLabel.SetText(fmt.Sprintf("Confirmed: %d", len(confirmedVias)))
 }
 
 // refreshAllViaOverlays recreates all via overlays (front, back, and confirmed).
@@ -2273,6 +2506,77 @@ func (tp *TracesPanel) tryMatchVias() {
 
 	tp.viaStatusLabel.SetText(fmt.Sprintf("Matched %d vias (avg err: %.1f px)", result.Matched, result.AvgError))
 	tp.state.Emit(app.EventConfirmedViasChanged, nil)
+}
+
+// tryQuickMatchVia checks if a newly added via has a match on the opposite side.
+// If found, creates a confirmed via immediately and returns the matched via.
+// Returns nil if no match found.
+func (tp *TracesPanel) tryQuickMatchVia(newVia *via.Via) *via.Via {
+	// Determine opposite side
+	var oppositeSide pcbimage.Side
+	if newVia.Side == pcbimage.SideFront {
+		oppositeSide = pcbimage.SideBack
+	} else {
+		oppositeSide = pcbimage.SideFront
+	}
+
+	// Get vias on opposite side
+	oppositeVias := tp.state.FeaturesLayer.GetViasBySide(oppositeSide)
+	if len(oppositeVias) == 0 {
+		return nil
+	}
+
+	// Calculate matching tolerance
+	tolerance := via.SuggestMatchTolerance(tp.state.DPI)
+
+	// Find closest unmatched via within tolerance
+	var bestMatch *via.Via
+	bestDist := tolerance + 1
+
+	for i := range oppositeVias {
+		v := &oppositeVias[i]
+		// Skip already matched vias
+		if v.BothSidesConfirmed {
+			continue
+		}
+		dist := newVia.Center.Distance(v.Center)
+		if dist <= tolerance && dist < bestDist {
+			bestDist = dist
+			bestMatch = v
+		}
+	}
+
+	if bestMatch == nil {
+		return nil
+	}
+
+	fmt.Printf("  Quick-match: %s <-> %s (dist=%.1f px)\n", newVia.ID, bestMatch.ID, bestDist)
+
+	// Mark both vias as matched
+	newVia.MatchedViaID = bestMatch.ID
+	newVia.BothSidesConfirmed = true
+	bestMatch.MatchedViaID = newVia.ID
+	bestMatch.BothSidesConfirmed = true
+
+	// Update both vias in features layer
+	tp.state.FeaturesLayer.UpdateVia(*newVia)
+	tp.state.FeaturesLayer.UpdateVia(*bestMatch)
+
+	// Create confirmed via
+	cvNum := tp.state.FeaturesLayer.NextConfirmedViaNumber()
+	cvID := fmt.Sprintf("cvia-%03d", cvNum)
+
+	var cv *via.ConfirmedVia
+	if newVia.Side == pcbimage.SideFront {
+		cv = via.NewConfirmedVia(cvID, newVia, bestMatch)
+	} else {
+		cv = via.NewConfirmedVia(cvID, bestMatch, newVia)
+	}
+
+	tp.state.FeaturesLayer.AddConfirmedVia(cv)
+	fmt.Printf("  Created confirmed via %s\n", cvID)
+
+	return bestMatch
 }
 
 // printContactStats prints contact statistics to stdout.

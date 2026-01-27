@@ -5,7 +5,9 @@ import (
 	"image/color"
 	"sync"
 
+	"pcb-tracer/internal/connector"
 	"pcb-tracer/internal/image"
+	"pcb-tracer/internal/netlist"
 	"pcb-tracer/internal/trace"
 	"pcb-tracer/internal/via"
 	"pcb-tracer/pkg/geometry"
@@ -24,8 +26,16 @@ type DetectedFeaturesLayer struct {
 	traces []string // Trace feature IDs
 
 	// Confirmed vias (detected on both sides)
-	confirmedVias    []string                    // Confirmed via IDs
+	confirmedVias    []string                     // Confirmed via IDs
 	confirmedViasMap map[string]*via.ConfirmedVia // ID -> ConfirmedVia
+
+	// Connectors (board edge contacts)
+	connectors    []string                        // Connector IDs
+	connectorsMap map[string]*connector.Connector // ID -> Connector
+
+	// Electrical nets
+	nets    []string                           // Net IDs
+	netsMap map[string]*netlist.ElectricalNet // ID -> ElectricalNet
 
 	// Bus definitions
 	Buses map[string]*Bus
@@ -46,6 +56,10 @@ func NewDetectedFeaturesLayer() *DetectedFeaturesLayer {
 		traces:           make([]string, 0),
 		confirmedVias:    make([]string, 0),
 		confirmedViasMap: make(map[string]*via.ConfirmedVia),
+		connectors:       make([]string, 0),
+		connectorsMap:    make(map[string]*connector.Connector),
+		nets:             make([]string, 0),
+		netsMap:          make(map[string]*netlist.ElectricalNet),
 		Buses:            make(map[string]*Bus),
 		Opacity:          0.7, // Default 70% opacity
 		Visible:          true,
@@ -127,6 +141,10 @@ func (l *DetectedFeaturesLayer) Clear() {
 	l.traces = l.traces[:0]
 	l.confirmedVias = l.confirmedVias[:0]
 	l.confirmedViasMap = make(map[string]*via.ConfirmedVia)
+	l.connectors = l.connectors[:0]
+	l.connectorsMap = make(map[string]*connector.Connector)
+	l.nets = l.nets[:0]
+	l.netsMap = make(map[string]*netlist.ElectricalNet)
 	l.selected = make(map[string]bool)
 }
 
@@ -647,6 +665,192 @@ func (l *DetectedFeaturesLayer) GetFeaturesInRegion(region geometry.RectInt) []*
 	}
 
 	return hits
+}
+
+// Connector methods
+
+// AddConnector adds a connector to the layer.
+func (l *DetectedFeaturesLayer) AddConnector(c *connector.Connector) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.connectorsMap[c.ID] = c
+	l.connectors = append(l.connectors, c.ID)
+}
+
+// GetConnectors returns all connectors.
+func (l *DetectedFeaturesLayer) GetConnectors() []*connector.Connector {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	result := make([]*connector.Connector, 0, len(l.connectors))
+	for _, id := range l.connectors {
+		if c := l.connectorsMap[id]; c != nil {
+			result = append(result, c)
+		}
+	}
+	return result
+}
+
+// GetConnectorByID returns a connector by ID.
+func (l *DetectedFeaturesLayer) GetConnectorByID(id string) *connector.Connector {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.connectorsMap[id]
+}
+
+// GetConnectorByPin returns the connector for a given pin number.
+func (l *DetectedFeaturesLayer) GetConnectorByPin(pinNumber int, front bool) *connector.Connector {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	for _, c := range l.connectorsMap {
+		isFront := c.Side == image.SideFront
+		if c.PinNumber == pinNumber && isFront == front {
+			return c
+		}
+	}
+	return nil
+}
+
+// GetConnectorsBySide returns all connectors on the specified side.
+func (l *DetectedFeaturesLayer) GetConnectorsBySide(side image.Side) []*connector.Connector {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	var result []*connector.Connector
+	for _, id := range l.connectors {
+		if c := l.connectorsMap[id]; c != nil && c.Side == side {
+			result = append(result, c)
+		}
+	}
+	return result
+}
+
+// ClearConnectors removes all connectors from the layer.
+func (l *DetectedFeaturesLayer) ClearConnectors() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.connectors = l.connectors[:0]
+	l.connectorsMap = make(map[string]*connector.Connector)
+}
+
+// ConnectorCount returns the number of connectors.
+func (l *DetectedFeaturesLayer) ConnectorCount() int {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return len(l.connectors)
+}
+
+// HitTestConnector finds the connector at the given coordinates.
+func (l *DetectedFeaturesLayer) HitTestConnector(x, y float64) *connector.Connector {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	for _, id := range l.connectors {
+		if c := l.connectorsMap[id]; c != nil {
+			if c.HitTest(x, y) {
+				return c
+			}
+		}
+	}
+	return nil
+}
+
+// Electrical net methods
+
+// AddNet adds an electrical net to the layer.
+func (l *DetectedFeaturesLayer) AddNet(n *netlist.ElectricalNet) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.netsMap[n.ID] = n
+	l.nets = append(l.nets, n.ID)
+}
+
+// GetNets returns all electrical nets.
+func (l *DetectedFeaturesLayer) GetNets() []*netlist.ElectricalNet {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	result := make([]*netlist.ElectricalNet, 0, len(l.nets))
+	for _, id := range l.nets {
+		if n := l.netsMap[id]; n != nil {
+			result = append(result, n)
+		}
+	}
+	return result
+}
+
+// GetNetByID returns an electrical net by ID.
+func (l *DetectedFeaturesLayer) GetNetByID(id string) *netlist.ElectricalNet {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.netsMap[id]
+}
+
+// GetNetByName returns an electrical net by name.
+func (l *DetectedFeaturesLayer) GetNetByName(name string) *netlist.ElectricalNet {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	for _, n := range l.netsMap {
+		if n.Name == name {
+			return n
+		}
+	}
+	return nil
+}
+
+// GetNetForElement returns the net containing an element.
+func (l *DetectedFeaturesLayer) GetNetForElement(elementID string) *netlist.ElectricalNet {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	for _, n := range l.netsMap {
+		if n.ContainsElement(elementID) {
+			return n
+		}
+	}
+	return nil
+}
+
+// ClearNets removes all electrical nets from the layer.
+func (l *DetectedFeaturesLayer) ClearNets() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.nets = l.nets[:0]
+	l.netsMap = make(map[string]*netlist.ElectricalNet)
+}
+
+// NetCount returns the number of electrical nets.
+func (l *DetectedFeaturesLayer) NetCount() int {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return len(l.nets)
+}
+
+// RemoveNet removes an electrical net by ID.
+func (l *DetectedFeaturesLayer) RemoveNet(id string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if _, exists := l.netsMap[id]; !exists {
+		return false
+	}
+
+	delete(l.netsMap, id)
+
+	for i, nid := range l.nets {
+		if nid == id {
+			l.nets = append(l.nets[:i], l.nets[i+1:]...)
+			break
+		}
+	}
+
+	return true
 }
 
 // Helper functions

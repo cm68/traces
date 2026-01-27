@@ -13,6 +13,7 @@ import (
 	"pcb-tracer/internal/alignment"
 	"pcb-tracer/internal/board"
 	"pcb-tracer/internal/component"
+	"pcb-tracer/internal/connector"
 	"pcb-tracer/internal/features"
 	"pcb-tracer/internal/image"
 	"pcb-tracer/internal/via"
@@ -45,6 +46,25 @@ type State struct {
 	FrontBoardBounds     *geometry.RectInt
 	BackBoardBounds      *geometry.RectInt
 
+	// Manual alignment offsets (pixels) - persisted to project file
+	FrontManualOffset geometry.PointInt
+	BackManualOffset  geometry.PointInt
+
+	// Manual rotation (degrees) - persisted to project file
+	FrontManualRotation float64
+	BackManualRotation  float64
+
+	// Shear factors (1.0 = no change) - persisted to project file
+	// TopX/BottomX control horizontal shear, LeftY/RightY control vertical shear
+	FrontShearTopX    float64
+	FrontShearBottomX float64
+	FrontShearLeftY   float64
+	FrontShearRightY  float64
+	BackShearTopX     float64
+	BackShearBottomX  float64
+	BackShearLeftY    float64
+	BackShearRightY   float64
+
 	// Per-side sampled color parameters (nil = use defaults)
 	FrontColorParams *ColorParams
 	BackColorParams  *ColorParams
@@ -60,6 +80,9 @@ type State struct {
 
 	// Via training set for machine learning
 	ViaTrainingSet *via.TrainingSet
+
+	// Board definition for pin mapping
+	BoardDefinition *connector.BoardDefinition
 
 	// Event listeners
 	listeners map[EventType][]EventListener
@@ -88,6 +111,11 @@ const (
 	EventSelectionChanged
 	EventBusChanged
 	EventConfirmedViasChanged
+	EventConnectorsCreated
+	EventConnectorsChanged
+	EventBoardDefinitionLoaded
+	EventNetlistCreated
+	EventNetlistModified
 )
 
 // EventListener is called when an event occurs.
@@ -96,10 +124,11 @@ type EventListener func(data interface{})
 // NewState creates a new application state.
 func NewState() *State {
 	return &State{
-		BoardSpec:      board.S100Spec(),
-		FeaturesLayer:  features.NewDetectedFeaturesLayer(),
-		ViaTrainingSet: via.NewTrainingSet(),
-		listeners:      make(map[EventType][]EventListener),
+		BoardSpec:       board.S100Spec(),
+		FeaturesLayer:   features.NewDetectedFeaturesLayer(),
+		ViaTrainingSet:  via.NewTrainingSet(),
+		BoardDefinition: connector.S100Definition(),
+		listeners:       make(map[EventType][]EventListener),
 	}
 }
 
@@ -154,6 +183,22 @@ func (s *State) LoadProject(path string) error {
 	s.Aligned = proj.Aligned
 	s.AlignmentError = proj.AlignmentError
 	s.DPI = proj.DPI
+
+	// Restore manual offsets
+	s.FrontManualOffset = proj.FrontManualOffset
+	s.BackManualOffset = proj.BackManualOffset
+
+	// Restore rotation and shear
+	s.FrontManualRotation = proj.FrontManualRotation
+	s.BackManualRotation = proj.BackManualRotation
+	s.FrontShearTopX = proj.FrontShearTopX
+	s.FrontShearBottomX = proj.FrontShearBottomX
+	s.FrontShearLeftY = proj.FrontShearLeftY
+	s.FrontShearRightY = proj.FrontShearRightY
+	s.BackShearTopX = proj.BackShearTopX
+	s.BackShearBottomX = proj.BackShearBottomX
+	s.BackShearLeftY = proj.BackShearLeftY
+	s.BackShearRightY = proj.BackShearRightY
 	s.mu.Unlock()
 
 	// Load images
@@ -171,6 +216,78 @@ func (s *State) LoadProject(path string) error {
 		}
 	}
 
+	// Apply manual offsets, rotation, and shear to loaded layers
+	s.mu.Lock()
+	if s.FrontImage != nil {
+		s.FrontImage.ManualOffsetX = s.FrontManualOffset.X
+		s.FrontImage.ManualOffsetY = s.FrontManualOffset.Y
+		s.FrontImage.ManualRotation = s.FrontManualRotation
+		s.FrontImage.ShearTopX = s.FrontShearTopX
+		s.FrontImage.ShearBottomX = s.FrontShearBottomX
+		s.FrontImage.ShearLeftY = s.FrontShearLeftY
+		s.FrontImage.ShearRightY = s.FrontShearRightY
+		// Ensure default shear if not set
+		if s.FrontImage.ShearTopX == 0 {
+			s.FrontImage.ShearTopX = 1.0
+		}
+		if s.FrontImage.ShearBottomX == 0 {
+			s.FrontImage.ShearBottomX = 1.0
+		}
+		if s.FrontImage.ShearLeftY == 0 {
+			s.FrontImage.ShearLeftY = 1.0
+		}
+		if s.FrontImage.ShearRightY == 0 {
+			s.FrontImage.ShearRightY = 1.0
+		}
+	}
+	if s.BackImage != nil {
+		s.BackImage.ManualOffsetX = s.BackManualOffset.X
+		s.BackImage.ManualOffsetY = s.BackManualOffset.Y
+		s.BackImage.ManualRotation = s.BackManualRotation
+		s.BackImage.ShearTopX = s.BackShearTopX
+		s.BackImage.ShearBottomX = s.BackShearBottomX
+		s.BackImage.ShearLeftY = s.BackShearLeftY
+		s.BackImage.ShearRightY = s.BackShearRightY
+		// Ensure default shear if not set
+		if s.BackImage.ShearTopX == 0 {
+			s.BackImage.ShearTopX = 1.0
+		}
+		if s.BackImage.ShearBottomX == 0 {
+			s.BackImage.ShearBottomX = 1.0
+		}
+		if s.BackImage.ShearLeftY == 0 {
+			s.BackImage.ShearLeftY = 1.0
+		}
+		if s.BackImage.ShearRightY == 0 {
+			s.BackImage.ShearRightY = 1.0
+		}
+	}
+
+	// Restore contacts from saved data
+	if len(proj.FrontContacts) > 0 {
+		s.FrontDetectionResult = &alignment.DetectionResult{
+			Contacts: make([]alignment.Contact, len(proj.FrontContacts)),
+		}
+		for i, cd := range proj.FrontContacts {
+			s.FrontDetectionResult.Contacts[i] = alignment.Contact{
+				Center: cd.Center,
+				Bounds: cd.Bounds,
+			}
+		}
+	}
+	if len(proj.BackContacts) > 0 {
+		s.BackDetectionResult = &alignment.DetectionResult{
+			Contacts: make([]alignment.Contact, len(proj.BackContacts)),
+		}
+		for i, cd := range proj.BackContacts {
+			s.BackDetectionResult.Contacts[i] = alignment.Contact{
+				Center: cd.Center,
+				Bounds: cd.Bounds,
+			}
+		}
+	}
+	s.mu.Unlock()
+
 	// Load components
 	if proj.ComponentsPath != "" {
 		compPath := filepath.Join(projectDir, proj.ComponentsPath)
@@ -187,11 +304,42 @@ func (s *State) LoadProject(path string) error {
 func (s *State) SaveProject(path string) error {
 	s.mu.RLock()
 	proj := ProjectFile{
-		Version:        1,
-		BoardType:      s.BoardSpec.Name(),
-		Aligned:        s.Aligned,
-		AlignmentError: s.AlignmentError,
-		DPI:            s.DPI,
+		Version:           2,
+		BoardType:         s.BoardSpec.Name(),
+		Aligned:           s.Aligned,
+		AlignmentError:    s.AlignmentError,
+		DPI:               s.DPI,
+		FrontManualOffset: s.FrontManualOffset,
+		BackManualOffset:  s.BackManualOffset,
+		// Rotation and shear
+		FrontManualRotation: s.FrontManualRotation,
+		BackManualRotation:  s.BackManualRotation,
+		FrontShearTopX:      s.FrontShearTopX,
+		FrontShearBottomX:   s.FrontShearBottomX,
+		FrontShearLeftY:     s.FrontShearLeftY,
+		FrontShearRightY:    s.FrontShearRightY,
+		BackShearTopX:       s.BackShearTopX,
+		BackShearBottomX:    s.BackShearBottomX,
+		BackShearLeftY:      s.BackShearLeftY,
+		BackShearRightY:     s.BackShearRightY,
+	}
+
+	// Serialize contacts from detection results
+	if s.FrontDetectionResult != nil {
+		for _, c := range s.FrontDetectionResult.Contacts {
+			proj.FrontContacts = append(proj.FrontContacts, ContactData{
+				Center: c.Center,
+				Bounds: c.Bounds,
+			})
+		}
+	}
+	if s.BackDetectionResult != nil {
+		for _, c := range s.BackDetectionResult.Contacts {
+			proj.BackContacts = append(proj.BackContacts, ContactData{
+				Center: c.Center,
+				Bounds: c.Bounds,
+			})
+		}
 	}
 
 	projectDir := filepath.Dir(path)
@@ -386,9 +534,40 @@ type ProjectFile struct {
 	Aligned        bool    `json:"aligned"`
 	AlignmentError float64 `json:"alignment_error,omitempty"`
 	DPI            float64 `json:"dpi,omitempty"`
-	ComponentsPath string  `json:"components,omitempty"`
-	TracesPath     string  `json:"traces,omitempty"`
-	NetlistPath    string  `json:"netlist,omitempty"`
+
+	// Manual alignment offsets (v2+)
+	FrontManualOffset geometry.PointInt `json:"front_offset,omitempty"`
+	BackManualOffset  geometry.PointInt `json:"back_offset,omitempty"`
+
+	// Manual rotation in degrees (v2+)
+	FrontManualRotation float64 `json:"front_rotation,omitempty"`
+	BackManualRotation  float64 `json:"back_rotation,omitempty"`
+
+	// Shear factors (v2+) - 0 means use default 1.0
+	// TopX/BottomX control horizontal shear, LeftY/RightY control vertical shear
+	FrontShearTopX    float64 `json:"front_shear_top_x,omitempty"`
+	FrontShearBottomX float64 `json:"front_shear_bottom_x,omitempty"`
+	FrontShearLeftY   float64 `json:"front_shear_left_y,omitempty"`
+	FrontShearRightY  float64 `json:"front_shear_right_y,omitempty"`
+	BackShearTopX     float64 `json:"back_shear_top_x,omitempty"`
+	BackShearBottomX  float64 `json:"back_shear_bottom_x,omitempty"`
+	BackShearLeftY    float64 `json:"back_shear_left_y,omitempty"`
+	BackShearRightY   float64 `json:"back_shear_right_y,omitempty"`
+
+	// Detected contacts (v2+)
+	FrontContacts []ContactData `json:"front_contacts,omitempty"`
+	BackContacts  []ContactData `json:"back_contacts,omitempty"`
+
+	// External data file paths
+	ComponentsPath string `json:"components,omitempty"`
+	TracesPath     string `json:"traces,omitempty"`
+	NetlistPath    string `json:"netlist,omitempty"`
+}
+
+// ContactData is a JSON-serializable representation of a detected contact.
+type ContactData struct {
+	Center geometry.Point2D `json:"center"`
+	Bounds geometry.RectInt `json:"bounds"`
 }
 
 // transformBoundsAfterRotation transforms board bounds from original image coordinates
@@ -479,4 +658,47 @@ func flipHorizontal(img goimage.Image) goimage.Image {
 		}
 	}
 	return flipped
+}
+
+// CreateConnectorsFromAlignment creates Connector objects from the detected alignment contacts.
+// This should be called after alignment is complete.
+func (s *State) CreateConnectorsFromAlignment() {
+	if s.FrontDetectionResult == nil && s.BackDetectionResult == nil {
+		return
+	}
+
+	bd := s.BoardDefinition
+	if bd == nil {
+		bd = connector.S100Definition()
+		s.BoardDefinition = bd
+	}
+
+	// Clear existing connectors
+	s.FeaturesLayer.ClearConnectors()
+
+	// Create front connectors
+	if s.FrontDetectionResult != nil {
+		for i, contact := range s.FrontDetectionResult.Contacts {
+			pin := bd.GetPinByPosition(i, true)
+			if pin != nil {
+				c := connector.NewConnectorFromContact(i, image.SideFront, &contact, pin.PinNumber)
+				c.SignalName = pin.SignalName
+				s.FeaturesLayer.AddConnector(c)
+			}
+		}
+	}
+
+	// Create back connectors
+	if s.BackDetectionResult != nil {
+		for i, contact := range s.BackDetectionResult.Contacts {
+			pin := bd.GetPinByPosition(i, false)
+			if pin != nil {
+				c := connector.NewConnectorFromContact(i, image.SideBack, &contact, pin.PinNumber)
+				c.SignalName = pin.SignalName
+				s.FeaturesLayer.AddConnector(c)
+			}
+		}
+	}
+
+	s.Emit(EventConnectorsCreated, nil)
 }

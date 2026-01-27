@@ -114,20 +114,19 @@ func (mw *MainWindow) setupUI() {
 		mw.canvas.Container(), // center
 	)
 
-	// Create main layout: side panel | canvas area
-	split := container.NewHSplit(
-		mw.sidePanel.Container(),
-		canvasArea,
-	)
-	split.SetOffset(0.25) // Side panel takes 25% of width
+	// Create main layout: side panel on left, canvas area in center
+	// Using Border layout instead of HSplit to avoid Fyne scroll offset bug
+	// that causes sidepanel clicks to be dispatched incorrectly when canvas is scrolled
+	sidePanelWithScroll := container.NewVScroll(mw.sidePanel.Container())
+	sidePanelWithScroll.SetMinSize(fyne.NewSize(320, 0))
 
 	// Main container with status bar at bottom
 	content := container.NewBorder(
 		nil,                               // top
 		container.NewPadded(mw.statusBar), // bottom
-		nil,                               // left
+		sidePanelWithScroll,               // left - scrollable sidepanel
 		nil,                               // right
-		split,                             // center
+		canvasArea,                        // center - canvas takes remaining space
 	)
 
 	mw.SetContent(content)

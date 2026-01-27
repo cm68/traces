@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"math"
 
 	pcbimage "pcb-tracer/internal/image"
 
@@ -240,6 +241,14 @@ func (dc *draggableContent) Tapped(ev *fyne.PointEvent) {
 		return
 	}
 
+	// Workaround for Fyne bug: reject clicks outside widget bounds
+	// ev.Position should be relative to the widget, so check for valid range
+	size := dc.Size()
+	if ev.Position.X < 0 || ev.Position.Y < 0 ||
+		ev.Position.X > size.Width || ev.Position.Y > size.Height {
+		return
+	}
+
 	// Convert screen position to image coordinates
 	scrollOffset := dc.canvas.scroll.Offset()
 	canvasX := float64(ev.Position.X + scrollOffset.X)
@@ -255,6 +264,13 @@ func (dc *draggableContent) Tapped(ev *fyne.PointEvent) {
 // TappedSecondary handles right-click events.
 func (dc *draggableContent) TappedSecondary(ev *fyne.PointEvent) {
 	if dc.canvas.onRightClick == nil {
+		return
+	}
+
+	// Workaround for Fyne bug: reject clicks outside widget bounds
+	size := dc.Size()
+	if ev.Position.X < 0 || ev.Position.Y < 0 ||
+		ev.Position.X > size.Width || ev.Position.Y > size.Height {
 		return
 	}
 
@@ -644,15 +660,102 @@ func (ic *ImageCanvas) compositeLayer(output *image.RGBA, layer *pcbimage.Layer,
 	srcBounds := src.Bounds()
 	opacity := layer.Opacity
 
-	for y := 0; y < h; y++ {
-		srcY := int(float64(y)/ic.zoom) + srcBounds.Min.Y
-		if srcY >= srcBounds.Max.Y {
-			continue
-		}
+	// Manual transform parameters
+	offsetX := float64(layer.ManualOffsetX)
+	offsetY := float64(layer.ManualOffsetY)
+	rotation := layer.ManualRotation * math.Pi / 180.0 // Convert to radians
 
+	// Shear parameters (default to 1.0 if not set)
+	shearTopX := layer.ShearTopX
+	shearBottomX := layer.ShearBottomX
+	shearLeftY := layer.ShearLeftY
+	shearRightY := layer.ShearRightY
+	if shearTopX == 0 {
+		shearTopX = 1.0
+	}
+	if shearBottomX == 0 {
+		shearBottomX = 1.0
+	}
+	if shearLeftY == 0 {
+		shearLeftY = 1.0
+	}
+	if shearRightY == 0 {
+		shearRightY = 1.0
+	}
+
+	// Precompute rotation sin/cos
+	cosR := math.Cos(-rotation)
+	sinR := math.Sin(-rotation)
+
+	// Source image dimensions and center
+	srcW := float64(srcBounds.Max.X - srcBounds.Min.X)
+	srcH := float64(srcBounds.Max.Y - srcBounds.Min.Y)
+	srcCx := float64(srcBounds.Min.X+srcBounds.Max.X) / 2.0
+	srcCy := float64(srcBounds.Min.Y+srcBounds.Max.Y) / 2.0
+
+	// Check if we have any transform beyond offset
+	hasTransform := rotation != 0 || shearTopX != 1.0 || shearBottomX != 1.0 ||
+		shearLeftY != 1.0 || shearRightY != 1.0
+
+	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
-			srcX := int(float64(x)/ic.zoom) + srcBounds.Min.X
-			if srcX >= srcBounds.Max.X {
+			// Convert canvas coords to image coords (accounting for zoom and offset)
+			imgX := float64(x)/ic.zoom - offsetX
+			imgY := float64(y)/ic.zoom - offsetY
+
+			var srcX, srcY int
+
+			if hasTransform {
+				// Convert to source image coordinates first
+				srcPosX := imgX + float64(srcBounds.Min.X)
+				srcPosY := imgY + float64(srcBounds.Min.Y)
+
+				// 1. Translate to center (relative coords)
+				relX := srcPosX - srcCx
+				relY := srcPosY - srcCy
+
+				// 2. Inverse rotate
+				rotX := relX*cosR - relY*sinR
+				rotY := relX*sinR + relY*cosR
+
+				// 3. Apply inverse shear (position-dependent scale)
+				// Normalized position in source (0 to 1)
+				// Use pre-shear position to determine scale factors
+				normY := (rotY + srcH/2) / srcH // 0 at top, 1 at bottom
+				normX := (rotX + srcW/2) / srcW // 0 at left, 1 at right
+
+				// Clamp to [0,1] for interpolation
+				if normY < 0 {
+					normY = 0
+				} else if normY > 1 {
+					normY = 1
+				}
+				if normX < 0 {
+					normX = 0
+				} else if normX > 1 {
+					normX = 1
+				}
+
+				// Interpolate scale factors
+				scaleX := shearTopX + (shearBottomX-shearTopX)*normY
+				scaleY := shearLeftY + (shearRightY-shearLeftY)*normX
+
+				// Inverse scale
+				scaledX := rotX / scaleX
+				scaledY := rotY / scaleY
+
+				// 4. Translate back to source coords
+				srcX = int(scaledX + srcCx)
+				srcY = int(scaledY + srcCy)
+			} else {
+				// Simple case: just offset
+				srcX = int(imgX) + srcBounds.Min.X
+				srcY = int(imgY) + srcBounds.Min.Y
+			}
+
+			// Bounds check
+			if srcX < srcBounds.Min.X || srcX >= srcBounds.Max.X ||
+				srcY < srcBounds.Min.Y || srcY >= srcBounds.Max.Y {
 				continue
 			}
 

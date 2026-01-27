@@ -3,10 +3,20 @@ package via
 import (
 	"fmt"
 	"math"
+	"runtime"
+	"sort"
+	"sync"
 
 	"pcb-tracer/internal/image"
 	"pcb-tracer/pkg/geometry"
 )
+
+// candidateMatch represents a potential via match with its distance.
+type candidateMatch struct {
+	frontIdx int
+	backIdx  int
+	distance float64
+}
 
 // MatchResult holds the results of cross-side via matching.
 type MatchResult struct {
@@ -32,54 +42,61 @@ func MatchViasAcrossSides(frontVias, backVias []Via, tolerancePixels float64) Ma
 		ConfirmedVias: make([]*ConfirmedVia, 0),
 	}
 
-	// Track which back vias have been matched
+	if len(frontVias) == 0 || len(backVias) == 0 {
+		result.Unmatched = len(frontVias) + len(backVias)
+		return result
+	}
+
+	// Phase 1: Parallel distance computation
+	// Find all candidate matches within tolerance
+	candidates := findCandidateMatchesParallel(frontVias, backVias, tolerancePixels)
+
+	// Phase 2: Sort candidates by distance (greedy best-first matching)
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].distance < candidates[j].distance
+	})
+
+	// Phase 3: Greedy matching - assign closest pairs first
+	frontMatched := make([]bool, len(frontVias))
 	backMatched := make([]bool, len(backVias))
 	confirmedNum := 1
 
-	for i := range frontVias {
-		front := &frontVias[i]
-		bestMatch := -1
-		bestDist := tolerancePixels + 1
-
-		// Find closest unmatched back via within tolerance
-		for j := range backVias {
-			if backMatched[j] {
-				continue
-			}
-			back := &backVias[j]
-			dist := front.Center.Distance(back.Center)
-			if dist <= tolerancePixels && dist < bestDist {
-				bestMatch = j
-				bestDist = dist
-			}
+	for _, cand := range candidates {
+		if frontMatched[cand.frontIdx] || backMatched[cand.backIdx] {
+			continue // Already matched
 		}
 
-		if bestMatch >= 0 {
-			// Found a match
-			back := &backVias[bestMatch]
-			front.MatchedViaID = back.ID
-			front.BothSidesConfirmed = true
-			back.MatchedViaID = front.ID
-			back.BothSidesConfirmed = true
-			backMatched[bestMatch] = true
+		// Assign this match
+		front := &frontVias[cand.frontIdx]
+		back := &backVias[cand.backIdx]
 
-			// Create confirmed via for this match
-			cvID := fmt.Sprintf("cvia-%03d", confirmedNum)
-			cv := NewConfirmedVia(cvID, front, back)
-			result.ConfirmedVias = append(result.ConfirmedVias, cv)
-			confirmedNum++
+		front.MatchedViaID = back.ID
+		front.BothSidesConfirmed = true
+		back.MatchedViaID = front.ID
+		back.BothSidesConfirmed = true
 
-			result.Matched++
-			result.AvgError += bestDist
-			if bestDist > result.MaxError {
-				result.MaxError = bestDist
-			}
-		} else {
-			result.Unmatched++
+		frontMatched[cand.frontIdx] = true
+		backMatched[cand.backIdx] = true
+
+		// Create confirmed via
+		cvID := fmt.Sprintf("cvia-%03d", confirmedNum)
+		cv := NewConfirmedVia(cvID, front, back)
+		result.ConfirmedVias = append(result.ConfirmedVias, cv)
+		confirmedNum++
+
+		result.Matched++
+		result.AvgError += cand.distance
+		if cand.distance > result.MaxError {
+			result.MaxError = cand.distance
 		}
 	}
 
-	// Count unmatched back vias
+	// Count unmatched vias
+	for _, matched := range frontMatched {
+		if !matched {
+			result.Unmatched++
+		}
+	}
 	for _, matched := range backMatched {
 		if !matched {
 			result.Unmatched++
@@ -91,6 +108,72 @@ func MatchViasAcrossSides(frontVias, backVias []Via, tolerancePixels float64) Ma
 	}
 
 	return result
+}
+
+// findCandidateMatchesParallel finds all via pairs within tolerance using parallel workers.
+func findCandidateMatchesParallel(frontVias, backVias []Via, tolerancePixels float64) []candidateMatch {
+	numWorkers := runtime.NumCPU()
+	if numWorkers > len(frontVias) {
+		numWorkers = len(frontVias)
+	}
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+
+	// Channel for collecting results
+	resultChan := make(chan []candidateMatch, numWorkers)
+
+	// Divide front vias among workers
+	chunkSize := (len(frontVias) + numWorkers - 1) / numWorkers
+
+	var wg sync.WaitGroup
+	for w := 0; w < numWorkers; w++ {
+		start := w * chunkSize
+		end := start + chunkSize
+		if end > len(frontVias) {
+			end = len(frontVias)
+		}
+		if start >= end {
+			continue
+		}
+
+		wg.Add(1)
+		go func(startIdx, endIdx int) {
+			defer wg.Done()
+			var localMatches []candidateMatch
+
+			for i := startIdx; i < endIdx; i++ {
+				front := &frontVias[i]
+				for j := range backVias {
+					back := &backVias[j]
+					dist := front.Center.Distance(back.Center)
+					if dist <= tolerancePixels {
+						localMatches = append(localMatches, candidateMatch{
+							frontIdx: i,
+							backIdx:  j,
+							distance: dist,
+						})
+					}
+				}
+			}
+
+			resultChan <- localMatches
+		}(start, end)
+	}
+
+	// Close channel when all workers done
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// Collect all results
+	var allCandidates []candidateMatch
+	for matches := range resultChan {
+		allCandidates = append(allCandidates, matches...)
+	}
+
+	return allCandidates
 }
 
 // MatchViasInResults matches vias between front and back detection results.

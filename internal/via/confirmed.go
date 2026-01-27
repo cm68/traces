@@ -2,6 +2,7 @@ package via
 
 import (
 	"fmt"
+	"math"
 
 	"pcb-tracer/pkg/geometry"
 )
@@ -41,43 +42,98 @@ func NewConfirmedVia(id string, front, back *Via) *ConfirmedVia {
 	return cv
 }
 
-// ComputeIntersection computes the polygon intersection of two vias' boundaries.
-// If either via lacks boundary points, circle points are generated.
-// Returns the intersection polygon, or a circle at the averaged center if intersection fails.
+// ComputeIntersection computes a combined boundary for the confirmed via.
+// Uses union (convex hull) instead of intersection to get a fuller, rounder boundary.
+// Then fits the result to a circle, clamped to the max detected radius to prevent overlap.
 func ComputeIntersection(front, back *Via) []geometry.Point2D {
+	avgCenter := geometry.Point2D{
+		X: (front.Center.X + back.Center.X) / 2,
+		Y: (front.Center.Y + back.Center.Y) / 2,
+	}
+
+	// Clamp radius to the larger of the two detected radii (prevents overlap)
+	maxAllowedRadius := front.Radius
+	if back.Radius > maxAllowedRadius {
+		maxAllowedRadius = back.Radius
+	}
+
 	frontBoundary := front.PadBoundary
-	if len(frontBoundary) < 3 {
-		frontBoundary = geometry.GenerateCirclePoints(
-			front.Center.X, front.Center.Y, front.Radius, 32)
-	}
-
 	backBoundary := back.PadBoundary
-	if len(backBoundary) < 3 {
-		backBoundary = geometry.GenerateCirclePoints(
-			back.Center.X, back.Center.Y, back.Radius, 32)
-	}
 
-	// Ensure convex polygons for Sutherland-Hodgman
-	if !geometry.IsConvex(frontBoundary) {
-		frontBoundary = geometry.ConvexHull(frontBoundary)
-	}
-	if !geometry.IsConvex(backBoundary) {
-		backBoundary = geometry.ConvexHull(backBoundary)
-	}
+	// If both have boundaries, combine them and fit a circle
+	if len(frontBoundary) >= 3 && len(backBoundary) >= 3 {
+		// Combine all points from both boundaries
+		combined := make([]geometry.Point2D, 0, len(frontBoundary)+len(backBoundary))
+		combined = append(combined, frontBoundary...)
+		combined = append(combined, backBoundary...)
 
-	intersection := geometry.IntersectPolygons(frontBoundary, backBoundary)
+		// Compute convex hull (union)
+		hull := geometry.ConvexHull(combined)
 
-	// If no intersection (shouldn't happen for matched vias), use averaged circle
-	if len(intersection) < 3 {
-		avgCenter := geometry.Point2D{
-			X: (front.Center.X + back.Center.X) / 2,
-			Y: (front.Center.Y + back.Center.Y) / 2,
+		// Find the maximum distance from averaged center to hull points
+		maxRadiusSq := 0.0
+		for _, p := range hull {
+			dx := p.X - avgCenter.X
+			dy := p.Y - avgCenter.Y
+			distSq := dx*dx + dy*dy
+			if distSq > maxRadiusSq {
+				maxRadiusSq = distSq
+			}
 		}
-		avgRadius := (front.Radius + back.Radius) / 2
-		return geometry.GenerateCirclePoints(avgCenter.X, avgCenter.Y, avgRadius, 32)
+
+		// Use this radius to generate a clean circle
+		circleRadius := math.Sqrt(maxRadiusSq) * 0.95
+		if circleRadius < 1 {
+			circleRadius = (front.Radius + back.Radius) / 2
+		}
+		// Clamp to prevent overlap with neighboring vias
+		if circleRadius > maxAllowedRadius {
+			circleRadius = maxAllowedRadius
+		}
+
+		return geometry.GenerateCirclePoints(avgCenter.X, avgCenter.Y, circleRadius, 32)
 	}
 
-	return intersection
+	// Fall back to using whichever boundary exists, or generate circle
+	if len(frontBoundary) >= 3 {
+		// Fit circle to front boundary
+		maxRadiusSq := 0.0
+		for _, p := range frontBoundary {
+			dx := p.X - avgCenter.X
+			dy := p.Y - avgCenter.Y
+			distSq := dx*dx + dy*dy
+			if distSq > maxRadiusSq {
+				maxRadiusSq = distSq
+			}
+		}
+		circleRadius := math.Sqrt(maxRadiusSq) * 0.95
+		if circleRadius > maxAllowedRadius {
+			circleRadius = maxAllowedRadius
+		}
+		return geometry.GenerateCirclePoints(avgCenter.X, avgCenter.Y, circleRadius, 32)
+	}
+
+	if len(backBoundary) >= 3 {
+		// Fit circle to back boundary
+		maxRadiusSq := 0.0
+		for _, p := range backBoundary {
+			dx := p.X - avgCenter.X
+			dy := p.Y - avgCenter.Y
+			distSq := dx*dx + dy*dy
+			if distSq > maxRadiusSq {
+				maxRadiusSq = distSq
+			}
+		}
+		circleRadius := math.Sqrt(maxRadiusSq) * 0.95
+		if circleRadius > maxAllowedRadius {
+			circleRadius = maxAllowedRadius
+		}
+		return geometry.GenerateCirclePoints(avgCenter.X, avgCenter.Y, circleRadius, 32)
+	}
+
+	// Neither has boundary - use averaged radius
+	avgRadius := (front.Radius + back.Radius) / 2
+	return geometry.GenerateCirclePoints(avgCenter.X, avgCenter.Y, avgRadius, 32)
 }
 
 // HitTest returns true if the point (x, y) is inside this confirmed via.

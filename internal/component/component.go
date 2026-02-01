@@ -510,10 +510,11 @@ type GridCoordinate struct {
 	Count  int     // How many components at this coordinate
 }
 
-// GridMapping holds the discovered X→letter and Y→number mappings.
+// GridMapping holds the discovered coordinate-to-ID mappings.
+// For typical board grids: Y→Letter (rows A,B,C) and X→Number (columns 1,2,3)
 type GridMapping struct {
-	XToLetter []GridCoordinate // X coordinates mapped to letters
-	YToNumber []GridCoordinate // Y coordinates mapped to numbers
+	YToLetter []GridCoordinate // Y coordinates mapped to letters (rows)
+	XToNumber []GridCoordinate // X coordinates mapped to numbers (columns)
 	Format    string           // "LN" or "NL" based on majority
 	Tolerance float64          // Coordinate tolerance for matching (pixels)
 }
@@ -531,8 +532,9 @@ func BuildGridMapping(components []*Component, tolerance float64) *GridMapping {
 	}
 
 	// Track letter/number associations with coordinates
-	letterX := make(map[string][]float64) // letter -> list of X coordinates
-	numberY := make(map[int][]float64)    // number -> list of Y coordinates
+	// Letters map to Y (rows), Numbers map to X (columns)
+	letterY := make(map[string][]float64) // letter -> list of Y coordinates (rows)
+	numberX := make(map[int][]float64)    // number -> list of X coordinates (columns)
 	formatCounts := map[string]int{"LN": 0, "NL": 0}
 
 	for _, comp := range components {
@@ -544,9 +546,12 @@ func BuildGridMapping(components []*Component, tolerance float64) *GridMapping {
 		centerX := comp.Bounds.X + comp.Bounds.Width/2
 		centerY := comp.Bounds.Y + comp.Bounds.Height/2
 
-		letterX[grid.Letter] = append(letterX[grid.Letter], centerX)
-		numberY[grid.Number] = append(numberY[grid.Number], centerY)
+		letterY[grid.Letter] = append(letterY[grid.Letter], centerY)
+		numberX[grid.Number] = append(numberX[grid.Number], centerX)
 		formatCounts[grid.Format]++
+
+		fmt.Printf("GridMapping: %s -> letter %s at Y=%.0f, number %d at X=%.0f\n",
+			comp.ID, grid.Letter, centerY, grid.Number, centerX)
 	}
 
 	// Determine dominant format
@@ -554,24 +559,26 @@ func BuildGridMapping(components []*Component, tolerance float64) *GridMapping {
 		mapping.Format = "NL"
 	}
 
-	// Build X→Letter mapping (average X for each letter)
-	for letter, xCoords := range letterX {
-		avgX := average(xCoords)
-		mapping.XToLetter = append(mapping.XToLetter, GridCoordinate{
-			Value: avgX,
-			ID:    letter,
-			Count: len(xCoords),
-		})
-	}
-
-	// Build Y→Number mapping (average Y for each number)
-	for num, yCoords := range numberY {
+	// Build Y→Letter mapping (average Y for each letter/row)
+	for letter, yCoords := range letterY {
 		avgY := average(yCoords)
-		mapping.YToNumber = append(mapping.YToNumber, GridCoordinate{
+		mapping.YToLetter = append(mapping.YToLetter, GridCoordinate{
 			Value: avgY,
-			ID:    strconv.Itoa(num),
+			ID:    letter,
 			Count: len(yCoords),
 		})
+		fmt.Printf("GridMapping: letter %s -> avgY=%.0f\n", letter, avgY)
+	}
+
+	// Build X→Number mapping (average X for each number/column)
+	for num, xCoords := range numberX {
+		avgX := average(xCoords)
+		mapping.XToNumber = append(mapping.XToNumber, GridCoordinate{
+			Value: avgX,
+			ID:    strconv.Itoa(num),
+			Count: len(xCoords),
+		})
+		fmt.Printf("GridMapping: number %d -> avgX=%.0f\n", num, avgX)
 	}
 
 	return mapping
@@ -580,23 +587,29 @@ func BuildGridMapping(components []*Component, tolerance float64) *GridMapping {
 // SuggestGridID suggests a grid-style ID for a new component based on its position.
 // Returns empty string if no suggestion can be made.
 func (m *GridMapping) SuggestGridID(centerX, centerY float64) string {
-	if m == nil || (len(m.XToLetter) == 0 && len(m.YToNumber) == 0) {
+	if m == nil || (len(m.YToLetter) == 0 && len(m.XToNumber) == 0) {
 		return ""
 	}
 
-	// Find matching letter (by X coordinate)
+	fmt.Printf("SuggestGridID: checking position (%.0f, %.0f) tolerance=%.0f\n", centerX, centerY, m.Tolerance)
+
+	// Find matching letter (by Y coordinate - row)
 	matchedLetter := ""
-	for _, coord := range m.XToLetter {
-		if math.Abs(coord.Value-centerX) <= m.Tolerance {
+	for _, coord := range m.YToLetter {
+		diff := math.Abs(coord.Value - centerY)
+		fmt.Printf("  letter %s: Y=%.0f diff=%.0f\n", coord.ID, coord.Value, diff)
+		if diff <= m.Tolerance {
 			matchedLetter = coord.ID
 			break
 		}
 	}
 
-	// Find matching number (by Y coordinate)
+	// Find matching number (by X coordinate - column)
 	matchedNumber := ""
-	for _, coord := range m.YToNumber {
-		if math.Abs(coord.Value-centerY) <= m.Tolerance {
+	for _, coord := range m.XToNumber {
+		diff := math.Abs(coord.Value - centerX)
+		fmt.Printf("  number %s: X=%.0f diff=%.0f\n", coord.ID, coord.Value, diff)
+		if diff <= m.Tolerance {
 			matchedNumber = coord.ID
 			break
 		}
@@ -636,15 +649,104 @@ func (m *GridMapping) SuggestGridID(centerX, centerY float64) string {
 // fallbackPrefix is used if no grid match found (e.g., "U" for "U1", "U2").
 // Returns the suggested ID.
 func SuggestComponentID(components []*Component, centerX, centerY, tolerance float64, fallbackPrefix string) string {
+	// First try grid-style ID matching
 	mapping := BuildGridMapping(components, tolerance)
 	suggestion := mapping.SuggestGridID(centerX, centerY)
 
 	if suggestion != "" {
+		fmt.Printf("SuggestComponentID: grid match -> %s\n", suggestion)
+		return suggestion
+	}
+
+	// If no grid match, try rectangle overlap matching
+	// Look for components whose bounding boxes overlap on X or Y axis
+	suggestion = suggestFromRectOverlap(components, centerX, centerY, tolerance)
+	if suggestion != "" {
+		fmt.Printf("SuggestComponentID: rect overlap match -> %s\n", suggestion)
 		return suggestion
 	}
 
 	// Fall back to sequential numbering
-	return fmt.Sprintf("%s%d", fallbackPrefix, len(components)+1)
+	fallback := fmt.Sprintf("%s%d", fallbackPrefix, len(components)+1)
+	fmt.Printf("SuggestComponentID: no match, using fallback -> %s\n", fallback)
+	return fallback
+}
+
+// suggestFromRectOverlap finds components with overlapping X or Y ranges and suggests based on their IDs.
+func suggestFromRectOverlap(components []*Component, centerX, centerY, tolerance float64) string {
+	var sameRowComps []*Component  // Same Y range (horizontal neighbors)
+	var sameColComps []*Component  // Same X range (vertical neighbors)
+
+	for _, comp := range components {
+		// Check if Y ranges overlap (same row)
+		compMinY := comp.Bounds.Y
+		compMaxY := comp.Bounds.Y + comp.Bounds.Height
+		if centerY >= compMinY-tolerance && centerY <= compMaxY+tolerance {
+			sameRowComps = append(sameRowComps, comp)
+		}
+
+		// Check if X ranges overlap (same column)
+		compMinX := comp.Bounds.X
+		compMaxX := comp.Bounds.X + comp.Bounds.Width
+		if centerX >= compMinX-tolerance && centerX <= compMaxX+tolerance {
+			sameColComps = append(sameColComps, comp)
+		}
+	}
+
+	fmt.Printf("suggestFromRectOverlap: found %d same-row, %d same-col components\n",
+		len(sameRowComps), len(sameColComps))
+
+	// Try to extract grid info from overlapping components
+	var matchedLetter, matchedNumber string
+	var format string = "LN"
+
+	// From same-row components, extract the letter (row identifier)
+	for _, comp := range sameRowComps {
+		grid := ParseGridID(comp.ID)
+		if grid != nil {
+			matchedLetter = grid.Letter
+			format = grid.Format
+			fmt.Printf("  same-row %s has letter %s\n", comp.ID, matchedLetter)
+			break
+		}
+	}
+
+	// From same-column components, extract the number (column identifier)
+	for _, comp := range sameColComps {
+		grid := ParseGridID(comp.ID)
+		if grid != nil {
+			matchedNumber = strconv.Itoa(grid.Number)
+			if matchedLetter == "" {
+				format = grid.Format
+			}
+			fmt.Printf("  same-col %s has number %s\n", comp.ID, matchedNumber)
+			break
+		}
+	}
+
+	// Build suggestion
+	if matchedLetter != "" && matchedNumber != "" {
+		if format == "NL" {
+			return matchedNumber + matchedLetter
+		}
+		return matchedLetter + matchedNumber
+	}
+
+	if matchedLetter != "" {
+		if format == "NL" {
+			return "?" + matchedLetter
+		}
+		return matchedLetter + "?"
+	}
+
+	if matchedNumber != "" {
+		if format == "NL" {
+			return matchedNumber + "?"
+		}
+		return "?" + matchedNumber
+	}
+
+	return ""
 }
 
 // average calculates the average of a slice of float64.

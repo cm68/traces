@@ -15,30 +15,38 @@ import (
 // OCRParams holds tunable OCR preprocessing parameters.
 type OCRParams struct {
 	// Histogram threshold: percentage of brightest pixels to treat as text (0-100)
-	BrightestPercent float64 `json:"brightest_pct"`
+	BrightestPercent float64 `json:"brightest_pct,omitempty"`
 
 	// Minimum threshold value (0-255) to avoid noise
-	MinThreshold int `json:"min_threshold"`
+	MinThreshold int `json:"min_threshold,omitempty"`
+
+	// Fixed threshold value (0-255) - used when not Otsu/histogram
+	FixedThreshold int `json:"fixed_threshold,omitempty"`
 
 	// CLAHE parameters
-	CLAHEClipLimit float64 `json:"clahe_clip"`
-	CLAHETileSize  int     `json:"clahe_tile"`
+	CLAHEClipLimit float64 `json:"clahe_clip,omitempty"`
+	CLAHETileSize  int     `json:"clahe_tile,omitempty"`
 
 	// Scaling: minimum dimension target for upscaling
-	MinScaleDim int `json:"min_scale_dim"`
+	MinScaleDim int `json:"min_scale_dim,omitempty"`
 
 	// Invert polarity (true = expect light text on dark background)
-	InvertPolarity bool `json:"invert"`
+	InvertPolarity bool `json:"invert,omitempty"`
 
 	// Use Otsu threshold instead of histogram-based
-	UseOtsu bool `json:"use_otsu"`
+	UseOtsu bool `json:"use_otsu,omitempty"`
+
+	// Adaptive threshold parameters
+	UseAdaptive   bool `json:"use_adaptive,omitempty"`
+	AdaptiveBlock int  `json:"adaptive_block,omitempty"` // Block size (odd number)
+	AdaptiveC     int  `json:"adaptive_c,omitempty"`     // Constant subtracted from mean
 
 	// Morphological operations
-	DilateIterations int `json:"dilate"`
-	ErodeIterations  int `json:"erode"`
+	DilateIterations int `json:"dilate,omitempty"`
+	ErodeIterations  int `json:"erode,omitempty"`
 
 	// PSM mode (page segmentation mode)
-	PSMMode int `json:"psm_mode"`
+	PSMMode int `json:"psm_mode,omitempty"`
 }
 
 // DefaultOCRParams returns sensible defaults for IC package text.
@@ -261,65 +269,94 @@ func characterOverlap(detected, truth string) float64 {
 
 // AnnealOCRParams tries different OCR parameter combinations to find the best match.
 // Returns the best parameters found and the achieved similarity score.
+// This is VERY aggressive with threshold manipulation.
 func (e *Engine) AnnealOCRParams(img gocv.Mat, groundTruth string, maxIterations int) (OCRParams, float64, string) {
 	if img.Empty() || groundTruth == "" {
 		return DefaultOCRParams(), 0.0, ""
 	}
 
+	// Strip logo markers from truth for clean comparison
+	cleanTruth := stripLogoMarkers(groundTruth)
+	fmt.Printf("OCR Annealing: searching (truth=%q, clean=%q)\n", groundTruth, cleanTruth)
+
 	bestParams := DefaultOCRParams()
 	bestScore := 0.0
 	bestText := ""
-
-	// Parameter search space
-	brightestPcts := []float64{5.0, 10.0, 15.0, 20.0, 25.0}
-	minThresholds := []int{80, 100, 128, 150, 180}
-	claheClips := []float64{1.5, 2.0, 3.0, 4.0}
-	claheTiles := []int{4, 8, 16}
-	scaleDims := []int{100, 150, 200, 300}
-	invertOptions := []bool{true, false}
-	otsuOptions := []bool{true, false}
-	psmModes := []int{6, 7, 11, 13} // SINGLE_BLOCK, SINGLE_LINE, SPARSE_TEXT, RAW_LINE
-
 	iterations := 0
 
-	fmt.Printf("OCR Annealing: searching for best params (truth=%q)\n", groundTruth)
+	// Helper to try a param set
+	tryParams := func(params OCRParams, desc string) bool {
+		if iterations >= maxIterations {
+			return true // stop
+		}
+		text := e.recognizeWithParams(img, params)
+		score := TextSimilarity(text, groundTruth)
+		iterations++
 
-	// First, try Otsu-based methods (usually best for IC text)
-	for _, otsu := range otsuOptions {
-		for _, invert := range invertOptions {
-			for _, clip := range claheClips {
-				for _, tile := range claheTiles {
-					for _, scale := range scaleDims {
-						for _, psm := range psmModes {
-							if iterations >= maxIterations {
-								goto done
-							}
+		if score > bestScore {
+			bestScore = score
+			bestParams = params
+			bestText = text
+			fmt.Printf("  [%d] score=%.3f %s -> %q\n", iterations, score, desc, text)
+			if score >= 0.95 {
+				return true // stop early
+			}
+		}
+		return false
+	}
 
-							params := OCRParams{
-								UseOtsu:        otsu,
-								InvertPolarity: invert,
-								CLAHEClipLimit: clip,
-								CLAHETileSize:  tile,
-								MinScaleDim:    scale,
-								PSMMode:        psm,
-							}
+	// ========== Declare all parameter slices upfront (Go doesn't allow goto over declarations) ==========
+	fixedThresholds := []int{40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200, 210, 220, 230}
+	scales := []int{100, 150, 200, 300, 400}
+	psmModes := []int{6, 7, 13, 11, 3} // BLOCK, LINE, RAW_LINE, SPARSE, AUTO
+	claheClips := []float64{1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0}
+	claheTiles := []int{2, 4, 8, 16}
+	brightestPcts := []float64{3, 5, 7, 10, 15, 20, 25, 30, 40, 50}
+	minThresholds := []int{50, 80, 100, 120, 140, 160}
 
-							text := e.recognizeWithParams(img, params)
-							score := TextSimilarity(text, groundTruth)
-							iterations++
+	// ========== PHASE 1: Fixed thresholds (most direct for IC text) ==========
+	// IC text is typically light markings on dark plastic
+	// Try many fixed threshold values
+	fmt.Println("  Phase 1: Fixed thresholds...")
 
-							if score > bestScore {
-								bestScore = score
-								bestParams = params
-								bestText = text
-								fmt.Printf("  [%d] score=%.3f otsu=%v inv=%v clip=%.1f tile=%d scale=%d psm=%d -> %q\n",
-									iterations, score, otsu, invert, clip, tile, scale, psm, text)
+	for _, thresh := range fixedThresholds {
+		for _, invert := range []bool{true, false} {
+			for _, scale := range scales {
+				for _, psm := range psmModes {
+					params := OCRParams{
+						UseOtsu:          false,
+						FixedThreshold:   thresh,
+						InvertPolarity:   invert,
+						MinScaleDim:      scale,
+						PSMMode:          psm,
+						CLAHEClipLimit:   0, // No CLAHE
+					}
+					if tryParams(params, fmt.Sprintf("fixed=%d inv=%v scale=%d psm=%d", thresh, invert, scale, psm)) {
+						goto done
+					}
+				}
+			}
+		}
+	}
 
-								// Perfect match - stop early
-								if score >= 0.99 {
-									goto done
-								}
-							}
+	// ========== PHASE 2: CLAHE + Otsu ==========
+	fmt.Println("  Phase 2: CLAHE + Otsu...")
+
+	for _, clip := range claheClips {
+		for _, tile := range claheTiles {
+			for _, invert := range []bool{true, false} {
+				for _, scale := range scales {
+					for _, psm := range psmModes {
+						params := OCRParams{
+							UseOtsu:        true,
+							InvertPolarity: invert,
+							CLAHEClipLimit: clip,
+							CLAHETileSize:  tile,
+							MinScaleDim:    scale,
+							PSMMode:        psm,
+						}
+						if tryParams(params, fmt.Sprintf("otsu clip=%.1f tile=%d inv=%v scale=%d psm=%d", clip, tile, invert, scale, psm)) {
+							goto done
 						}
 					}
 				}
@@ -327,44 +364,72 @@ func (e *Engine) AnnealOCRParams(img gocv.Mat, groundTruth string, maxIterations
 		}
 	}
 
-	// Then try histogram-based thresholding if Otsu didn't work well
-	if bestScore < 0.5 {
-		for _, pct := range brightestPcts {
-			for _, minTh := range minThresholds {
-				for _, invert := range invertOptions {
-					for _, scale := range scaleDims {
-						for _, psm := range psmModes {
-							if iterations >= maxIterations {
-								goto done
-							}
+	// ========== PHASE 3: Histogram-based (brightest N%) ==========
+	fmt.Println("  Phase 3: Histogram brightest %...")
 
-							params := OCRParams{
-								BrightestPercent: pct,
-								MinThreshold:     minTh,
-								InvertPolarity:   invert,
-								UseOtsu:          false,
-								MinScaleDim:      scale,
-								PSMMode:          psm,
-								CLAHEClipLimit:   2.0,
-								CLAHETileSize:    8,
-							}
-
-							text := e.recognizeWithParams(img, params)
-							score := TextSimilarity(text, groundTruth)
-							iterations++
-
-							if score > bestScore {
-								bestScore = score
-								bestParams = params
-								bestText = text
-								fmt.Printf("  [%d] score=%.3f hist=%v%% minTh=%d inv=%v scale=%d psm=%d -> %q\n",
-									iterations, score, pct, minTh, invert, scale, psm, text)
-
-								if score >= 0.99 {
-									goto done
-								}
-							}
+	for _, pct := range brightestPcts {
+		for _, minTh := range minThresholds {
+			for _, invert := range []bool{true, false} {
+				for _, scale := range scales {
+					for _, psm := range psmModes {
+						params := OCRParams{
+							UseOtsu:          false,
+							BrightestPercent: pct,
+							MinThreshold:     minTh,
+							InvertPolarity:   invert,
+							MinScaleDim:      scale,
+							PSMMode:          psm,
 						}
+						if tryParams(params, fmt.Sprintf("hist=%v%% min=%d inv=%v scale=%d psm=%d", pct, minTh, invert, scale, psm)) {
+							goto done
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// ========== PHASE 4: Morphological operations ==========
+	fmt.Println("  Phase 4: Morphological operations...")
+	for _, thresh := range []int{80, 100, 120, 140, 160, 180} {
+		for _, dilate := range []int{0, 1, 2} {
+			for _, erode := range []int{0, 1, 2} {
+				for _, invert := range []bool{true, false} {
+					for _, scale := range []int{150, 200, 300} {
+						params := OCRParams{
+							UseOtsu:          false,
+							FixedThreshold:   thresh,
+							InvertPolarity:   invert,
+							MinScaleDim:      scale,
+							PSMMode:          6,
+							DilateIterations: dilate,
+							ErodeIterations:  erode,
+						}
+						if tryParams(params, fmt.Sprintf("morph th=%d d=%d e=%d inv=%v", thresh, dilate, erode, invert)) {
+							goto done
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// ========== PHASE 5: Adaptive threshold ==========
+	fmt.Println("  Phase 5: Adaptive threshold...")
+	for _, blockSize := range []int{11, 21, 31, 51} {
+		for _, c := range []int{2, 5, 10, 15, 20} {
+			for _, invert := range []bool{true, false} {
+				for _, scale := range []int{150, 200, 300} {
+					params := OCRParams{
+						UseAdaptive:      true,
+						AdaptiveBlock:    blockSize,
+						AdaptiveC:        c,
+						InvertPolarity:   invert,
+						MinScaleDim:      scale,
+						PSMMode:          6,
+					}
+					if tryParams(params, fmt.Sprintf("adaptive blk=%d c=%d inv=%v", blockSize, c, invert)) {
+						goto done
 					}
 				}
 			}
@@ -373,10 +438,7 @@ func (e *Engine) AnnealOCRParams(img gocv.Mat, groundTruth string, maxIterations
 
 done:
 	fmt.Printf("OCR Annealing: best score=%.3f after %d iterations\n", bestScore, iterations)
-	fmt.Printf("  Best params: otsu=%v inv=%v clip=%.1f tile=%d scale=%d psm=%d\n",
-		bestParams.UseOtsu, bestParams.InvertPolarity, bestParams.CLAHEClipLimit,
-		bestParams.CLAHETileSize, bestParams.MinScaleDim, bestParams.PSMMode)
-	fmt.Printf("  Best text: %q (truth: %q)\n", bestText, groundTruth)
+	fmt.Printf("  Best text: %q\n", bestText)
 
 	return bestParams, bestScore, bestText
 }
@@ -466,12 +528,32 @@ func preprocessWithParams(region gocv.Mat, params OCRParams) gocv.Mat {
 		enhanced = gray
 	}
 
-	// Threshold
+	// Threshold - multiple strategies
 	binary := gocv.NewMat()
-	if params.UseOtsu {
+	if params.UseAdaptive {
+		// Adaptive threshold - works well for uneven lighting
+		blockSize := params.AdaptiveBlock
+		if blockSize < 3 {
+			blockSize = 11
+		}
+		// Ensure block size is odd
+		if blockSize%2 == 0 {
+			blockSize++
+		}
+		c := params.AdaptiveC
+		if c == 0 {
+			c = 5
+		}
+		gocv.AdaptiveThreshold(enhanced, &binary, 255,
+			gocv.AdaptiveThresholdMean, gocv.ThresholdBinary, blockSize, float32(c))
+	} else if params.UseOtsu {
+		// Otsu's method - automatic threshold selection
 		gocv.Threshold(enhanced, &binary, 0, 255, gocv.ThresholdBinary|gocv.ThresholdOtsu)
+	} else if params.FixedThreshold > 0 {
+		// Fixed threshold - direct control
+		gocv.Threshold(enhanced, &binary, float32(params.FixedThreshold), 255, gocv.ThresholdBinary)
 	} else {
-		// Histogram-based threshold
+		// Histogram-based threshold - brightest N%
 		threshold := findHistogramThreshold(enhanced, params.BrightestPercent, params.MinThreshold)
 		gocv.Threshold(enhanced, &binary, float32(threshold), 255, gocv.ThresholdBinary)
 	}

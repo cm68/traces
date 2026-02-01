@@ -14,7 +14,9 @@ import (
 	"pcb-tracer/internal/alignment"
 	"pcb-tracer/internal/app"
 	"pcb-tracer/internal/board"
+	"pcb-tracer/internal/component"
 	pcbimage "pcb-tracer/internal/image"
+	"pcb-tracer/internal/ocr"
 	"pcb-tracer/internal/via"
 	"pcb-tracer/pkg/colorutil"
 	"pcb-tracer/pkg/geometry"
@@ -23,8 +25,10 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
+	"gocv.io/x/gocv"
 )
 
 // Panel names for ShowPanel method.
@@ -61,7 +65,7 @@ func NewSidePanel(state *app.State, canvas *canvas.ImageCanvas) *SidePanel {
 
 	// Create individual panels
 	sp.importPanel = NewImportPanel(state, canvas)
-	sp.componentsPanel = NewComponentsPanel(state)
+	sp.componentsPanel = NewComponentsPanel(state, canvas)
 	sp.tracesPanel = NewTracesPanel(state, canvas)
 	sp.propertiesPanel = NewPropertySheet(state, canvas, func() {
 		// Callback when properties are applied - refresh import panel labels
@@ -159,6 +163,7 @@ func (sp *SidePanel) SyncLayers() {
 func (sp *SidePanel) SetWindow(w fyne.Window) {
 	sp.importPanel.SetWindow(w)
 	sp.propertiesPanel.SetWindow(w)
+	sp.componentsPanel.SetWindow(w)
 }
 
 // AutoDetectAndAlign runs automatic contact detection on both images and aligns them.
@@ -339,6 +344,13 @@ func NewImportPanel(state *app.State, cvs *canvas.ImageCanvas) *ImportPanel {
 	reImportButton := widget.NewButton("Re-import with Crop", func() { ip.onReImportWithCrop() })
 
 	// Layout
+	// Background mode radio group
+	bgRadio := widget.NewRadioGroup([]string{"Checkerboard", "Solid Black"}, func(selected string) {
+		ip.canvas.SetSolidBlackBackground(selected == "Solid Black")
+	})
+	bgRadio.Horizontal = true
+	bgRadio.SetSelected("Checkerboard")
+
 	ip.container = container.NewVBox(
 		widget.NewCard("Board Type", "", container.NewVBox(
 			ip.boardSelect,
@@ -362,6 +374,9 @@ func NewImportPanel(state *app.State, cvs *canvas.ImageCanvas) *ImportPanel {
 			ip.autoAlignButton,
 			ip.alignButton,
 			ip.alignStatus,
+			widget.NewSeparator(),
+			widget.NewLabel("Background:"),
+			bgRadio,
 			widget.NewSeparator(),
 			widget.NewLabel("Manual Adjust (use Layer above):"),
 			compassRose,
@@ -2048,30 +2063,179 @@ func (ip *ImportPanel) updateImageStatus() {
 // ComponentsPanel displays and manages detected components.
 type ComponentsPanel struct {
 	state     *app.State
+	canvas    *canvas.ImageCanvas
 	container fyne.CanvasObject
+	window    fyne.Window
 
-	list       *widget.List
-	detailCard *widget.Card
+	list         *widget.List
+	detailCard   *widget.Card
+	hoveredIndex int // -1 when no component is hovered
 }
 
+// focusableContainer wraps a container to receive keyboard events.
+type focusableContainer struct {
+	widget.BaseWidget
+	content     fyne.CanvasObject
+	onTypedKey  func(*fyne.KeyEvent)
+	onTypedRune func(rune)
+	focused     bool
+}
+
+func newFocusableContainer(content fyne.CanvasObject, onTypedKey func(*fyne.KeyEvent)) *focusableContainer {
+	fc := &focusableContainer{
+		content:    content,
+		onTypedKey: onTypedKey,
+	}
+	fc.ExtendBaseWidget(fc)
+	return fc
+}
+
+func (fc *focusableContainer) CreateRenderer() fyne.WidgetRenderer {
+	return &focusableContainerRenderer{container: fc}
+}
+
+func (fc *focusableContainer) FocusGained() {
+	fc.focused = true
+}
+
+func (fc *focusableContainer) FocusLost() {
+	fc.focused = false
+}
+
+func (fc *focusableContainer) TypedRune(r rune) {
+	// Handle +, -, *, / as special keys for component adjustment
+	if fc.onTypedKey != nil {
+		switch r {
+		case '+', '=': // + or = (unshifted +)
+			fc.onTypedKey(&fyne.KeyEvent{Name: "Plus"})
+		case '-':
+			fc.onTypedKey(&fyne.KeyEvent{Name: "Minus"})
+		case '*':
+			fc.onTypedKey(&fyne.KeyEvent{Name: "Asterisk"})
+		case '/':
+			fc.onTypedKey(&fyne.KeyEvent{Name: "Slash"})
+		}
+	}
+}
+
+func (fc *focusableContainer) TypedKey(ev *fyne.KeyEvent) {
+	if fc.onTypedKey != nil {
+		fc.onTypedKey(ev)
+	}
+}
+
+func (fc *focusableContainer) Focused() bool {
+	return fc.focused
+}
+
+type focusableContainerRenderer struct {
+	container *focusableContainer
+}
+
+func (r *focusableContainerRenderer) Layout(size fyne.Size) {
+	r.container.content.Resize(size)
+}
+
+func (r *focusableContainerRenderer) MinSize() fyne.Size {
+	return r.container.content.MinSize()
+}
+
+func (r *focusableContainerRenderer) Refresh() {
+	r.container.content.Refresh()
+}
+
+func (r *focusableContainerRenderer) Objects() []fyne.CanvasObject {
+	return []fyne.CanvasObject{r.container.content}
+}
+
+func (r *focusableContainerRenderer) Destroy() {}
+
+// tappableListItem is a label that supports right-click for deletion.
+type tappableListItem struct {
+	widget.Label
+	onRightClick func()
+	onMouseIn    func()
+	onMouseOut   func()
+	focusTarget  fyne.Focusable // Widget to focus on hover
+}
+
+func newTappableListItem(onRightClick func()) *tappableListItem {
+	item := &tappableListItem{onRightClick: onRightClick}
+	item.ExtendBaseWidget(item)
+	return item
+}
+
+// TappedSecondary implements fyne.SecondaryTappable for right-click.
+func (t *tappableListItem) TappedSecondary(_ *fyne.PointEvent) {
+	if t.onRightClick != nil {
+		t.onRightClick()
+	}
+}
+
+// MouseIn implements desktop.Hoverable for hover enter.
+func (t *tappableListItem) MouseIn(_ *desktop.MouseEvent) {
+	if t.onMouseIn != nil {
+		t.onMouseIn()
+	}
+	// Request focus to enable keyboard input
+	if t.focusTarget != nil {
+		if c := fyne.CurrentApp().Driver().CanvasForObject(t); c != nil {
+			c.Focus(t.focusTarget)
+		}
+	}
+}
+
+// MouseOut implements desktop.Hoverable for hover exit.
+func (t *tappableListItem) MouseOut() {
+	if t.onMouseOut != nil {
+		t.onMouseOut()
+	}
+}
+
+// MouseMoved implements desktop.Hoverable (required but unused).
+func (t *tappableListItem) MouseMoved(_ *desktop.MouseEvent) {}
+
 // NewComponentsPanel creates a new components panel.
-func NewComponentsPanel(state *app.State) *ComponentsPanel {
+func NewComponentsPanel(state *app.State, canv *canvas.ImageCanvas) *ComponentsPanel {
 	cp := &ComponentsPanel{
-		state: state,
+		state:        state,
+		canvas:       canv,
+		hoveredIndex: -1,
 	}
 
-	// Component list
+	// Create focusable wrapper for keyboard input (will be set up after list creation)
+	var focusWrapper *focusableContainer
+
+	// Component list with right-click delete support
 	cp.list = widget.NewList(
 		func() int {
 			return len(state.Components)
 		},
 		func() fyne.CanvasObject {
-			return widget.NewLabel("Component")
+			// Create a tappable item - onRightClick will be set in update
+			return newTappableListItem(nil)
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
+			item := obj.(*tappableListItem)
 			if id < len(state.Components) {
 				comp := state.Components[id]
-				obj.(*widget.Label).SetText(fmt.Sprintf("%s - %s", comp.ID, comp.PartNumber))
+				item.SetText(fmt.Sprintf("%s - %s", comp.ID, comp.Package))
+				// Set up right-click edit handler for this item
+				itemID := id // Capture current id
+				item.onRightClick = func() {
+					cp.showEditDialog(itemID)
+				}
+				// Set up hover handlers for highlighting and keyboard focus
+				item.onMouseIn = func() {
+					cp.hoveredIndex = itemID
+					cp.highlightComponent(itemID)
+				}
+				item.onMouseOut = func() {
+					cp.hoveredIndex = -1
+					cp.clearHighlight()
+				}
+				// Set focus target for keyboard input
+				item.focusTarget = focusWrapper
 			}
 		},
 	)
@@ -2085,22 +2249,47 @@ func NewComponentsPanel(state *app.State) *ComponentsPanel {
 	// Detail card (empty initially)
 	cp.detailCard = widget.NewCard("Component Details", "", widget.NewLabel("Select a component"))
 
-	// Buttons
-	detectBtn := widget.NewButton("Detect Components", func() {
-		// TODO: Implement component detection
+	// OCR button
+	ocrBtn := widget.NewButton("OCR Silkscreen", func() {
+		cp.onOCRSilkscreen()
 	})
 
-	ocrBtn := widget.NewButton("Run OCR", func() {
-		// TODO: Implement OCR
-	})
+	// Set up right-click handler for deleting components on canvas
+	cp.canvas.OnRightClick(cp.onRightClickDeleteComponent)
+
+	// Set up left-click handler for resizing components
+	cp.canvas.OnLeftClick(cp.onLeftClickResize)
+
+	// Set up middle-click handler for flood fill component detection
+	cp.canvas.OnMiddleClick(cp.onMiddleClickFloodFill)
+
+	// Wrap list in a scroll container with fixed height for ~5 items
+	listScroll := container.NewVScroll(cp.list)
+	listScroll.SetMinSize(fyne.NewSize(0, 175)) // ~35px per item * 5 items
+
+	// Create focusable wrapper with key handler
+	focusWrapper = newFocusableContainer(listScroll, cp.onKeyPressed)
 
 	// Layout
 	cp.container = container.NewBorder(
-		container.NewVBox(detectBtn, ocrBtn),
+		ocrBtn,
 		cp.detailCard,
 		nil, nil,
-		cp.list,
+		focusWrapper,
 	)
+
+	// Subscribe to component change events to refresh the list
+	state.On(app.EventComponentsChanged, func(_ interface{}) {
+		cp.list.Refresh()
+		cp.updateComponentOverlay()
+	})
+
+	// Also subscribe to project loaded to handle startup case where
+	// components are loaded before panel is created
+	state.On(app.EventProjectLoaded, func(_ interface{}) {
+		cp.list.Refresh()
+		cp.updateComponentOverlay()
+	})
 
 	return cp
 }
@@ -2110,8 +2299,547 @@ func (cp *ComponentsPanel) Container() fyne.CanvasObject {
 	return cp.container
 }
 
+// SetWindow sets the parent window for dialogs.
+func (cp *ComponentsPanel) SetWindow(w fyne.Window) {
+	cp.window = w
+}
+
+// showEditDialog opens the component edit dialog for the given index.
+func (cp *ComponentsPanel) showEditDialog(index int) {
+	if index < 0 || index >= len(cp.state.Components) {
+		return
+	}
+	if cp.window == nil {
+		fmt.Println("No window set for ComponentsPanel")
+		return
+	}
+
+	comp := cp.state.Components[index]
+
+	// Get the rendered canvas image for OCR
+	img := cp.canvas.GetRenderedOutput()
+
+	dlg := dialogs.NewComponentEditDialog(
+		comp,
+		cp.window,
+		img,
+		func(c *component.Component) {
+			// On save - update UI
+			cp.state.SetModified(true)
+			cp.list.Refresh()
+			cp.updateComponentOverlay()
+			fmt.Printf("Saved component %s\n", c.ID)
+		},
+		func(c *component.Component) {
+			// On delete - find and remove component
+			for i, comp := range cp.state.Components {
+				if comp == c {
+					cp.deleteComponent(i)
+					break
+				}
+			}
+		},
+	)
+
+	// Set OCR training params and callback
+	dlg.SetOCRTraining(cp.state.OCRLearnedParams, func(params *ocr.LearnedParams) {
+		// Mark project as modified when OCR params are updated
+		cp.state.SetModified(true)
+		fmt.Printf("OCR params updated: %d samples, avg score %.2f\n",
+			len(params.Samples), params.AvgScore)
+	})
+
+	dlg.Show()
+}
+
 func (cp *ComponentsPanel) showComponentDetail(comp interface{}) {
 	// TODO: Show component details
+}
+
+// deleteComponent removes a component by index.
+func (cp *ComponentsPanel) deleteComponent(index int) {
+	if index < 0 || index >= len(cp.state.Components) {
+		return
+	}
+
+	comp := cp.state.Components[index]
+	fmt.Printf("Deleting component %s (%s)\n", comp.ID, comp.Package)
+
+	// Remove from slice
+	cp.state.Components = append(cp.state.Components[:index], cp.state.Components[index+1:]...)
+	cp.state.SetModified(true)
+
+	// Refresh UI
+	cp.list.Refresh()
+	cp.updateComponentOverlay()
+}
+
+// highlightComponent shows a highlight overlay for the component at the given index.
+func (cp *ComponentsPanel) highlightComponent(index int) {
+	if index < 0 || index >= len(cp.state.Components) {
+		return
+	}
+
+	comp := cp.state.Components[index]
+
+	// Create a highlight overlay with a bright color
+	highlight := &canvas.Overlay{
+		Color: color.RGBA{R: 255, G: 255, B: 0, A: 255}, // Yellow highlight
+		Rectangles: []canvas.OverlayRect{
+			{
+				X:      int(comp.Bounds.X),
+				Y:      int(comp.Bounds.Y),
+				Width:  int(comp.Bounds.Width),
+				Height: int(comp.Bounds.Height),
+				Fill:   canvas.FillCrosshatch,
+			},
+		},
+		Layer: canvas.LayerFront,
+	}
+
+	cp.canvas.SetOverlay("component_highlight", highlight)
+	cp.canvas.Refresh()
+}
+
+// clearHighlight removes the component highlight overlay.
+func (cp *ComponentsPanel) clearHighlight() {
+	cp.canvas.SetOverlay("component_highlight", nil)
+	cp.canvas.Refresh()
+}
+
+// onKeyPressed handles keyboard input for component adjustment.
+// +/- adjust length (height), * // adjust width, arrows move the component.
+// Granularity is 0.1mm.
+func (cp *ComponentsPanel) onKeyPressed(ev *fyne.KeyEvent) {
+	if cp.hoveredIndex < 0 || cp.hoveredIndex >= len(cp.state.Components) {
+		return
+	}
+
+	// Calculate 0.1mm in pixels
+	dpi := cp.state.DPI
+	if dpi <= 0 {
+		dpi = 1200 // Default
+	}
+	// 0.1mm = 0.00394 inches
+	step := dpi * 0.00394
+
+	comp := cp.state.Components[cp.hoveredIndex]
+
+	switch ev.Name {
+	case "Plus": // + increases length (height)
+		comp.Bounds.Height += step
+	case "Minus": // - decreases length (height)
+		if comp.Bounds.Height > step {
+			comp.Bounds.Height -= step
+		}
+	case "Asterisk": // * increases width
+		comp.Bounds.Width += step
+	case "Slash": // / decreases width
+		if comp.Bounds.Width > step {
+			comp.Bounds.Width -= step
+		}
+	case fyne.KeyUp:
+		comp.Bounds.Y -= step
+	case fyne.KeyDown:
+		comp.Bounds.Y += step
+	case fyne.KeyLeft:
+		comp.Bounds.X -= step
+	case fyne.KeyRight:
+		comp.Bounds.X += step
+	default:
+		return // Unknown key, don't update
+	}
+
+	cp.state.SetModified(true)
+	cp.updateComponentOverlay()
+	cp.highlightComponent(cp.hoveredIndex)
+	cp.list.Refresh()
+
+	fmt.Printf("Adjusted component %s: pos=(%.1f,%.1f) size=%.1fx%.1f\n",
+		comp.ID, comp.Bounds.X, comp.Bounds.Y, comp.Bounds.Width, comp.Bounds.Height)
+}
+
+// onRightClickDeleteComponent handles right-click to delete components on the canvas.
+func (cp *ComponentsPanel) onRightClickDeleteComponent(x, y float64) {
+	// Find component at click position
+	for i, comp := range cp.state.Components {
+		if x >= comp.Bounds.X && x <= comp.Bounds.X+comp.Bounds.Width &&
+			y >= comp.Bounds.Y && y <= comp.Bounds.Y+comp.Bounds.Height {
+			cp.deleteComponent(i)
+			return
+		}
+	}
+}
+
+// onLeftClickResize handles left-click to resize component bounds.
+// Clicking near an edge shrinks/expands that edge toward/away from the click.
+func (cp *ComponentsPanel) onLeftClickResize(x, y float64) {
+	const edgeThreshold = 10.0 // pixels from edge to trigger resize
+
+	// Find component at click position
+	for i, comp := range cp.state.Components {
+		// Check if click is near the edges of this component
+		left := comp.Bounds.X
+		right := comp.Bounds.X + comp.Bounds.Width
+		top := comp.Bounds.Y
+		bottom := comp.Bounds.Y + comp.Bounds.Height
+
+		// Must be within vertical range
+		if y < top-edgeThreshold || y > bottom+edgeThreshold {
+			continue
+		}
+		// Must be within horizontal range
+		if x < left-edgeThreshold || x > right+edgeThreshold {
+			continue
+		}
+
+		// Check which edge is closest
+		distLeft := abs64(x - left)
+		distRight := abs64(x - right)
+		distTop := abs64(y - top)
+		distBottom := abs64(y - bottom)
+
+		minDist := distLeft
+		edge := "left"
+		if distRight < minDist {
+			minDist = distRight
+			edge = "right"
+		}
+		if distTop < minDist {
+			minDist = distTop
+			edge = "top"
+		}
+		if distBottom < minDist {
+			minDist = distBottom
+			edge = "bottom"
+		}
+
+		// Only trigger if near an edge
+		if minDist > edgeThreshold {
+			continue
+		}
+
+		// Move the edge to the click position
+		switch edge {
+		case "left":
+			delta := x - left
+			cp.state.Components[i].Bounds.X = x
+			cp.state.Components[i].Bounds.Width -= delta
+		case "right":
+			cp.state.Components[i].Bounds.Width = x - left
+		case "top":
+			delta := y - top
+			cp.state.Components[i].Bounds.Y = y
+			cp.state.Components[i].Bounds.Height -= delta
+		case "bottom":
+			cp.state.Components[i].Bounds.Height = y - top
+		}
+
+		cp.state.SetModified(true)
+		cp.updateComponentOverlay()
+		fmt.Printf("Resized component %s %s edge to %.0f\n", comp.ID, edge, map[string]float64{
+			"left": x, "right": x, "top": y, "bottom": y,
+		}[edge])
+		return
+	}
+}
+
+// abs64 returns the absolute value of a float64.
+func abs64(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+// onMiddleClickFloodFill handles middle-click for flood fill component detection.
+func (cp *ComponentsPanel) onMiddleClickFloodFill(x, y float64) {
+	// Get the rendered canvas output (composited, aligned, stretched)
+	img := cp.canvas.GetRenderedOutput()
+	if img == nil {
+		fmt.Println("No rendered image available for flood fill")
+		return
+	}
+
+	clickX, clickY := int(x), int(y)
+
+	// Color tolerance - how different can pixels be and still match
+	// Higher values find larger regions, lower values are more precise
+	const colorTolerance = 25
+
+	fmt.Printf("Middle-click flood fill at canvas (%d, %d)\n", clickX, clickY)
+
+	result, err := component.FloodFillDetect(img, clickX, clickY, colorTolerance)
+	if err != nil {
+		fmt.Printf("Flood fill failed: %v\n", err)
+		return
+	}
+
+	// Trim the bounds by scoring a grid and removing low-scoring edges
+	// This removes green PCB areas and metallic pins from the edges
+	const gridStep = 3      // Sample every 3 pixels
+	const minScore = 0.25   // Require 25% matching pixels (trim if >75% miss)
+
+	// Get grid scores for debug visualization
+	gridScores := component.GetGridScores(img, result.Bounds, result.SeedColor, colorTolerance, gridStep, minScore)
+	trimmedBounds := gridScores.TrimBounds
+
+	// Create debug overlay showing grid points
+	if false {
+		cp.showGridDebugOverlay(gridScores)
+	}
+
+	// Create a new component from the trimmed result
+	compID := fmt.Sprintf("U%d", len(cp.state.Components)+1)
+
+	// Classify package based on dimensions
+	// Canvas pixels = source pixels * zoom, so effective DPI = source DPI * zoom
+	zoom := cp.canvas.GetZoom()
+	dpi := cp.state.DPI
+	if dpi <= 0 {
+		dpi = 1200 // Default
+	}
+	effectiveDPI := dpi * zoom
+	mmToPixels := effectiveDPI / 25.4
+
+	widthMM := float64(trimmedBounds.Width) / mmToPixels
+	heightMM := float64(trimmedBounds.Height) / mmToPixels
+
+	pkgType := "UNKNOWN"
+	// Check if it matches DIP dimensions
+	if component.IsValidDIPWidth(widthMM) || component.IsValidDIPWidth(heightMM) {
+		// Estimate pin count from length
+		dipLength := heightMM
+		if component.IsValidDIPWidth(heightMM) {
+			dipLength = widthMM
+		}
+		pinCount := int(dipLength/2.54) * 2
+		if pinCount >= 8 && pinCount <= 40 {
+			pkgType = fmt.Sprintf("DIP-%d", pinCount)
+		}
+	}
+
+	// Convert canvas coordinates to image coordinates (divide by zoom)
+	// The overlay drawing will multiply by zoom again
+	newComp := &component.Component{
+		ID:      compID,
+		Package: pkgType,
+		Bounds: geometry.Rect{
+			X:      float64(trimmedBounds.X) / zoom,
+			Y:      float64(trimmedBounds.Y) / zoom,
+			Width:  float64(trimmedBounds.Width) / zoom,
+			Height: float64(trimmedBounds.Height) / zoom,
+		},
+		Confirmed: true, // User-selected components are confirmed
+	}
+
+	cp.state.Components = append(cp.state.Components, newComp)
+	cp.state.SetModified(true)
+	cp.list.Refresh()
+
+	fmt.Printf("Created component %s (%s) at (%.0f,%.0f) size %.0fx%.0f (%.1fx%.1f mm)\n",
+		compID, pkgType, newComp.Bounds.X, newComp.Bounds.Y,
+		newComp.Bounds.Width, newComp.Bounds.Height, widthMM, heightMM)
+
+	// Update overlay
+	cp.updateComponentOverlay()
+}
+
+// showGridDebugOverlay creates an overlay showing grid scoring points for debug.
+// Green circles = matching color, Red circles = non-matching color.
+func (cp *ComponentsPanel) showGridDebugOverlay(gridScores *component.GridScoreResult) {
+	if gridScores == nil || len(gridScores.Points) == 0 {
+		return
+	}
+
+	zoom := cp.canvas.GetZoom()
+
+	// Create two overlays - one for matching points (green) and one for non-matching (red)
+	matchOverlay := &canvas.Overlay{
+		Color:   color.RGBA{R: 0, G: 255, B: 0, A: 200}, // Green
+		Circles: make([]canvas.OverlayCircle, 0),
+	}
+	noMatchOverlay := &canvas.Overlay{
+		Color:   color.RGBA{R: 255, G: 0, B: 0, A: 200}, // Red
+		Circles: make([]canvas.OverlayCircle, 0),
+	}
+
+	// Also show points in trimmed-out regions with different styling
+	trimmedOutOverlay := &canvas.Overlay{
+		Color:   color.RGBA{R: 128, G: 128, B: 128, A: 150}, // Gray for trimmed-out areas
+		Circles: make([]canvas.OverlayCircle, 0),
+	}
+
+	radius := 1.5 // Small circles for grid points
+
+	for _, pt := range gridScores.Points {
+		// Convert canvas coordinates to image coordinates (divide by zoom)
+		// The overlay drawing will multiply by zoom again
+		imgX := float64(pt.X) / zoom
+		imgY := float64(pt.Y) / zoom
+
+		circle := canvas.OverlayCircle{
+			X:      imgX,
+			Y:      imgY,
+			Radius: radius,
+			Filled: true,
+		}
+
+		// Check if point is in the trimmed-out region
+		inTrimmed := pt.X >= gridScores.TrimBounds.X &&
+			pt.X < gridScores.TrimBounds.X+gridScores.TrimBounds.Width &&
+			pt.Y >= gridScores.TrimBounds.Y &&
+			pt.Y < gridScores.TrimBounds.Y+gridScores.TrimBounds.Height
+
+		if !inTrimmed {
+			// Point is in trimmed-out region
+			trimmedOutOverlay.Circles = append(trimmedOutOverlay.Circles, circle)
+		} else if pt.Matches {
+			matchOverlay.Circles = append(matchOverlay.Circles, circle)
+		} else {
+			noMatchOverlay.Circles = append(noMatchOverlay.Circles, circle)
+		}
+	}
+
+	// Set all overlays
+	cp.canvas.SetOverlay("grid_match", matchOverlay)
+	cp.canvas.SetOverlay("grid_nomatch", noMatchOverlay)
+	cp.canvas.SetOverlay("grid_trimmed", trimmedOutOverlay)
+
+	fmt.Printf("Grid debug: %d match, %d no-match, %d trimmed-out points (grid=%dpx, minScore=%.0f%%)\n",
+		len(matchOverlay.Circles), len(noMatchOverlay.Circles), len(trimmedOutOverlay.Circles),
+		gridScores.GridStep, gridScores.MinScore*100)
+}
+
+// updateComponentOverlay refreshes the component overlay on the canvas.
+func (cp *ComponentsPanel) updateComponentOverlay() {
+	if len(cp.state.Components) == 0 {
+		cp.canvas.SetOverlay("components", nil)
+		cp.canvas.Refresh()
+		return
+	}
+
+	overlay := component.CreateOverlay(cp.state.Components)
+	overlay.Layer = canvas.LayerFront // Associate with front layer
+	cp.canvas.SetOverlay("components", overlay)
+	cp.canvas.Refresh()
+}
+
+// onOCRSilkscreen runs OCR on the silkscreen to find component labels and coordinates.
+func (cp *ComponentsPanel) onOCRSilkscreen() {
+	if cp.state.FrontImage == nil || cp.state.FrontImage.Image == nil {
+		fmt.Println("No front image loaded for OCR")
+		return
+	}
+
+	fmt.Println("Starting silkscreen OCR...")
+
+	// Create OCR engine
+	engine, err := ocr.NewEngine()
+	if err != nil {
+		fmt.Printf("Failed to create OCR engine: %v\n", err)
+		return
+	}
+	defer engine.Close()
+
+	// Convert Go image to gocv.Mat
+	img := cp.state.FrontImage.Image
+	bounds := img.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+
+	// Create RGBA image
+	rgba := image.NewRGBA(bounds)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			rgba.Set(x, y, img.At(x, y))
+		}
+	}
+
+	// Convert to gocv.Mat
+	mat, err := gocv.NewMatFromBytes(h, w, gocv.MatTypeCV8UC4, rgba.Pix)
+	if err != nil {
+		fmt.Printf("Failed to convert image: %v\n", err)
+		return
+	}
+	defer mat.Close()
+
+	// Convert RGBA to BGR
+	bgr := gocv.NewMat()
+	defer bgr.Close()
+	gocv.CvtColor(mat, &bgr, gocv.ColorRGBAToBGR)
+
+	// Run silkscreen detection
+	result, err := engine.DetectSilkscreen(bgr)
+	if err != nil {
+		fmt.Printf("Silkscreen OCR error: %v\n", err)
+		return
+	}
+
+	// Display results
+	fmt.Printf("\n=== Silkscreen OCR Results ===\n")
+	fmt.Printf("Found %d component designators:\n", len(result.Designators))
+
+	// Group by type
+	counts := result.GetDesignatorCounts()
+	for prefix, count := range counts {
+		fmt.Printf("  %s: %d\n", prefix, count)
+		designators := result.GetDesignatorsByType(prefix)
+		for _, d := range designators {
+			fmt.Printf("    %s at (%d,%d)\n", d.Text, d.Bounds.X, d.Bounds.Y)
+		}
+	}
+
+	if result.XAxis != nil {
+		fmt.Printf("\nX-Axis detected: %d markers\n", len(result.XAxis.Markers))
+		for _, m := range result.XAxis.Markers {
+			fmt.Printf("  %s at X=%d\n", m.Text, m.Bounds.X)
+		}
+	}
+
+	if result.YAxis != nil {
+		fmt.Printf("\nY-Axis detected: %d markers\n", len(result.YAxis.Markers))
+		for _, m := range result.YAxis.Markers {
+			fmt.Printf("  %s at Y=%d\n", m.Text, m.Bounds.Y)
+		}
+	}
+
+	fmt.Printf("\nTotal text items found: %d\n", len(result.AllText))
+	fmt.Printf("==============================\n")
+
+	// Create overlay for detected text
+	cp.updateOCROverlay(result)
+}
+
+// updateOCROverlay shows detected silkscreen text on the canvas.
+func (cp *ComponentsPanel) updateOCROverlay(result *ocr.SilkscreenResult) {
+	if result == nil || len(result.AllText) == 0 {
+		cp.canvas.SetOverlay("ocr", nil)
+		cp.canvas.Refresh()
+		return
+	}
+
+	// Create overlay - cyan for component designators, yellow for coordinates
+	// Associate with front layer so overlay follows layer offset adjustments
+	overlay := &canvas.Overlay{
+		Color: color.RGBA{R: 0, G: 255, B: 255, A: 255}, // Cyan
+		Layer: canvas.LayerFront,
+	}
+
+	// Add rectangles for designators
+	for _, d := range result.Designators {
+		rect := canvas.OverlayRect{
+			X:      d.Bounds.X,
+			Y:      d.Bounds.Y,
+			Width:  d.Bounds.Width,
+			Height: d.Bounds.Height,
+			Label:  d.Text,
+			Fill:   canvas.FillNone,
+		}
+		overlay.Rectangles = append(overlay.Rectangles, rect)
+	}
+
+	cp.canvas.SetOverlay("ocr", overlay)
+	cp.canvas.Refresh()
 }
 
 // Overlay name constants for via and connector overlays.

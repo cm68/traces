@@ -16,6 +16,7 @@ import (
 	"pcb-tracer/internal/connector"
 	"pcb-tracer/internal/features"
 	"pcb-tracer/internal/image"
+	"pcb-tracer/internal/ocr"
 	"pcb-tracer/internal/via"
 	"pcb-tracer/pkg/geometry"
 )
@@ -88,6 +89,12 @@ type State struct {
 	// Components
 	Components []*component.Component
 
+	// Component detection training set
+	ComponentTraining *component.TrainingSet
+
+	// Logo detection training set
+	LogoTraining *component.LogoSet
+
 	// Detected features layer (vias and traces from both sides)
 	FeaturesLayer *features.DetectedFeaturesLayer
 
@@ -96,6 +103,9 @@ type State struct {
 
 	// Via training set for machine learning
 	ViaTrainingSet *via.TrainingSet
+
+	// OCR learned parameters from user corrections
+	OCRLearnedParams *ocr.LearnedParams
 
 	// Board definition for pin mapping
 	BoardDefinition *connector.BoardDefinition
@@ -140,11 +150,12 @@ type EventListener func(data interface{})
 // NewState creates a new application state.
 func NewState() *State {
 	return &State{
-		BoardSpec:       board.S100Spec(),
-		FeaturesLayer:   features.NewDetectedFeaturesLayer(),
-		ViaTrainingSet:  via.NewTrainingSet(),
-		BoardDefinition: connector.S100Definition(),
-		listeners:       make(map[EventType][]EventListener),
+		BoardSpec:        board.S100Spec(),
+		FeaturesLayer:    features.NewDetectedFeaturesLayer(),
+		ViaTrainingSet:   via.NewTrainingSet(),
+		OCRLearnedParams: ocr.NewLearnedParams(),
+		BoardDefinition:  connector.S100Definition(),
+		listeners:        make(map[EventType][]EventListener),
 	}
 }
 
@@ -346,14 +357,45 @@ func (s *State) LoadProject(path string) error {
 			}
 		}
 	}
+
+	// Restore component training samples
+	if len(proj.ComponentTrainingSamples) > 0 {
+		s.ComponentTraining = component.NewTrainingSet()
+		for _, sample := range proj.ComponentTrainingSamples {
+			s.ComponentTraining.Add(sample)
+		}
+	}
+
+	// Restore logo training samples
+	if len(proj.LogoTrainingSamples) > 0 {
+		s.LogoTraining = component.NewLogoSet()
+		for _, sample := range proj.LogoTrainingSamples {
+			s.LogoTraining.Add(sample)
+		}
+	}
+
+	// Restore user-designated components (inline in project file)
+	if len(proj.Components) > 0 {
+		s.Components = proj.Components
+	}
+
+	// Restore OCR learned parameters
+	if proj.OCRLearnedParams != nil && len(proj.OCRLearnedParams.Samples) > 0 {
+		s.OCRLearnedParams = proj.OCRLearnedParams
+	}
 	s.mu.Unlock()
 
-	// Load components
-	if proj.ComponentsPath != "" {
+	// Load components from external file (legacy support)
+	if proj.ComponentsPath != "" && len(s.Components) == 0 {
 		compPath := filepath.Join(projectDir, proj.ComponentsPath)
 		if err := s.LoadComponents(compPath); err != nil {
 			return err
 		}
+	}
+
+	// Emit components changed if we have any (even if loaded inline)
+	if len(s.Components) > 0 {
+		s.Emit(EventComponentsChanged, s.Components)
 	}
 
 	s.Emit(EventProjectLoaded, path)
@@ -413,6 +455,26 @@ func (s *State) SaveProject(path string) error {
 				Bounds: c.Bounds,
 			})
 		}
+	}
+
+	// Serialize component training samples
+	if s.ComponentTraining != nil && len(s.ComponentTraining.Samples) > 0 {
+		proj.ComponentTrainingSamples = s.ComponentTraining.Samples
+	}
+
+	// Serialize logo training samples
+	if s.LogoTraining != nil && len(s.LogoTraining.Samples) > 0 {
+		proj.LogoTrainingSamples = s.LogoTraining.Samples
+	}
+
+	// Serialize user-designated components
+	if len(s.Components) > 0 {
+		proj.Components = s.Components
+	}
+
+	// Serialize OCR learned parameters
+	if s.OCRLearnedParams != nil && len(s.OCRLearnedParams.Samples) > 0 {
+		proj.OCRLearnedParams = s.OCRLearnedParams
 	}
 
 	projectDir := filepath.Dir(path)
@@ -667,6 +729,8 @@ func (s *State) ResetForNewProject() {
 
 	// Clear components and features
 	s.Components = nil
+	s.ComponentTraining = nil
+	s.LogoTraining = nil
 	s.FeaturesLayer = nil
 }
 
@@ -860,10 +924,22 @@ type ProjectFile struct {
 	FrontContacts []ContactData `json:"front_contacts,omitempty"`
 	BackContacts  []ContactData `json:"back_contacts,omitempty"`
 
-	// External data file paths
-	ComponentsPath string `json:"components,omitempty"`
-	TracesPath     string `json:"traces,omitempty"`
-	NetlistPath    string `json:"netlist,omitempty"`
+	// External data file paths (legacy - use inline fields when possible)
+	ComponentsPath string `json:"components_path,omitempty"`
+	TracesPath     string `json:"traces_path,omitempty"`
+	NetlistPath    string `json:"netlist_path,omitempty"`
+
+	// Component detection training samples (v4+)
+	ComponentTrainingSamples []component.TrainingSample `json:"component_training,omitempty"`
+
+	// Logo detection training samples (v4+)
+	LogoTrainingSamples []component.LogoSample `json:"logo_training,omitempty"`
+
+	// User-designated components (v5+)
+	Components []*component.Component `json:"components,omitempty"`
+
+	// OCR learned parameters (v6+)
+	OCRLearnedParams *ocr.LearnedParams `json:"ocr_params,omitempty"`
 }
 
 // ContactData is a JSON-serializable representation of a detected contact.

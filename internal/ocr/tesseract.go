@@ -26,11 +26,18 @@ type Engine struct {
 func NewEngine() (*Engine, error) {
 	client := gosseract.NewClient()
 
-	// Set English language
+	// Set English language for base character recognition
 	if err := client.SetLanguage("eng"); err != nil {
 		client.Close()
 		return nil, fmt.Errorf("failed to set OCR language: %w", err)
 	}
+
+	// Disable dictionary-based word correction - part numbers aren't English words
+	// This prevents Tesseract from "correcting" DM74LS244N to something else
+	_ = client.SetVariable("load_system_dawg", "false")
+	_ = client.SetVariable("load_freq_dawg", "false")
+	_ = client.SetVariable("language_model_penalty_non_dict_word", "0")
+	_ = client.SetVariable("language_model_penalty_non_freq_dict_word", "0")
 
 	return &Engine{
 		client:          client,

@@ -511,15 +511,19 @@ type GridCoordinate struct {
 }
 
 // GridMapping holds the discovered coordinate-to-ID mappings.
-// For typical board grids: Y→Letter (rows A,B,C) and X→Number (columns 1,2,3)
+// The mapping is inferred from component positions - letters and numbers
+// can map to either X or Y depending on the board layout.
 type GridMapping struct {
-	YToLetter []GridCoordinate // Y coordinates mapped to letters (rows)
-	XToNumber []GridCoordinate // X coordinates mapped to numbers (columns)
-	Format    string           // "LN" or "NL" based on majority
-	Tolerance float64          // Coordinate tolerance for matching (pixels)
+	LetterCoords []GridCoordinate // Coordinates mapped to letters
+	NumberCoords []GridCoordinate // Coordinates mapped to numbers
+	LetterAxis   string           // "X" or "Y" - which axis letters map to
+	NumberAxis   string           // "X" or "Y" - which axis numbers map to
+	Format       string           // "LN" or "NL" based on majority
+	Tolerance    float64          // Coordinate tolerance for matching (pixels)
 }
 
 // BuildGridMapping analyzes existing components to build a coordinate-to-ID mapping.
+// It infers which axis (X or Y) maps to letters vs numbers based on component positions.
 // tolerance is how close coordinates must be to be considered "same row/column" (in pixels).
 func BuildGridMapping(components []*Component, tolerance float64) *GridMapping {
 	if tolerance <= 0 {
@@ -527,14 +531,17 @@ func BuildGridMapping(components []*Component, tolerance float64) *GridMapping {
 	}
 
 	mapping := &GridMapping{
-		Tolerance: tolerance,
-		Format:    "LN", // Default
+		Tolerance:  tolerance,
+		Format:     "LN", // Default
+		LetterAxis: "Y",  // Default: letters are rows
+		NumberAxis: "X",  // Default: numbers are columns
 	}
 
-	// Track letter/number associations with coordinates
-	// Letters map to Y (rows), Numbers map to X (columns)
-	letterY := make(map[string][]float64) // letter -> list of Y coordinates (rows)
-	numberX := make(map[int][]float64)    // number -> list of X coordinates (columns)
+	// Collect coordinates for each letter and number
+	letterX := make(map[string][]float64)
+	letterY := make(map[string][]float64)
+	numberX := make(map[int][]float64)
+	numberY := make(map[int][]float64)
 	formatCounts := map[string]int{"LN": 0, "NL": 0}
 
 	for _, comp := range components {
@@ -546,12 +553,11 @@ func BuildGridMapping(components []*Component, tolerance float64) *GridMapping {
 		centerX := comp.Bounds.X + comp.Bounds.Width/2
 		centerY := comp.Bounds.Y + comp.Bounds.Height/2
 
+		letterX[grid.Letter] = append(letterX[grid.Letter], centerX)
 		letterY[grid.Letter] = append(letterY[grid.Letter], centerY)
 		numberX[grid.Number] = append(numberX[grid.Number], centerX)
+		numberY[grid.Number] = append(numberY[grid.Number], centerY)
 		formatCounts[grid.Format]++
-
-		fmt.Printf("GridMapping: %s -> letter %s at Y=%.0f, number %d at X=%.0f\n",
-			comp.ID, grid.Letter, centerY, grid.Number, centerX)
 	}
 
 	// Determine dominant format
@@ -559,56 +565,163 @@ func BuildGridMapping(components []*Component, tolerance float64) *GridMapping {
 		mapping.Format = "NL"
 	}
 
-	// Build Y→Letter mapping (average Y for each letter/row)
-	for letter, yCoords := range letterY {
-		avgY := average(yCoords)
-		mapping.YToLetter = append(mapping.YToLetter, GridCoordinate{
-			Value: avgY,
-			ID:    letter,
-			Count: len(yCoords),
-		})
-		fmt.Printf("GridMapping: letter %s -> avgY=%.0f\n", letter, avgY)
+	// Infer which axis letters map to by comparing variance
+	// Same letter = same row/column, so should have low variance on that axis
+	letterXVar := computeGroupVariance(letterX)
+	letterYVar := computeGroupVariance(letterY)
+	numberXVar := computeGroupVarianceInt(numberX)
+	numberYVar := computeGroupVarianceInt(numberY)
+
+	fmt.Printf("GridMapping variance: letterX=%.0f letterY=%.0f numberX=%.0f numberY=%.0f\n",
+		letterXVar, letterYVar, numberXVar, numberYVar)
+
+	// Lower variance means better grouping on that axis
+	if letterXVar < letterYVar {
+		mapping.LetterAxis = "X"
+		fmt.Println("GridMapping: letters map to X axis (columns)")
+	} else {
+		mapping.LetterAxis = "Y"
+		fmt.Println("GridMapping: letters map to Y axis (rows)")
 	}
 
-	// Build X→Number mapping (average X for each number/column)
-	for num, xCoords := range numberX {
-		avgX := average(xCoords)
-		mapping.XToNumber = append(mapping.XToNumber, GridCoordinate{
-			Value: avgX,
-			ID:    strconv.Itoa(num),
-			Count: len(xCoords),
+	if numberXVar < numberYVar {
+		mapping.NumberAxis = "X"
+		fmt.Println("GridMapping: numbers map to X axis (columns)")
+	} else {
+		mapping.NumberAxis = "Y"
+		fmt.Println("GridMapping: numbers map to Y axis (rows)")
+	}
+
+	// Build letter coordinate mapping
+	letterCoords := letterX
+	if mapping.LetterAxis == "Y" {
+		letterCoords = letterY
+	}
+	for letter, coords := range letterCoords {
+		avg := average(coords)
+		mapping.LetterCoords = append(mapping.LetterCoords, GridCoordinate{
+			Value: avg,
+			ID:    letter,
+			Count: len(coords),
 		})
-		fmt.Printf("GridMapping: number %d -> avgX=%.0f\n", num, avgX)
+		fmt.Printf("GridMapping: letter %s -> %s=%.0f\n", letter, mapping.LetterAxis, avg)
+	}
+
+	// Build number coordinate mapping
+	numberCoords := numberX
+	if mapping.NumberAxis == "Y" {
+		numberCoords = numberY
+	}
+	for num, coords := range numberCoords {
+		avg := average(coords)
+		mapping.NumberCoords = append(mapping.NumberCoords, GridCoordinate{
+			Value: avg,
+			ID:    strconv.Itoa(num),
+			Count: len(coords),
+		})
+		fmt.Printf("GridMapping: number %d -> %s=%.0f\n", num, mapping.NumberAxis, avg)
 	}
 
 	return mapping
 }
 
+// computeGroupVariance calculates average within-group variance for coordinate groups.
+// Lower variance means coordinates within each group are more consistent.
+func computeGroupVariance(groups map[string][]float64) float64 {
+	if len(groups) == 0 {
+		return math.MaxFloat64
+	}
+
+	totalVar := 0.0
+	count := 0
+
+	for _, coords := range groups {
+		if len(coords) < 2 {
+			continue
+		}
+		avg := average(coords)
+		sumSq := 0.0
+		for _, c := range coords {
+			diff := c - avg
+			sumSq += diff * diff
+		}
+		totalVar += sumSq / float64(len(coords))
+		count++
+	}
+
+	if count == 0 {
+		return math.MaxFloat64
+	}
+	return totalVar / float64(count)
+}
+
+// computeGroupVarianceInt is like computeGroupVariance but for int keys.
+func computeGroupVarianceInt(groups map[int][]float64) float64 {
+	if len(groups) == 0 {
+		return math.MaxFloat64
+	}
+
+	totalVar := 0.0
+	count := 0
+
+	for _, coords := range groups {
+		if len(coords) < 2 {
+			continue
+		}
+		avg := average(coords)
+		sumSq := 0.0
+		for _, c := range coords {
+			diff := c - avg
+			sumSq += diff * diff
+		}
+		totalVar += sumSq / float64(len(coords))
+		count++
+	}
+
+	if count == 0 {
+		return math.MaxFloat64
+	}
+	return totalVar / float64(count)
+}
+
 // SuggestGridID suggests a grid-style ID for a new component based on its position.
 // Returns empty string if no suggestion can be made.
 func (m *GridMapping) SuggestGridID(centerX, centerY float64) string {
-	if m == nil || (len(m.YToLetter) == 0 && len(m.XToNumber) == 0) {
+	if m == nil || (len(m.LetterCoords) == 0 && len(m.NumberCoords) == 0) {
 		return ""
 	}
 
 	fmt.Printf("SuggestGridID: checking position (%.0f, %.0f) tolerance=%.0f\n", centerX, centerY, m.Tolerance)
+	fmt.Printf("  LetterAxis=%s NumberAxis=%s\n", m.LetterAxis, m.NumberAxis)
 
-	// Find matching letter (by Y coordinate - row)
+	// Get the coordinate value for the letter axis
+	letterCoord := centerY
+	if m.LetterAxis == "X" {
+		letterCoord = centerX
+	}
+
+	// Get the coordinate value for the number axis
+	numberCoord := centerX
+	if m.NumberAxis == "Y" {
+		numberCoord = centerY
+	}
+
+	// Find matching letter
 	matchedLetter := ""
-	for _, coord := range m.YToLetter {
-		diff := math.Abs(coord.Value - centerY)
-		fmt.Printf("  letter %s: Y=%.0f diff=%.0f\n", coord.ID, coord.Value, diff)
+	for _, coord := range m.LetterCoords {
+		diff := math.Abs(coord.Value - letterCoord)
+		fmt.Printf("  letter %s: %s=%.0f diff=%.0f\n", coord.ID, m.LetterAxis, coord.Value, diff)
 		if diff <= m.Tolerance {
 			matchedLetter = coord.ID
 			break
 		}
 	}
 
-	// Find matching number (by X coordinate - column)
+	// Find matching number
 	matchedNumber := ""
-	for _, coord := range m.XToNumber {
-		diff := math.Abs(coord.Value - centerX)
-		fmt.Printf("  number %s: X=%.0f diff=%.0f\n", coord.ID, coord.Value, diff)
+	for _, coord := range m.NumberCoords {
+		diff := math.Abs(coord.Value - numberCoord)
+		fmt.Printf("  number %s: %s=%.0f diff=%.0f\n", coord.ID, m.NumberAxis, coord.Value, diff)
 		if diff <= m.Tolerance {
 			matchedNumber = coord.ID
 			break

@@ -2589,12 +2589,17 @@ func (cp *ComponentsPanel) onMiddleClickFloodFill(x, y float64) {
 		cp.showGridDebugOverlay(gridScores)
 	}
 
+	// Get zoom for coordinate conversion
+	zoom := cp.canvas.GetZoom()
+
 	// Create a new component from the trimmed result
-	compID := fmt.Sprintf("U%d", len(cp.state.Components)+1)
+	// Use grid-based ID suggestion if existing components have grid IDs
+	centerX := float64(trimmedBounds.X+trimmedBounds.Width/2) / zoom
+	centerY := float64(trimmedBounds.Y+trimmedBounds.Height/2) / zoom
+	compID := component.SuggestComponentID(cp.state.Components, centerX, centerY, 100, "U")
 
 	// Classify package based on dimensions
 	// Canvas pixels = source pixels * zoom, so effective DPI = source DPI * zoom
-	zoom := cp.canvas.GetZoom()
 	dpi := cp.state.DPI
 	if dpi <= 0 {
 		dpi = 1200 // Default

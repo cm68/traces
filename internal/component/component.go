@@ -3,6 +3,10 @@ package component
 
 import (
 	"fmt"
+	"math"
+	"regexp"
+	"strconv"
+	"strings"
 
 	"pcb-tracer/internal/image"
 	"pcb-tracer/pkg/geometry"
@@ -418,4 +422,239 @@ func (ls *LogoSet) Clear() {
 // Count returns the number of samples.
 func (ls *LogoSet) Count() int {
 	return len(ls.Samples)
+}
+
+// GridID represents a parsed grid-style component ID like "A10" or "10A".
+type GridID struct {
+	Letter string // Single letter A-Z
+	Number int    // Number 0-99
+	Format string // "LN" for letter-number (A10), "NL" for number-letter (10A)
+}
+
+// gridIDPattern matches grid-style IDs: letter+number or number+letter
+var gridIDPatternLN = regexp.MustCompile(`^([A-Z])(\d{1,2})$`)
+var gridIDPatternNL = regexp.MustCompile(`^(\d{1,2})([A-Z])$`)
+
+// ParseGridID attempts to parse a grid-style ID like "A10", "B12", "10A", "12B".
+// Returns nil if the ID doesn't match a grid pattern.
+func ParseGridID(id string) *GridID {
+	id = strings.ToUpper(strings.TrimSpace(id))
+
+	// Try letter-number format (A10, B12)
+	if m := gridIDPatternLN.FindStringSubmatch(id); m != nil {
+		num, _ := strconv.Atoi(m[2])
+		return &GridID{
+			Letter: m[1],
+			Number: num,
+			Format: "LN",
+		}
+	}
+
+	// Try number-letter format (10A, 12B)
+	if m := gridIDPatternNL.FindStringSubmatch(id); m != nil {
+		num, _ := strconv.Atoi(m[1])
+		return &GridID{
+			Letter: m[2],
+			Number: num,
+			Format: "NL",
+		}
+	}
+
+	return nil
+}
+
+// String returns the grid ID in its original format.
+func (g *GridID) String() string {
+	if g.Format == "NL" {
+		return fmt.Sprintf("%d%s", g.Number, g.Letter)
+	}
+	return fmt.Sprintf("%s%d", g.Letter, g.Number)
+}
+
+// WithLetter returns a new ID with the same number but different letter.
+func (g *GridID) WithLetter(letter string) string {
+	if g.Format == "NL" {
+		return fmt.Sprintf("%d%s", g.Number, letter)
+	}
+	return fmt.Sprintf("%s%d", letter, g.Number)
+}
+
+// WithNumber returns a new ID with the same letter but different number.
+func (g *GridID) WithNumber(num int) string {
+	if g.Format == "NL" {
+		return fmt.Sprintf("%d%s", num, g.Letter)
+	}
+	return fmt.Sprintf("%s%d", g.Letter, num)
+}
+
+// WithUnknownLetter returns an ID with the same number but "?" for letter.
+func (g *GridID) WithUnknownLetter() string {
+	if g.Format == "NL" {
+		return fmt.Sprintf("%d?", g.Number)
+	}
+	return fmt.Sprintf("?%d", g.Number)
+}
+
+// WithUnknownNumber returns an ID with the same letter but "?" for number.
+func (g *GridID) WithUnknownNumber() string {
+	if g.Format == "NL" {
+		return fmt.Sprintf("?%s", g.Letter)
+	}
+	return fmt.Sprintf("%s?", g.Letter)
+}
+
+// GridCoordinate holds a mapping from a coordinate value to a grid identifier.
+type GridCoordinate struct {
+	Value  float64 // X or Y coordinate (center of component)
+	ID     string  // Letter or number string
+	Count  int     // How many components at this coordinate
+}
+
+// GridMapping holds the discovered X→letter and Y→number mappings.
+type GridMapping struct {
+	XToLetter []GridCoordinate // X coordinates mapped to letters
+	YToNumber []GridCoordinate // Y coordinates mapped to numbers
+	Format    string           // "LN" or "NL" based on majority
+	Tolerance float64          // Coordinate tolerance for matching (pixels)
+}
+
+// BuildGridMapping analyzes existing components to build a coordinate-to-ID mapping.
+// tolerance is how close coordinates must be to be considered "same row/column" (in pixels).
+func BuildGridMapping(components []*Component, tolerance float64) *GridMapping {
+	if tolerance <= 0 {
+		tolerance = 50 // Default 50 pixels
+	}
+
+	mapping := &GridMapping{
+		Tolerance: tolerance,
+		Format:    "LN", // Default
+	}
+
+	// Track letter/number associations with coordinates
+	letterX := make(map[string][]float64) // letter -> list of X coordinates
+	numberY := make(map[int][]float64)    // number -> list of Y coordinates
+	formatCounts := map[string]int{"LN": 0, "NL": 0}
+
+	for _, comp := range components {
+		grid := ParseGridID(comp.ID)
+		if grid == nil {
+			continue
+		}
+
+		centerX := comp.Bounds.X + comp.Bounds.Width/2
+		centerY := comp.Bounds.Y + comp.Bounds.Height/2
+
+		letterX[grid.Letter] = append(letterX[grid.Letter], centerX)
+		numberY[grid.Number] = append(numberY[grid.Number], centerY)
+		formatCounts[grid.Format]++
+	}
+
+	// Determine dominant format
+	if formatCounts["NL"] > formatCounts["LN"] {
+		mapping.Format = "NL"
+	}
+
+	// Build X→Letter mapping (average X for each letter)
+	for letter, xCoords := range letterX {
+		avgX := average(xCoords)
+		mapping.XToLetter = append(mapping.XToLetter, GridCoordinate{
+			Value: avgX,
+			ID:    letter,
+			Count: len(xCoords),
+		})
+	}
+
+	// Build Y→Number mapping (average Y for each number)
+	for num, yCoords := range numberY {
+		avgY := average(yCoords)
+		mapping.YToNumber = append(mapping.YToNumber, GridCoordinate{
+			Value: avgY,
+			ID:    strconv.Itoa(num),
+			Count: len(yCoords),
+		})
+	}
+
+	return mapping
+}
+
+// SuggestGridID suggests a grid-style ID for a new component based on its position.
+// Returns empty string if no suggestion can be made.
+func (m *GridMapping) SuggestGridID(centerX, centerY float64) string {
+	if m == nil || (len(m.XToLetter) == 0 && len(m.YToNumber) == 0) {
+		return ""
+	}
+
+	// Find matching letter (by X coordinate)
+	matchedLetter := ""
+	for _, coord := range m.XToLetter {
+		if math.Abs(coord.Value-centerX) <= m.Tolerance {
+			matchedLetter = coord.ID
+			break
+		}
+	}
+
+	// Find matching number (by Y coordinate)
+	matchedNumber := ""
+	for _, coord := range m.YToNumber {
+		if math.Abs(coord.Value-centerY) <= m.Tolerance {
+			matchedNumber = coord.ID
+			break
+		}
+	}
+
+	// Build suggestion based on what we found
+	if matchedLetter != "" && matchedNumber != "" {
+		// Perfect match - we know both
+		if m.Format == "NL" {
+			return matchedNumber + matchedLetter
+		}
+		return matchedLetter + matchedNumber
+	}
+
+	if matchedLetter != "" {
+		// We know the column, not the row
+		if m.Format == "NL" {
+			return "?" + matchedLetter
+		}
+		return matchedLetter + "?"
+	}
+
+	if matchedNumber != "" {
+		// We know the row, not the column
+		if m.Format == "NL" {
+			return matchedNumber + "?"
+		}
+		return "?" + matchedNumber
+	}
+
+	return ""
+}
+
+// SuggestComponentID suggests an ID for a new component based on existing components.
+// centerX, centerY are the center coordinates of the new component.
+// tolerance is how close coordinates must be to match (in pixels).
+// fallbackPrefix is used if no grid match found (e.g., "U" for "U1", "U2").
+// Returns the suggested ID.
+func SuggestComponentID(components []*Component, centerX, centerY, tolerance float64, fallbackPrefix string) string {
+	mapping := BuildGridMapping(components, tolerance)
+	suggestion := mapping.SuggestGridID(centerX, centerY)
+
+	if suggestion != "" {
+		return suggestion
+	}
+
+	// Fall back to sequential numbering
+	return fmt.Sprintf("%s%d", fallbackPrefix, len(components)+1)
+}
+
+// average calculates the average of a slice of float64.
+func average(values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	sum := 0.0
+	for _, v := range values {
+		sum += v
+	}
+	return sum / float64(len(values))
 }

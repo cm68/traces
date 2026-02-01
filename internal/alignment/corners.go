@@ -410,6 +410,215 @@ func DetectEjectorMarks(img gocv.Mat, contacts []Contact, dpi float64) []Ejector
 	return marks
 }
 
+// StepEdge represents a detected step edge where the board widens below the connector extension.
+type StepEdge struct {
+	Corner geometry.Point2D // The corner point where step meets board edge
+	Side   string           // "left" or "right"
+	EdgeY  float64          // Y coordinate of the horizontal step edge
+}
+
+// DetectStepEdgesFromImage detects step edges from a Go image.Image.
+func DetectStepEdgesFromImage(img image.Image, contacts []Contact, dpi float64) []StepEdge {
+	mat, err := imageToMat(img)
+	if err != nil {
+		return nil
+	}
+	defer mat.Close()
+	return DetectStepEdges(mat, contacts, dpi)
+}
+
+// DetectStepEdges finds the step edges where the board widens below the connector extension.
+// The connector "finger" area is narrower than the main board. At about 0.3" below the contacts,
+// the board widens to full width, creating a high-contrast edge against the scanner background.
+// Returns precise Y-axis registration points on left and right sides.
+func DetectStepEdges(img gocv.Mat, contacts []Contact, dpi float64) []StepEdge {
+	if len(contacts) < 2 || dpi <= 0 {
+		return nil
+	}
+
+	imgH := img.Rows()
+	imgW := img.Cols()
+
+	// Estimate positions from contacts (sorted by X)
+	firstContact := contacts[0]
+	lastContact := contacts[len(contacts)-1]
+
+	// Contact margin from edge is about 2.125" for S-100
+	boardMarginPx := 2.125 * dpi
+	boardLeftX := firstContact.Center.X - boardMarginPx
+	boardRightX := lastContact.Center.X + boardMarginPx
+
+	// Finger extension height is about 0.3" (S100ContactHeight)
+	// Step edge is this distance below the contacts
+	fingerHeight := 0.3 * dpi
+	expectedStepY := firstContact.Center.Y + fingerHeight
+
+	// Search region: narrow horizontal band around expected step Y
+	searchHeightPx := int(0.4 * dpi) // 0.4" vertical search range
+	searchWidthPx := int(1.0 * dpi)  // 1" horizontal search from board edge
+
+	var edges []StepEdge
+
+	// Detect left step edge
+	leftEdge := findStepEdge(img, int(boardLeftX)-searchWidthPx/2, int(expectedStepY)-searchHeightPx/2,
+		searchWidthPx, searchHeightPx, "left", imgW, imgH)
+	if leftEdge != nil {
+		edges = append(edges, *leftEdge)
+	}
+
+	// Detect right step edge
+	rightEdge := findStepEdge(img, int(boardRightX)-searchWidthPx/2, int(expectedStepY)-searchHeightPx/2,
+		searchWidthPx, searchHeightPx, "right", imgW, imgH)
+	if rightEdge != nil {
+		edges = append(edges, *rightEdge)
+	}
+
+	return edges
+}
+
+// findStepEdge searches for the horizontal step edge in a region.
+// Uses Canny edge detection to find strong horizontal edges, then locates
+// the corner where the horizontal step meets the vertical board edge.
+func findStepEdge(img gocv.Mat, rx, ry, rw, rh int, side string, imgW, imgH int) *StepEdge {
+	// Clamp to image bounds
+	if rx < 0 {
+		rw += rx
+		rx = 0
+	}
+	if ry < 0 {
+		rh += ry
+		ry = 0
+	}
+	if rx+rw > imgW {
+		rw = imgW - rx
+	}
+	if ry+rh > imgH {
+		rh = imgH - ry
+	}
+	if rw <= 0 || rh <= 0 {
+		return nil
+	}
+
+	// Extract region
+	region := img.Region(image.Rect(rx, ry, rx+rw, ry+rh))
+	defer region.Close()
+
+	// Convert to grayscale
+	gray := gocv.NewMat()
+	defer gray.Close()
+	gocv.CvtColor(region, &gray, gocv.ColorBGRToGray)
+
+	// Apply Gaussian blur to reduce noise
+	blurred := gocv.NewMat()
+	defer blurred.Close()
+	gocv.GaussianBlur(gray, &blurred, image.Point{5, 5}, 1.5, 1.5, gocv.BorderDefault)
+
+	// Canny edge detection with lower thresholds for better edge pickup
+	edges := gocv.NewMat()
+	defer edges.Close()
+	gocv.Canny(blurred, &edges, 30, 100)
+
+	// Use Sobel to find horizontal edges specifically
+	sobelY := gocv.NewMat()
+	defer sobelY.Close()
+	gocv.Sobel(blurred, &sobelY, gocv.MatTypeCV16S, 0, 1, 3, 1, 0, gocv.BorderDefault)
+
+	// Convert to absolute values
+	sobelYAbs := gocv.NewMat()
+	defer sobelYAbs.Close()
+	gocv.ConvertScaleAbs(sobelY, &sobelYAbs, 1, 0)
+
+	// Find the row with strongest horizontal edge response
+	// This should be the step edge
+	bestRow := -1
+	bestRowStrength := 0.0
+
+	for y := 0; y < sobelYAbs.Rows(); y++ {
+		var rowSum float64
+		for x := 0; x < sobelYAbs.Cols(); x++ {
+			rowSum += float64(sobelYAbs.GetUCharAt(y, x))
+		}
+		avgStrength := rowSum / float64(sobelYAbs.Cols())
+
+		if avgStrength > bestRowStrength {
+			bestRowStrength = avgStrength
+			bestRow = y
+		}
+	}
+
+	if bestRow < 0 || bestRowStrength < 20 {
+		return nil
+	}
+
+	// Now find the X coordinate where the step corner is
+	// For left side: look for rightmost edge point in the step row
+	// For right side: look for leftmost edge point in the step row
+	var cornerX int
+
+	if side == "left" {
+		// Scan from right to left to find where the edge starts
+		cornerX = -1
+		for x := edges.Cols() - 1; x >= 0; x-- {
+			if edges.GetUCharAt(bestRow, x) > 0 {
+				cornerX = x
+				break
+			}
+		}
+	} else {
+		// Scan from left to right to find where the edge starts
+		cornerX = -1
+		for x := 0; x < edges.Cols(); x++ {
+			if edges.GetUCharAt(bestRow, x) > 0 {
+				cornerX = x
+				break
+			}
+		}
+	}
+
+	if cornerX < 0 {
+		// Fallback: use the center of the search region
+		cornerX = rw / 2
+	}
+
+	// Sub-pixel refinement: fit a parabola to the gradient magnitudes around bestRow
+	refineY := float64(bestRow)
+	if bestRow > 0 && bestRow < sobelYAbs.Rows()-1 {
+		// Sample 3 points for parabola fit
+		y0 := getRowGradientSum(sobelYAbs, bestRow-1)
+		y1 := getRowGradientSum(sobelYAbs, bestRow)
+		y2 := getRowGradientSum(sobelYAbs, bestRow+1)
+
+		// Parabola vertex: x = -b/(2a) where y = ax^2 + bx + c
+		// Using finite differences: a = (y0 - 2*y1 + y2)/2, b = (y2 - y0)/2
+		a := (y0 - 2*y1 + y2) / 2
+		b := (y2 - y0) / 2
+		if a != 0 {
+			offset := -b / (2 * a)
+			if offset > -1 && offset < 1 {
+				refineY = float64(bestRow) + offset
+			}
+		}
+	}
+
+	return &StepEdge{
+		Corner: geometry.Point2D{
+			X: float64(rx + cornerX),
+			Y: float64(ry) + refineY,
+		},
+		Side:  side,
+		EdgeY: float64(ry) + refineY,
+	}
+}
+
+// getRowGradientSum returns the sum of gradient magnitudes for a row.
+func getRowGradientSum(sobelAbs gocv.Mat, row int) float64 {
+	var sum float64
+	for x := 0; x < sobelAbs.Cols(); x++ {
+		sum += float64(sobelAbs.GetUCharAt(row, x))
+	}
+	return sum
+}
+
 // findEjectorMark searches for a bright white region with a dark hole in the center.
 // Uses contour fitting to find the precise hole center, ignoring any pin reflections.
 func findEjectorMark(img gocv.Mat, rx, ry, rw, rh int, holeDiam float64, imgW, imgH int) *geometry.Point2D {

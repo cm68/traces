@@ -39,6 +39,14 @@ type ConnectorLabel struct {
 	Side    pcbimage.Side
 }
 
+// StepEdgeViz controls the checkerboard alignment visualization.
+type StepEdgeViz struct {
+	Enabled   bool    // Whether to show checkerboard visualization
+	StepY     float64 // Y coordinate of step edge (image coords) - unused for checkerboard
+	BandWidth float64 // Width of each square in pixels (1cm at DPI)
+	Height    float64 // Height of visualization region - unused for checkerboard
+}
+
 // ImageCanvas provides an image display with pan, zoom, and selection.
 type ImageCanvas struct {
 	widget.BaseWidget
@@ -51,6 +59,9 @@ type ImageCanvas struct {
 
 	// Connector labels (drawn with layer opacity)
 	connectorLabels []ConnectorLabel
+
+	// Step-edge alignment visualization
+	stepEdgeViz StepEdgeViz
 
 	// Display state
 	raster *fynecanvas.Raster
@@ -80,6 +91,9 @@ type ImageCanvas struct {
 
 	// Last rendered output for sampling
 	lastOutput *image.RGBA
+
+	// Background grid DPI (1mm grid when > 0)
+	gridDPI float64
 
 	// Callbacks
 	onZoomChange func(zoom float64)
@@ -427,6 +441,34 @@ func (ic *ImageCanvas) ClearConnectorLabels() {
 	ic.Refresh()
 }
 
+// SetStepEdgeViz enables or disables the checkerboard alignment visualization.
+// stepY is unused (kept for API compatibility).
+// dpi is used to calculate 1cm checkerboard cell size.
+func (ic *ImageCanvas) SetStepEdgeViz(enabled bool, stepY, dpi float64) {
+	ic.stepEdgeViz.Enabled = enabled
+	_ = stepY // unused, kept for API compatibility
+	if dpi > 0 {
+		// 1 cm = 0.3937 inches
+		ic.stepEdgeViz.BandWidth = dpi * 0.3937
+		ic.stepEdgeViz.Height = dpi * 0.5 // 0.5 inch visualization region
+	} else {
+		ic.stepEdgeViz.BandWidth = 100 // fallback
+		ic.stepEdgeViz.Height = 150
+	}
+	ic.Refresh()
+}
+
+// GetStepEdgeViz returns the current step-edge visualization settings.
+func (ic *ImageCanvas) GetStepEdgeViz() StepEdgeViz {
+	return ic.stepEdgeViz
+}
+
+// SetDPI sets the DPI for the background grid (1mm squares).
+func (ic *ImageCanvas) SetDPI(dpi float64) {
+	ic.gridDPI = dpi
+	ic.Refresh()
+}
+
 // SetImage sets a single image to display (convenience method).
 func (ic *ImageCanvas) SetImage(img image.Image) {
 	if img == nil {
@@ -620,10 +662,8 @@ func (ic *ImageCanvas) draw(w, h int) image.Image {
 
 	output := image.NewRGBA(image.Rect(0, 0, w, h))
 
-	// Fill with black background (set alpha channel)
-	for i := 3; i < len(output.Pix); i += 4 {
-		output.Pix[i] = 255
-	}
+	// Fill with 1mm grid background (black and white squares)
+	ic.drawGridBackground(output, w, h)
 
 	// Composite each visible layer and draw connector labels with matching opacity
 	for _, layer := range ic.layers {
@@ -652,6 +692,41 @@ func (ic *ImageCanvas) draw(w, h int) image.Image {
 	}
 
 	return output
+}
+
+// drawGridBackground fills the output with a 1mm black and white grid pattern.
+func (ic *ImageCanvas) drawGridBackground(output *image.RGBA, w, h int) {
+	// 1mm = 0.03937 inches
+	// Grid size in image pixels = dpi * 0.03937
+	// Grid size in canvas pixels = gridSize * zoom
+	var gridSize float64
+	if ic.gridDPI > 0 {
+		gridSize = ic.gridDPI * 0.03937 * ic.zoom
+	} else {
+		// Fallback: assume 1200 DPI
+		gridSize = 1200 * 0.03937 * ic.zoom
+	}
+
+	// Minimum visible grid size (avoid too small squares)
+	if gridSize < 4 {
+		gridSize = 4
+	}
+
+	black := color.RGBA{R: 0, G: 0, B: 0, A: 255}
+	white := color.RGBA{R: 255, G: 255, B: 255, A: 255}
+
+	for y := 0; y < h; y++ {
+		gridY := int(float64(y) / gridSize)
+		for x := 0; x < w; x++ {
+			gridX := int(float64(x) / gridSize)
+			// Checkerboard pattern
+			if (gridX+gridY)%2 == 0 {
+				output.Set(x, y, black)
+			} else {
+				output.Set(x, y, white)
+			}
+		}
+	}
 }
 
 // compositeLayer draws a single layer onto the output with opacity.
@@ -687,15 +762,33 @@ func (ic *ImageCanvas) compositeLayer(output *image.RGBA, layer *pcbimage.Layer,
 	cosR := math.Cos(-rotation)
 	sinR := math.Sin(-rotation)
 
-	// Source image dimensions and center
+	// Source image dimensions
 	srcW := float64(srcBounds.Max.X - srcBounds.Min.X)
 	srcH := float64(srcBounds.Max.Y - srcBounds.Min.Y)
-	srcCx := float64(srcBounds.Min.X+srcBounds.Max.X) / 2.0
-	srcCy := float64(srcBounds.Min.Y+srcBounds.Max.Y) / 2.0
+
+	// Rotation center: use layer's rotation center if set, otherwise image center
+	var srcCx, srcCy float64
+	if layer.RotationCenterX != 0 || layer.RotationCenterY != 0 {
+		// Use board center for rotation
+		srcCx = layer.RotationCenterX
+		srcCy = layer.RotationCenterY
+	} else {
+		// Fall back to image center
+		srcCx = float64(srcBounds.Min.X+srcBounds.Max.X) / 2.0
+		srcCy = float64(srcBounds.Min.Y+srcBounds.Max.Y) / 2.0
+	}
 
 	// Check if we have any transform beyond offset
 	hasTransform := rotation != 0 || shearTopX != 1.0 || shearBottomX != 1.0 ||
 		shearLeftY != 1.0 || shearRightY != 1.0
+
+	// Checkerboard alignment visualization parameters
+	vizEnabled := ic.stepEdgeViz.Enabled
+	vizBandWidth := ic.stepEdgeViz.BandWidth
+
+	// Determine if this layer should show on even or odd checkerboard cells
+	// Front = even cells (bandX+bandY even), Back = odd cells (bandX+bandY odd)
+	isFront := layer.Side == pcbimage.SideFront
 
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
@@ -764,6 +857,22 @@ func (ic *ImageCanvas) compositeLayer(output *image.RGBA, layer *pcbimage.Layer,
 
 			// Apply layer opacity to alpha
 			effectiveAlpha := float64(sa) / 0xffff * opacity
+
+			// Apply checkerboard alignment visualization if enabled
+			if vizEnabled && vizBandWidth > 0 {
+				// Use canvas coordinates (without layer offset) so checkerboard stays stationary
+				// while images move beneath it when using compass nudge controls
+				canvasImgX := float64(x) / ic.zoom
+				canvasImgY := float64(y) / ic.zoom
+				bandX := int(canvasImgX / vizBandWidth)
+				bandY := int(canvasImgY / vizBandWidth)
+				isEvenCell := (bandX+bandY)%2 == 0
+
+				// Front shows on even cells, back shows on odd cells
+				if (isFront && !isEvenCell) || (!isFront && isEvenCell) {
+					effectiveAlpha = 0 // Hide this layer in this cell
+				}
+			}
 
 			if effectiveAlpha >= 0.999 {
 				// Fully opaque - just copy

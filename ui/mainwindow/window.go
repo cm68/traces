@@ -3,9 +3,11 @@ package mainwindow
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"pcb-tracer/internal/app"
+	"pcb-tracer/internal/image"
 	"pcb-tracer/internal/version"
 	"pcb-tracer/ui/canvas"
 	"pcb-tracer/ui/panels"
@@ -19,8 +21,7 @@ import (
 
 const (
 	prefKeyLastDir      = "lastDirectory"
-	prefKeyFrontImage   = "lastFrontImage"
-	prefKeyBackImage    = "lastBackImage"
+	prefKeyLastProject  = "lastProject"
 	prefKeyWindowWidth  = "windowWidth"
 	prefKeyWindowHeight = "windowHeight"
 	prefKeyZoom         = "zoom"
@@ -39,13 +40,17 @@ type MainWindow struct {
 	fitToWindowItem *fyne.MenuItem
 
 	// View menu items for panel switching (some need disable until aligned)
-	viewImportItem     *fyne.MenuItem
-	viewComponentsItem *fyne.MenuItem
-	viewTracesItem     *fyne.MenuItem
+	viewImportItem      *fyne.MenuItem
+	viewComponentsItem  *fyne.MenuItem
+	viewTracesItem      *fyne.MenuItem
+	viewPropertiesItem  *fyne.MenuItem
 
 	// Opacity sliders in toolbar
 	frontOpacitySlider *widget.Slider
 	backOpacitySlider  *widget.Slider
+
+	// Checkerboard alignment toggle
+	checkerboardCheck *widget.Check
 
 	// Track last saved size for change detection
 	lastSavedWidth  float32
@@ -102,8 +107,8 @@ func (mw *MainWindow) setupUI() {
 	// Restore zoom from preferences
 	mw.restoreZoom()
 
-	// Restore last images from preferences
-	mw.restoreLastImages()
+	// Restore last project from preferences
+	mw.restoreLastProject()
 
 	// Canvas area with toolbar on top
 	canvasArea := container.NewBorder(
@@ -166,6 +171,11 @@ func (mw *MainWindow) createToolbar() fyne.CanvasObject {
 		}
 	}
 
+	// Checkerboard alignment visualization checkbox
+	mw.checkerboardCheck = widget.NewCheck("Checker", func(checked bool) {
+		mw.onToggleCheckerboard(checked)
+	})
+
 	return container.NewHBox(
 		widget.NewLabel("Zoom:"),
 		zoomOutBtn,
@@ -177,6 +187,8 @@ func (mw *MainWindow) createToolbar() fyne.CanvasObject {
 		container.NewGridWrap(fyne.NewSize(80, 30), mw.frontOpacitySlider),
 		widget.NewLabel("Back:"),
 		container.NewGridWrap(fyne.NewSize(80, 30), mw.backOpacitySlider),
+		widget.NewSeparator(),
+		mw.checkerboardCheck,
 	)
 }
 
@@ -184,11 +196,8 @@ func (mw *MainWindow) createToolbar() fyne.CanvasObject {
 func (mw *MainWindow) setupMenus() {
 	// File menu
 	fileMenu := fyne.NewMenu("File",
-		fyne.NewMenuItem("New Project", mw.onNewProject),
+		fyne.NewMenuItem("New Project...", mw.onNewProject),
 		fyne.NewMenuItem("Open Project...", mw.onOpenProject),
-		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("Import Front Image...", mw.onImportFront),
-		fyne.NewMenuItem("Import Back Image...", mw.onImportBack),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Save Project", mw.onSaveProject),
 		fyne.NewMenuItem("Save Project As...", mw.onSaveProjectAs),
@@ -203,11 +212,13 @@ func (mw *MainWindow) setupMenus() {
 		fyne.NewMenuItem("Undo", mw.onUndo),
 		fyne.NewMenuItem("Redo", mw.onRedo),
 		fyne.NewMenuItemSeparator(),
+		fyne.NewMenuItem("Align...", mw.onShowAlignPanel),
+		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Preferences...", mw.onPreferences),
 	)
 
 	// View menu - panel switching and zoom controls
-	mw.viewImportItem = fyne.NewMenuItem("Import && Align", func() {
+	mw.viewImportItem = fyne.NewMenuItem("Align", func() {
 		mw.sidePanel.ShowPanel(panels.PanelImport)
 		mw.updateViewMenuChecks()
 	})
@@ -217,6 +228,10 @@ func (mw *MainWindow) setupMenus() {
 	})
 	mw.viewTracesItem = fyne.NewMenuItem("Traces", func() {
 		mw.sidePanel.ShowPanel(panels.PanelTraces)
+		mw.updateViewMenuChecks()
+	})
+	mw.viewPropertiesItem = fyne.NewMenuItem("Properties", func() {
+		mw.sidePanel.ShowPanel(panels.PanelProperties)
 		mw.updateViewMenuChecks()
 	})
 
@@ -236,6 +251,7 @@ func (mw *MainWindow) setupMenus() {
 		mw.viewImportItem,
 		mw.viewComponentsItem,
 		mw.viewTracesItem,
+		mw.viewPropertiesItem,
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Zoom In", mw.onZoomIn),
 		fyne.NewMenuItem("Zoom Out", mw.onZoomOut),
@@ -316,9 +332,9 @@ func (mw *MainWindow) updateViewMenuChecks() {
 
 	// Use checkmark prefix to indicate current panel
 	if current == panels.PanelImport {
-		mw.viewImportItem.Label = "✓ Import & Align"
+		mw.viewImportItem.Label = "✓ Align"
 	} else {
-		mw.viewImportItem.Label = "  Import & Align"
+		mw.viewImportItem.Label = "  Align"
 	}
 
 	if current == panels.PanelComponents {
@@ -331,6 +347,12 @@ func (mw *MainWindow) updateViewMenuChecks() {
 		mw.viewTracesItem.Label = "✓ Traces"
 	} else {
 		mw.viewTracesItem.Label = "  Traces"
+	}
+
+	if current == panels.PanelProperties {
+		mw.viewPropertiesItem.Label = "✓ Properties"
+	} else {
+		mw.viewPropertiesItem.Label = "  Properties"
 	}
 }
 
@@ -421,25 +443,27 @@ func (mw *MainWindow) restoreZoom() {
 	}
 }
 
-// restoreLastImages loads the previously used front and back images.
-func (mw *MainWindow) restoreLastImages() {
-	frontPath := mw.app.Preferences().String(prefKeyFrontImage)
-	backPath := mw.app.Preferences().String(prefKeyBackImage)
+// restoreLastProject loads the previously saved project file.
+func (mw *MainWindow) restoreLastProject() {
+	projectPath := mw.app.Preferences().String(prefKeyLastProject)
 
-	fmt.Printf("restoreLastImages: frontPath=%q backPath=%q\n", frontPath, backPath)
+	fmt.Printf("restoreLastProject: projectPath=%q\n", projectPath)
 
-	if frontPath != "" {
-		fmt.Println("Loading front image...")
-		if err := mw.state.LoadFrontImage(frontPath); err != nil {
-			fmt.Printf("Failed to load front image: %v\n", err)
-		}
+	if projectPath == "" {
+		fmt.Println("No saved project to restore")
+		return
 	}
 
-	if backPath != "" {
-		fmt.Println("Loading back image...")
-		if err := mw.state.LoadBackImage(backPath); err != nil {
-			fmt.Printf("Failed to load back image: %v\n", err)
-		}
+	// Check if file exists
+	if _, err := os.Stat(projectPath); os.IsNotExist(err) {
+		fmt.Printf("Saved project file not found: %s\n", projectPath)
+		return
+	}
+
+	// Load the project (this uses the saved crop bounds/rotation, no auto-detection)
+	if err := mw.state.LoadProject(projectPath); err != nil {
+		fmt.Printf("Failed to load project: %v\n", err)
+		return
 	}
 
 	// Sync layers to canvas
@@ -448,27 +472,104 @@ func (mw *MainWindow) restoreLastImages() {
 
 	hasFront := mw.state.FrontImage != nil
 	hasBack := mw.state.BackImage != nil
-	fmt.Printf("After loading: hasFront=%v hasBack=%v\n", hasFront, hasBack)
-
-	// If both images were loaded, run automatic detection and alignment
-	if hasFront && hasBack {
-		fmt.Println("Calling AutoDetectAndAlign...")
-		mw.sidePanel.AutoDetectAndAlign()
-	} else {
-		fmt.Println("Skipping AutoDetectAndAlign - missing image(s)")
-	}
+	fmt.Printf("After loading project: hasFront=%v hasBack=%v aligned=%v\n", hasFront, hasBack, mw.state.Aligned)
 }
 
 // Menu action handlers
 
 func (mw *MainWindow) onNewProject() {
-	mw.state.ProjectPath = ""
-	mw.state.FrontImage = nil
-	mw.state.BackImage = nil
-	mw.state.Aligned = false
-	mw.state.SetModified(false)
-	mw.SetTitle("PCB Tracer - New Project")
-	mw.canvas.Refresh()
+	// Show a dialog to import front and back images
+	mw.showNewProjectDialog()
+}
+
+// showNewProjectDialog shows a dialog for creating a new project with front and back images.
+func (mw *MainWindow) showNewProjectDialog() {
+	var frontPath, backPath string
+	var frontLabel, backLabel *widget.Label
+
+	// Create labels to show selected file names
+	frontLabel = widget.NewLabel("(none)")
+	backLabel = widget.NewLabel("(none)")
+
+	// Create buttons to browse for files
+	frontBtn := widget.NewButton("Browse...", func() {
+		fd := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
+			if err != nil || reader == nil {
+				return
+			}
+			reader.Close()
+			frontPath = reader.URI().Path()
+			mw.saveLastDir(frontPath)
+			frontLabel.SetText(filepath.Base(frontPath))
+		}, mw.Window)
+		fd.SetFilter(storage.NewExtensionFileFilter(image.SupportedFormats()))
+		if loc := mw.getLastDir(); loc != nil {
+			fd.SetLocation(loc)
+		}
+		fd.Show()
+	})
+
+	backBtn := widget.NewButton("Browse...", func() {
+		fd := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
+			if err != nil || reader == nil {
+				return
+			}
+			reader.Close()
+			backPath = reader.URI().Path()
+			mw.saveLastDir(backPath)
+			backLabel.SetText(filepath.Base(backPath))
+		}, mw.Window)
+		fd.SetFilter(storage.NewExtensionFileFilter(image.SupportedFormats()))
+		if loc := mw.getLastDir(); loc != nil {
+			fd.SetLocation(loc)
+		}
+		fd.Show()
+	})
+
+	// Create the form layout
+	form := container.NewVBox(
+		widget.NewLabel("Select the scanned images for the new project:"),
+		widget.NewSeparator(),
+		container.NewBorder(nil, nil, widget.NewLabel("Front Image:"), frontBtn, frontLabel),
+		container.NewBorder(nil, nil, widget.NewLabel("Back Image:"), backBtn, backLabel),
+	)
+
+	// Show custom dialog
+	dlg := dialog.NewCustomConfirm("New Project", "Create", "Cancel", form, func(confirmed bool) {
+		if !confirmed {
+			return
+		}
+
+		if frontPath == "" || backPath == "" {
+			dialog.ShowError(fmt.Errorf("please select both front and back images"), mw.Window)
+			return
+		}
+
+		// Reset all state for new project - zero all alignment settings
+		mw.state.ResetForNewProject()
+
+		// Load raw front image (no auto-detection)
+		mw.updateStatus("Loading front image...")
+		if err := mw.state.LoadRawFrontImage(frontPath); err != nil {
+			dialog.ShowError(fmt.Errorf("failed to load front image: %w", err), mw.Window)
+			return
+		}
+
+		// Load raw back image (no auto-detection)
+		mw.updateStatus("Loading back image...")
+		if err := mw.state.LoadRawBackImage(backPath); err != nil {
+			dialog.ShowError(fmt.Errorf("failed to load back image: %w", err), mw.Window)
+			return
+		}
+
+		mw.SetTitle("PCB Tracer - New Project")
+		mw.sidePanel.SyncLayers()
+		mw.sidePanel.ShowPanel(panels.PanelImport) // Show align panel
+		mw.updateStatus("New project created - use Auto Align or adjust settings manually")
+	}, mw.Window)
+
+	dlg.Resize(fyne.NewSize(500, 200))
+	dlg.Show()
 }
 
 func (mw *MainWindow) onOpenProject() {
@@ -481,54 +582,13 @@ func (mw *MainWindow) onOpenProject() {
 		mw.saveLastDir(path)
 		if err := mw.state.LoadProject(path); err != nil {
 			dialog.ShowError(err, mw.Window)
-		}
-	}, mw.Window)
-	fd.SetFilter(storage.NewExtensionFileFilter([]string{".pcbproj"}))
-	if loc := mw.getLastDir(); loc != nil {
-		fd.SetLocation(loc)
-	}
-	fd.Show()
-}
-
-func (mw *MainWindow) onImportFront() {
-	mw.importImage(true)
-}
-
-func (mw *MainWindow) onImportBack() {
-	mw.importImage(false)
-}
-
-func (mw *MainWindow) importImage(front bool) {
-	fd := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
-		if err != nil || reader == nil {
 			return
 		}
-		reader.Close()
-		path := reader.URI().Path()
-		mw.saveLastDir(path)
-
-		var loadErr error
-		if front {
-			loadErr = mw.state.LoadFrontImage(path)
-		} else {
-			loadErr = mw.state.LoadBackImage(path)
-		}
-
-		if loadErr != nil {
-			dialog.ShowError(loadErr, mw.Window)
-			return
-		}
-
-		// Save path to preferences and sync layers to canvas
-		if front {
-			mw.app.Preferences().SetString(prefKeyFrontImage, path)
-		} else {
-			mw.app.Preferences().SetString(prefKeyBackImage, path)
-		}
+		// Save as last project for next startup
+		mw.app.Preferences().SetString(prefKeyLastProject, path)
 		mw.sidePanel.SyncLayers()
 	}, mw.Window)
-
-	fd.SetFilter(storage.NewExtensionFileFilter([]string{".tiff", ".tif", ".png", ".jpg", ".jpeg"}))
+	fd.SetFilter(storage.NewExtensionFileFilter([]string{".pcbproj"}))
 	if loc := mw.getLastDir(); loc != nil {
 		fd.SetLocation(loc)
 	}
@@ -542,7 +602,10 @@ func (mw *MainWindow) onSaveProject() {
 	}
 	if err := mw.state.SaveProject(mw.state.ProjectPath); err != nil {
 		dialog.ShowError(err, mw.Window)
+		return
 	}
+	// Save as last project for next startup
+	mw.app.Preferences().SetString(prefKeyLastProject, mw.state.ProjectPath)
 }
 
 func (mw *MainWindow) onSaveProjectAs() {
@@ -558,7 +621,10 @@ func (mw *MainWindow) onSaveProjectAs() {
 		mw.saveLastDir(path)
 		if err := mw.state.SaveProject(path); err != nil {
 			dialog.ShowError(err, mw.Window)
+			return
 		}
+		// Save as last project for next startup
+		mw.app.Preferences().SetString(prefKeyLastProject, path)
 	}, mw.Window)
 	fd.SetFileName("project.pcbproj")
 	if loc := mw.getLastDir(); loc != nil {
@@ -577,6 +643,11 @@ func (mw *MainWindow) onUndo() {
 
 func (mw *MainWindow) onRedo() {
 	mw.updateStatus("Redo not yet implemented")
+}
+
+func (mw *MainWindow) onShowAlignPanel() {
+	mw.sidePanel.ShowPanel(panels.PanelImport)
+	mw.updateViewMenuChecks()
 }
 
 func (mw *MainWindow) onPreferences() {
@@ -609,6 +680,23 @@ func (mw *MainWindow) onToggleFitToWindow() {
 func (mw *MainWindow) onActualSize() {
 	mw.disableFitToWindow()
 	mw.canvas.SetZoom(1.0)
+}
+
+// onToggleCheckerboard enables/disables the checkerboard alignment visualization.
+func (mw *MainWindow) onToggleCheckerboard(enabled bool) {
+	if !enabled {
+		mw.canvas.SetStepEdgeViz(false, 0, 0)
+		return
+	}
+
+	// Enable with current DPI
+	dpi := mw.state.DPI
+	if dpi == 0 {
+		dpi = 400 // Default fallback
+	}
+
+	// Use a placeholder Y value (checkerboard doesn't use it)
+	mw.canvas.SetStepEdgeViz(true, 0, dpi)
 }
 
 func (mw *MainWindow) disableFitToWindow() {

@@ -65,6 +65,22 @@ type State struct {
 	BackShearLeftY    float64
 	BackShearRightY   float64
 
+	// Auto-alignment parameters (from automatic alignment process)
+	FrontAutoRotation float64 // Rotation detected during front image alignment
+	BackAutoRotation  float64 // Rotation detected during back image alignment
+	FrontAutoScaleX   float64 // X scale from auto-alignment (1.0 = no scale)
+	FrontAutoScaleY   float64 // Y scale from auto-alignment
+	BackAutoScaleX    float64
+	BackAutoScaleY    float64
+
+	// Rotation center (board center) - persisted to project file
+	FrontRotationCenter geometry.Point2D
+	BackRotationCenter  geometry.Point2D
+
+	// Crop bounds (detected during initial load, in original image coords)
+	FrontCropBounds geometry.RectInt
+	BackCropBounds  geometry.RectInt
+
 	// Per-side sampled color parameters (nil = use defaults)
 	FrontColorParams *ColorParams
 	BackColorParams  *ColorParams
@@ -199,6 +215,22 @@ func (s *State) LoadProject(path string) error {
 	s.BackShearBottomX = proj.BackShearBottomX
 	s.BackShearLeftY = proj.BackShearLeftY
 	s.BackShearRightY = proj.BackShearRightY
+
+	// Restore auto-alignment parameters
+	s.FrontAutoRotation = proj.FrontAutoRotation
+	s.BackAutoRotation = proj.BackAutoRotation
+	s.FrontAutoScaleX = proj.FrontAutoScaleX
+	s.FrontAutoScaleY = proj.FrontAutoScaleY
+	s.BackAutoScaleX = proj.BackAutoScaleX
+	s.BackAutoScaleY = proj.BackAutoScaleY
+
+	// Restore rotation centers
+	s.FrontRotationCenter = proj.FrontRotationCenter
+	s.BackRotationCenter = proj.BackRotationCenter
+
+	// Restore crop bounds
+	s.FrontCropBounds = proj.FrontCropBounds
+	s.BackCropBounds = proj.BackCropBounds
 	s.mu.Unlock()
 
 	// Load images
@@ -216,9 +248,10 @@ func (s *State) LoadProject(path string) error {
 		}
 	}
 
-	// Apply manual offsets, rotation, and shear to loaded layers
+	// Apply all alignment parameters to loaded layers
 	s.mu.Lock()
 	if s.FrontImage != nil {
+		// Manual adjustments
 		s.FrontImage.ManualOffsetX = s.FrontManualOffset.X
 		s.FrontImage.ManualOffsetY = s.FrontManualOffset.Y
 		s.FrontImage.ManualRotation = s.FrontManualRotation
@@ -226,7 +259,14 @@ func (s *State) LoadProject(path string) error {
 		s.FrontImage.ShearBottomX = s.FrontShearBottomX
 		s.FrontImage.ShearLeftY = s.FrontShearLeftY
 		s.FrontImage.ShearRightY = s.FrontShearRightY
-		// Ensure default shear if not set
+		// Auto-alignment parameters
+		s.FrontImage.AutoRotation = s.FrontAutoRotation
+		s.FrontImage.AutoScaleX = s.FrontAutoScaleX
+		s.FrontImage.AutoScaleY = s.FrontAutoScaleY
+		// Rotation center (board center)
+		s.FrontImage.RotationCenterX = s.FrontRotationCenter.X
+		s.FrontImage.RotationCenterY = s.FrontRotationCenter.Y
+		// Ensure default values if not set
 		if s.FrontImage.ShearTopX == 0 {
 			s.FrontImage.ShearTopX = 1.0
 		}
@@ -239,8 +279,15 @@ func (s *State) LoadProject(path string) error {
 		if s.FrontImage.ShearRightY == 0 {
 			s.FrontImage.ShearRightY = 1.0
 		}
+		if s.FrontImage.AutoScaleX == 0 {
+			s.FrontImage.AutoScaleX = 1.0
+		}
+		if s.FrontImage.AutoScaleY == 0 {
+			s.FrontImage.AutoScaleY = 1.0
+		}
 	}
 	if s.BackImage != nil {
+		// Manual adjustments
 		s.BackImage.ManualOffsetX = s.BackManualOffset.X
 		s.BackImage.ManualOffsetY = s.BackManualOffset.Y
 		s.BackImage.ManualRotation = s.BackManualRotation
@@ -248,7 +295,14 @@ func (s *State) LoadProject(path string) error {
 		s.BackImage.ShearBottomX = s.BackShearBottomX
 		s.BackImage.ShearLeftY = s.BackShearLeftY
 		s.BackImage.ShearRightY = s.BackShearRightY
-		// Ensure default shear if not set
+		// Auto-alignment parameters
+		s.BackImage.AutoRotation = s.BackAutoRotation
+		s.BackImage.AutoScaleX = s.BackAutoScaleX
+		s.BackImage.AutoScaleY = s.BackAutoScaleY
+		// Rotation center (board center)
+		s.BackImage.RotationCenterX = s.BackRotationCenter.X
+		s.BackImage.RotationCenterY = s.BackRotationCenter.Y
+		// Ensure default values if not set
 		if s.BackImage.ShearTopX == 0 {
 			s.BackImage.ShearTopX = 1.0
 		}
@@ -260,6 +314,12 @@ func (s *State) LoadProject(path string) error {
 		}
 		if s.BackImage.ShearRightY == 0 {
 			s.BackImage.ShearRightY = 1.0
+		}
+		if s.BackImage.AutoScaleX == 0 {
+			s.BackImage.AutoScaleX = 1.0
+		}
+		if s.BackImage.AutoScaleY == 0 {
+			s.BackImage.AutoScaleY = 1.0
 		}
 	}
 
@@ -304,7 +364,7 @@ func (s *State) LoadProject(path string) error {
 func (s *State) SaveProject(path string) error {
 	s.mu.RLock()
 	proj := ProjectFile{
-		Version:           2,
+		Version:           3,
 		BoardType:         s.BoardSpec.Name(),
 		Aligned:           s.Aligned,
 		AlignmentError:    s.AlignmentError,
@@ -322,6 +382,19 @@ func (s *State) SaveProject(path string) error {
 		BackShearBottomX:    s.BackShearBottomX,
 		BackShearLeftY:      s.BackShearLeftY,
 		BackShearRightY:     s.BackShearRightY,
+		// Auto-alignment parameters
+		FrontAutoRotation:   s.FrontAutoRotation,
+		BackAutoRotation:    s.BackAutoRotation,
+		FrontAutoScaleX:     s.FrontAutoScaleX,
+		FrontAutoScaleY:     s.FrontAutoScaleY,
+		BackAutoScaleX:      s.BackAutoScaleX,
+		BackAutoScaleY:      s.BackAutoScaleY,
+		// Rotation centers
+		FrontRotationCenter: s.FrontRotationCenter,
+		BackRotationCenter:  s.BackRotationCenter,
+		// Crop bounds
+		FrontCropBounds: s.FrontCropBounds,
+		BackCropBounds:  s.BackCropBounds,
 	}
 
 	// Serialize contacts from detection results
@@ -370,8 +443,9 @@ func (s *State) SaveProject(path string) error {
 	return nil
 }
 
-// LoadFrontImage loads the front side image.
-func (s *State) LoadFrontImage(path string) error {
+// ImportFrontImage imports the front side image with automatic detection and processing.
+// This detects board bounds, crops, and fine-tunes rotation. Use for new imports only.
+func (s *State) ImportFrontImage(path string) error {
 	layer, err := image.Load(path)
 	if err != nil {
 		return err
@@ -379,7 +453,12 @@ func (s *State) LoadFrontImage(path string) error {
 	layer.Side = image.SideFront
 
 	// Auto-detect board bounds and apply initial rotation/crop
-	layer.Image = autoRotateAndCrop(layer.Image)
+	var cropBounds geometry.RectInt
+	layer.Image, cropBounds = autoRotateAndCrop(layer.Image)
+	layer.CropX = cropBounds.X
+	layer.CropY = cropBounds.Y
+	layer.CropWidth = cropBounds.Width
+	layer.CropHeight = cropBounds.Height
 
 	// Fine-tune rotation using contact detection
 	layer.Image = fineRotateByContacts(layer.Image, s.BoardSpec, layer.DPI)
@@ -387,6 +466,7 @@ func (s *State) LoadFrontImage(path string) error {
 	s.mu.Lock()
 	s.FrontImage = layer
 	s.FrontBoardBounds = nil // bounds are now (0,0) since we cropped
+	s.FrontCropBounds = cropBounds
 	s.FrontDetectionResult = nil // Clear old detection - user must re-detect on rotated image
 	s.Aligned = false
 	s.AlignedFront = nil
@@ -401,8 +481,50 @@ func (s *State) LoadFrontImage(path string) error {
 	return nil
 }
 
-// LoadBackImage loads the back side image.
-func (s *State) LoadBackImage(path string) error {
+// LoadFrontImage loads the front side image using saved crop bounds from project.
+// This does NOT auto-detect - it applies previously saved processing parameters.
+func (s *State) LoadFrontImage(path string) error {
+	layer, err := image.Load(path)
+	if err != nil {
+		return err
+	}
+	layer.Side = image.SideFront
+
+	s.mu.Lock()
+	cropBounds := s.FrontCropBounds
+	autoRotation := s.FrontAutoRotation
+	s.mu.Unlock()
+
+	// Apply saved crop bounds (if any)
+	if cropBounds.Width > 0 && cropBounds.Height > 0 {
+		layer.Image = cropImage(layer.Image, cropBounds)
+		layer.CropX = cropBounds.X
+		layer.CropY = cropBounds.Y
+		layer.CropWidth = cropBounds.Width
+		layer.CropHeight = cropBounds.Height
+	}
+
+	// Apply saved fine rotation (if any)
+	if autoRotation != 0 {
+		layer.Image = alignment.RotateGoImage(layer.Image, autoRotation)
+	}
+
+	s.mu.Lock()
+	s.FrontImage = layer
+	s.FrontBoardBounds = nil
+	// Set DPI from TIFF metadata if available and not already set
+	if layer.DPI > 0 && s.DPI == 0 {
+		s.DPI = layer.DPI
+	}
+	s.mu.Unlock()
+
+	s.Emit(EventImageLoaded, layer)
+	return nil
+}
+
+// ImportBackImage imports the back side image with automatic detection and processing.
+// This detects board bounds, crops, fine-tunes rotation, and flips. Use for new imports only.
+func (s *State) ImportBackImage(path string) error {
 	layer, err := image.Load(path)
 	if err != nil {
 		return err
@@ -410,7 +532,12 @@ func (s *State) LoadBackImage(path string) error {
 	layer.Side = image.SideBack
 
 	// Auto-detect board bounds and apply initial rotation/crop
-	layer.Image = autoRotateAndCrop(layer.Image)
+	var cropBounds geometry.RectInt
+	layer.Image, cropBounds = autoRotateAndCrop(layer.Image)
+	layer.CropX = cropBounds.X
+	layer.CropY = cropBounds.Y
+	layer.CropWidth = cropBounds.Width
+	layer.CropHeight = cropBounds.Height
 
 	// Fine-tune rotation using contact detection
 	layer.Image = fineRotateByContacts(layer.Image, s.BoardSpec, layer.DPI)
@@ -421,6 +548,7 @@ func (s *State) LoadBackImage(path string) error {
 	s.mu.Lock()
 	s.BackImage = layer
 	s.BackBoardBounds = nil // bounds are now (0,0) since we cropped
+	s.BackCropBounds = cropBounds
 	s.BackDetectionResult = nil // Clear old detection - user must re-detect on rotated image
 	s.Aligned = false
 	s.AlignedBack = nil
@@ -435,18 +563,176 @@ func (s *State) LoadBackImage(path string) error {
 	return nil
 }
 
+// LoadBackImage loads the back side image using saved crop bounds from project.
+// This does NOT auto-detect - it applies previously saved processing parameters.
+func (s *State) LoadBackImage(path string) error {
+	layer, err := image.Load(path)
+	if err != nil {
+		return err
+	}
+	layer.Side = image.SideBack
+
+	s.mu.Lock()
+	cropBounds := s.BackCropBounds
+	autoRotation := s.BackAutoRotation
+	s.mu.Unlock()
+
+	// Apply saved crop bounds (if any)
+	if cropBounds.Width > 0 && cropBounds.Height > 0 {
+		layer.Image = cropImage(layer.Image, cropBounds)
+		layer.CropX = cropBounds.X
+		layer.CropY = cropBounds.Y
+		layer.CropWidth = cropBounds.Width
+		layer.CropHeight = cropBounds.Height
+	}
+
+	// Apply saved fine rotation (if any)
+	if autoRotation != 0 {
+		layer.Image = alignment.RotateGoImage(layer.Image, autoRotation)
+	}
+
+	// Flip horizontally - back is viewed from the other side
+	layer.Image = flipHorizontal(layer.Image)
+
+	s.mu.Lock()
+	s.BackImage = layer
+	s.BackBoardBounds = nil
+	// Set DPI from TIFF metadata if available and not already set
+	if layer.DPI > 0 && s.DPI == 0 {
+		s.DPI = layer.DPI
+	}
+	s.mu.Unlock()
+
+	s.Emit(EventImageLoaded, layer)
+	return nil
+}
+
+// ResetForNewProject clears all state for a new project.
+// This zeros all alignment, crop, and detection settings.
+func (s *State) ResetForNewProject() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Clear images
+	s.FrontImage = nil
+	s.BackImage = nil
+	s.AlignedFront = nil
+	s.AlignedBack = nil
+
+	// Clear project path
+	s.ProjectPath = ""
+	s.Modified = false
+
+	// Clear alignment state
+	s.Aligned = false
+	s.AlignmentError = 0
+
+	// Zero all manual alignment settings
+	s.FrontManualOffset = geometry.PointInt{}
+	s.BackManualOffset = geometry.PointInt{}
+	s.FrontManualRotation = 0
+	s.BackManualRotation = 0
+	s.FrontShearTopX = 1.0
+	s.FrontShearBottomX = 1.0
+	s.FrontShearLeftY = 1.0
+	s.FrontShearRightY = 1.0
+	s.BackShearTopX = 1.0
+	s.BackShearBottomX = 1.0
+	s.BackShearLeftY = 1.0
+	s.BackShearRightY = 1.0
+
+	// Zero auto alignment settings
+	s.FrontAutoRotation = 0
+	s.BackAutoRotation = 0
+	s.FrontAutoScaleX = 1.0
+	s.FrontAutoScaleY = 1.0
+	s.BackAutoScaleX = 1.0
+	s.BackAutoScaleY = 1.0
+	s.FrontRotationCenter = geometry.Point2D{}
+	s.BackRotationCenter = geometry.Point2D{}
+
+	// Zero crop bounds
+	s.FrontCropBounds = geometry.RectInt{}
+	s.BackCropBounds = geometry.RectInt{}
+
+	// Clear detection results
+	s.FrontDetectionResult = nil
+	s.BackDetectionResult = nil
+	s.FrontBoardBounds = nil
+	s.BackBoardBounds = nil
+
+	// Clear color params
+	s.FrontColorParams = nil
+	s.BackColorParams = nil
+
+	// Clear components and features
+	s.Components = nil
+	s.FeaturesLayer = nil
+}
+
+// LoadRawFrontImage loads the front side image without any processing.
+// No auto-detection, cropping, or rotation is applied.
+func (s *State) LoadRawFrontImage(path string) error {
+	layer, err := image.Load(path)
+	if err != nil {
+		return err
+	}
+	layer.Side = image.SideFront
+
+	s.mu.Lock()
+	s.FrontImage = layer
+	s.FrontBoardBounds = nil
+	// Set DPI from TIFF metadata if available and not already set
+	if layer.DPI > 0 && s.DPI == 0 {
+		s.DPI = layer.DPI
+	}
+	s.mu.Unlock()
+
+	s.Emit(EventImageLoaded, layer)
+	return nil
+}
+
+// LoadRawBackImage loads the back side image with minimal processing.
+// No auto-detection, cropping, or rotation is applied.
+// The horizontal flip IS applied since it's a viewing requirement, not alignment.
+func (s *State) LoadRawBackImage(path string) error {
+	layer, err := image.Load(path)
+	if err != nil {
+		return err
+	}
+	layer.Side = image.SideBack
+
+	// Flip horizontally - back is viewed from the other side
+	// This is not an alignment setting but a viewing requirement
+	layer.Image = flipHorizontal(layer.Image)
+
+	s.mu.Lock()
+	s.BackImage = layer
+	s.BackBoardBounds = nil
+	// Set DPI from TIFF metadata if available and not already set
+	if layer.DPI > 0 && s.DPI == 0 {
+		s.DPI = layer.DPI
+	}
+	s.mu.Unlock()
+
+	s.Emit(EventImageLoaded, layer)
+	return nil
+}
+
 // autoRotateAndCrop detects board bounds, rotates based on contacts, and crops.
-func autoRotateAndCrop(img goimage.Image) goimage.Image {
+// Returns the cropped image and the crop bounds that were detected.
+func autoRotateAndCrop(img goimage.Image) (goimage.Image, geometry.RectInt) {
 	// First, just detect board bounds (no rotation yet)
 	rotResult := alignment.DetectBoardRotationFromImage(img)
 	if !rotResult.Detected {
-		return img
+		// No cropping - return original image with zero bounds (meaning full image)
+		return img, geometry.RectInt{}
 	}
 
 	// Crop to board bounds first
 	cropped := cropImage(img, rotResult.Bounds)
 
-	return cropped
+	return cropped, rotResult.Bounds
 }
 
 // fineRotateByContacts detects contacts and applies rotation to align them horizontally.
@@ -553,6 +839,22 @@ type ProjectFile struct {
 	BackShearBottomX  float64 `json:"back_shear_bottom_x,omitempty"`
 	BackShearLeftY    float64 `json:"back_shear_left_y,omitempty"`
 	BackShearRightY   float64 `json:"back_shear_right_y,omitempty"`
+
+	// Auto-alignment parameters (v3+) - from automatic alignment process
+	FrontAutoRotation float64 `json:"front_auto_rotation,omitempty"`
+	BackAutoRotation  float64 `json:"back_auto_rotation,omitempty"`
+	FrontAutoScaleX   float64 `json:"front_auto_scale_x,omitempty"`
+	FrontAutoScaleY   float64 `json:"front_auto_scale_y,omitempty"`
+	BackAutoScaleX    float64 `json:"back_auto_scale_x,omitempty"`
+	BackAutoScaleY    float64 `json:"back_auto_scale_y,omitempty"`
+
+	// Rotation center (board center) for manual rotation (v3+)
+	FrontRotationCenter geometry.Point2D `json:"front_rotation_center,omitempty"`
+	BackRotationCenter  geometry.Point2D `json:"back_rotation_center,omitempty"`
+
+	// Crop bounds (v3+) - detected during initial load
+	FrontCropBounds geometry.RectInt `json:"front_crop,omitempty"`
+	BackCropBounds  geometry.RectInt `json:"back_crop,omitempty"`
 
 	// Detected contacts (v2+)
 	FrontContacts []ContactData `json:"front_contacts,omitempty"`

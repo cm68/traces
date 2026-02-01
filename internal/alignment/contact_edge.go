@@ -143,11 +143,37 @@ func detectContactsOnEdge(img gocv.Mat, goldMask gocv.Mat, boardBounds geometry.
 		})
 	}
 
-	// Calculate centers
+	// Calculate centers with sub-pixel precision using image moments
 	for i := range candidates {
+		// First set bounding box center as fallback
 		candidates[i].Center = geometry.Point2D{
 			X: float64(candidates[i].Bounds.X) + float64(candidates[i].Bounds.Width)/2,
 			Y: float64(candidates[i].Bounds.Y) + float64(candidates[i].Bounds.Height)/2,
+		}
+
+		// Refine using image moments on the gold mask region
+		b := candidates[i].Bounds
+		if b.X >= searchX1 && b.Y >= searchY1 && b.X+b.Width <= searchX2 && b.Y+b.Height <= searchY2 {
+			// Extract the contact region from gold mask (relative to search region)
+			localX := b.X - searchX1
+			localY := b.Y - searchY1
+			if localX >= 0 && localY >= 0 && localX+b.Width <= region.Cols() && localY+b.Height <= region.Rows() {
+				contactRegion := region.Region(image.Rect(localX, localY, localX+b.Width, localY+b.Height))
+				moments := gocv.Moments(contactRegion, true)
+				contactRegion.Close()
+
+				// Calculate centroid from moments: cx = m10/m00, cy = m01/m00
+				m00 := moments["m00"]
+				if m00 > 0 {
+					cx := moments["m10"] / m00
+					cy := moments["m01"] / m00
+					// Convert back to image coordinates
+					candidates[i].Center = geometry.Point2D{
+						X: float64(b.X) + cx,
+						Y: float64(b.Y) + cy,
+					}
+				}
+			}
 		}
 	}
 

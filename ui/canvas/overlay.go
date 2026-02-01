@@ -11,7 +11,15 @@ import (
 type Overlay struct {
 	Rectangles []OverlayRect
 	Polygons   []OverlayPolygon
+	Circles    []OverlayCircle
 	Color      color.RGBA
+}
+
+// OverlayCircle represents a circle to draw on the overlay.
+type OverlayCircle struct {
+	X, Y   float64 // Center position in image coordinates
+	Radius float64 // Radius in pixels (image coordinates)
+	Filled bool    // If true, fill the circle; otherwise just outline
 }
 
 // FillPattern indicates how to fill a rectangle.

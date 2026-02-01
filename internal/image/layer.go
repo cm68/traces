@@ -47,12 +47,23 @@ type Layer struct {
 	Opacity float64        // Layer opacity (0.0 - 1.0)
 	Bounds  geometry.Rect  // Board bounds within image (if detected)
 
+	// Automatic alignment parameters (from alignment process)
+	AutoRotation float64 // Rotation applied during auto-alignment (degrees)
+	AutoScaleX   float64 // X scale from auto-alignment (1.0 = no scale)
+	AutoScaleY   float64 // Y scale from auto-alignment (1.0 = no scale)
+
 	// Manual alignment offset (pixels, applied during rendering)
 	ManualOffsetX int
 	ManualOffsetY int
 
 	// Manual rotation (degrees, positive = clockwise)
+	// Rotation is applied about RotationCenter
 	ManualRotation float64
+
+	// Rotation center (image coordinates) - typically board center
+	// If zero, defaults to image center
+	RotationCenterX float64
+	RotationCenterY float64
 
 	// Shear/scale factors (1.0 = no change)
 	// Different values at top vs bottom create horizontal shear
@@ -61,6 +72,13 @@ type Layer struct {
 	ShearBottomX float64 // X scale at bottom edge
 	ShearLeftY   float64 // Y scale at left edge
 	ShearRightY  float64 // Y scale at right edge
+
+	// Crop bounds (applied during initial load, in original image coords)
+	// Stored for reference and potential re-processing
+	CropX      int // X offset of crop region
+	CropY      int // Y offset of crop region
+	CropWidth  int // Width of crop region (0 = full width)
+	CropHeight int // Height of crop region (0 = full height)
 }
 
 // NewLayer creates a new Layer with default settings.
@@ -68,6 +86,8 @@ func NewLayer() *Layer {
 	return &Layer{
 		Visible:      true,
 		Opacity:      1.0,
+		AutoScaleX:   1.0,
+		AutoScaleY:   1.0,
 		ShearTopX:    1.0,
 		ShearBottomX: 1.0,
 		ShearLeftY:   1.0,

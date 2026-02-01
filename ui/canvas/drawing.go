@@ -146,6 +146,11 @@ func (ic *ImageCanvas) drawOverlay(output *image.RGBA, overlay *Overlay) {
 		}
 		ic.drawPolygon(output, poly, col)
 	}
+
+	// Draw circles
+	for _, circle := range overlay.Circles {
+		ic.drawCircle(output, circle, col)
+	}
 }
 
 // drawSelectionRect draws a selection rectangle with a distinctive pattern.
@@ -291,6 +296,52 @@ func (ic *ImageCanvas) drawPolygon(output *image.RGBA, poly OverlayPolygon, col 
 			poly.Label, center.X, center.Y, bboxCenterX, bboxCenterY,
 			center.X-bboxCenterX, center.Y-bboxCenterY)
 		ic.drawOverlayLabel(output, poly.Label, int(center.X), int(center.Y))
+	}
+}
+
+// drawCircle draws a filled or outlined circle on the output image.
+func (ic *ImageCanvas) drawCircle(output *image.RGBA, circle OverlayCircle, col color.RGBA) {
+	bounds := output.Bounds()
+
+	// Scale by zoom
+	cx := circle.X * ic.zoom
+	cy := circle.Y * ic.zoom
+	r := circle.Radius * ic.zoom
+
+	// Integer bounds for iteration
+	minX := int(cx - r - 1)
+	maxX := int(cx + r + 1)
+	minY := int(cy - r - 1)
+	maxY := int(cy + r + 1)
+
+	r2 := r * r
+	innerR2 := (r - 2) * (r - 2) // 2 pixel outline thickness
+
+	for y := minY; y <= maxY; y++ {
+		if y < bounds.Min.Y || y >= bounds.Max.Y {
+			continue
+		}
+		for x := minX; x <= maxX; x++ {
+			if x < bounds.Min.X || x >= bounds.Max.X {
+				continue
+			}
+			// Distance from center squared
+			dx := float64(x) - cx
+			dy := float64(y) - cy
+			dist2 := dx*dx + dy*dy
+
+			if circle.Filled {
+				// Fill entire circle
+				if dist2 <= r2 {
+					output.Set(x, y, col)
+				}
+			} else {
+				// Draw outline only (ring between innerR and r)
+				if dist2 <= r2 && dist2 >= innerR2 {
+					output.Set(x, y, col)
+				}
+			}
+		}
 	}
 }
 

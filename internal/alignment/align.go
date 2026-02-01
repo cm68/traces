@@ -108,18 +108,41 @@ func AlignImages(front, back gocv.Mat, opts Options) (gocv.Mat, gocv.Mat, *Align
 	// Calculate average DPI
 	avgDPI := (frontResult.DPI + backResult.DPI) / 2
 
-	// Build point correspondences
+	// Build point correspondences from contacts
 	nContacts := min(len(frontResult.Contacts), len(backResult.Contacts))
 
-	frontPts := make([]geometry.Point2D, nContacts)
-	backPts := make([]geometry.Point2D, nContacts)
+	frontPts := make([]geometry.Point2D, 0, nContacts+4)
+	backPts := make([]geometry.Point2D, 0, nContacts+4)
 	for i := 0; i < nContacts; i++ {
-		frontPts[i] = frontResult.Contacts[i].Center
-		backPts[i] = backResult.Contacts[i].Center
+		frontPts = append(frontPts, frontResult.Contacts[i].Center)
+		backPts = append(backPts, backResult.Contacts[i].Center)
 	}
 
-	// Compute affine transform (back -> front)
-	transform, inliers, err := ComputeAffineTransform(backPts, frontPts)
+	// Detect step edges for Y-axis registration (high-contrast board edge)
+	if avgDPI > 0 {
+		frontStepEdges := DetectStepEdges(frontRotated, frontResult.Contacts, avgDPI)
+		backStepEdges := DetectStepEdges(backProcessed, backResult.Contacts, avgDPI)
+
+		// Match step edges by side
+		for _, frontEdge := range frontStepEdges {
+			for _, backEdge := range backStepEdges {
+				if frontEdge.Side == backEdge.Side {
+					frontPts = append(frontPts, frontEdge.Corner)
+					backPts = append(backPts, backEdge.Corner)
+					if opts.Debug {
+						fmt.Printf("Step edge %s: front=(%.1f,%.1f) back=(%.1f,%.1f)\n",
+							frontEdge.Side,
+							frontEdge.Corner.X, frontEdge.Corner.Y,
+							backEdge.Corner.X, backEdge.Corner.Y)
+					}
+					break
+				}
+			}
+		}
+	}
+
+	// Compute affine transform (back -> front) with tighter threshold for sub-pixel accuracy
+	transform, inliers, err := ComputeAffineRANSAC(backPts, frontPts, 3000, 1.5)
 	if err != nil {
 		frontRotated.Close()
 		backProcessed.Close()

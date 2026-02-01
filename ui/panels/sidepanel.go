@@ -32,6 +32,7 @@ const (
 	PanelImport     = "import"
 	PanelComponents = "components"
 	PanelTraces     = "traces"
+	PanelProperties = "properties"
 )
 
 // SidePanel provides the main side panel with switchable views.
@@ -41,9 +42,10 @@ type SidePanel struct {
 	container *fyne.Container
 
 	// Individual panels
-	importPanel     *ImportPanel
-	componentsPanel *ComponentsPanel
-	tracesPanel     *TracesPanel
+	importPanel      *ImportPanel
+	componentsPanel  *ComponentsPanel
+	tracesPanel      *TracesPanel
+	propertiesPanel  *PropertySheet
 
 	// Currently visible panel name
 	currentPanel string
@@ -61,6 +63,10 @@ func NewSidePanel(state *app.State, canvas *canvas.ImageCanvas) *SidePanel {
 	sp.importPanel = NewImportPanel(state, canvas)
 	sp.componentsPanel = NewComponentsPanel(state)
 	sp.tracesPanel = NewTracesPanel(state, canvas)
+	sp.propertiesPanel = NewPropertySheet(state, canvas, func() {
+		// Callback when properties are applied - refresh import panel labels
+		sp.importPanel.RefreshLabels()
+	})
 
 	// Create container showing import panel by default
 	sp.container = container.NewStack(sp.importPanel.Container())
@@ -87,6 +93,9 @@ func (sp *SidePanel) ShowPanel(name string) {
 		panel = sp.componentsPanel.Container()
 	case PanelTraces:
 		panel = sp.tracesPanel.Container()
+	case PanelProperties:
+		sp.propertiesPanel.Refresh()
+		panel = sp.propertiesPanel.Container()
 	default:
 		return
 	}
@@ -112,6 +121,16 @@ func (sp *SidePanel) SyncLayers() {
 		layers = append(layers, sp.state.BackImage)
 	}
 	sp.canvas.SetLayers(layers)
+
+	// Set DPI for background grid
+	dpi := sp.state.DPI
+	if dpi == 0 && sp.state.FrontImage != nil && sp.state.FrontImage.DPI > 0 {
+		dpi = sp.state.FrontImage.DPI
+	}
+	if dpi == 0 && sp.state.BackImage != nil && sp.state.BackImage.DPI > 0 {
+		dpi = sp.state.BackImage.DPI
+	}
+	sp.canvas.SetDPI(dpi)
 
 	// Set board bounds overlays
 	if sp.state.FrontBoardBounds != nil {
@@ -139,6 +158,7 @@ func (sp *SidePanel) SyncLayers() {
 // SetWindow sets the parent window for dialogs.
 func (sp *SidePanel) SetWindow(w fyne.Window) {
 	sp.importPanel.SetWindow(w)
+	sp.propertiesPanel.SetWindow(w)
 }
 
 // AutoDetectAndAlign runs automatic contact detection on both images and aligns them.
@@ -177,6 +197,12 @@ type ImportPanel struct {
 	offsetLabel   *widget.Label
 	rotationLabel *widget.Label
 	shearLabel    *widget.Label
+
+	// Auto align button
+	autoAlignButton *widget.Button
+
+	// Crop editing
+	cropLabel *widget.Label
 }
 
 // NewImportPanel creates a new import panel.
@@ -195,6 +221,7 @@ func NewImportPanel(state *app.State, cvs *canvas.ImageCanvas) *ImportPanel {
 	ip.contactInfoLabel = widget.NewLabel("")
 	ip.contactInfoLabel.Wrapping = fyne.TextWrapWord
 	ip.alignStatus = widget.NewLabel("")
+	ip.cropLabel = widget.NewLabel("Crop: (none)")
 
 	// Board selection (callback may trigger updateBoardSpecInfo)
 	boardNames := board.ListSpecs()
@@ -219,6 +246,8 @@ func NewImportPanel(state *app.State, cvs *canvas.ImageCanvas) *ImportPanel {
 		} else {
 			cvs.RaiseLayerBySide(pcbimage.SideBack)
 		}
+		// Update labels to show selected layer's values
+		ip.RefreshLabels()
 	})
 	ip.layerSelect.SetSelected("Front")
 	ip.layerSelect.Horizontal = true
@@ -240,6 +269,12 @@ func NewImportPanel(state *app.State, cvs *canvas.ImageCanvas) *ImportPanel {
 		ip.onAlignImages()
 	})
 
+	// Auto Align button - runs detection and alignment in one step
+	ip.autoAlignButton = widget.NewButton("Auto Align", func() {
+		ip.onAutoAlign()
+	})
+	ip.autoAlignButton.Importance = widget.HighImportance
+
 	// Manual alignment nudge - compass rose
 	ip.offsetLabel = widget.NewLabel("Offset: (0, 0)")
 	compassRose := container.NewGridWithColumns(3,
@@ -254,11 +289,11 @@ func NewImportPanel(state *app.State, cvs *canvas.ImageCanvas) *ImportPanel {
 		layout.NewSpacer(),
 	)
 
-	// Rotation controls (0.1 degree increments)
+	// Rotation controls (0.01 degree increments for fine adjustment)
 	ip.rotationLabel = widget.NewLabel("Rotation: 0.000°")
 	rotationButtons := container.NewHBox(
-		widget.NewButton("↺ CCW", func() { ip.onNudgeRotation(-0.1) }),
-		widget.NewButton("CW ↻", func() { ip.onNudgeRotation(0.1) }),
+		widget.NewButton("↺ CCW", func() { ip.onNudgeRotation(-0.01) }),
+		widget.NewButton("CW ↻", func() { ip.onNudgeRotation(0.01) }),
 	)
 
 	// Shear controls - separate buttons for each edge
@@ -286,6 +321,23 @@ func NewImportPanel(state *app.State, cvs *canvas.ImageCanvas) *ImportPanel {
 		widget.NewButton("+", func() { ip.onNudgeShear("rightY", 0.001) }),
 	)
 
+	// Crop controls - position and size adjustment
+	cropPosButtons := container.NewHBox(
+		widget.NewLabel("Pos:"),
+		widget.NewButton("←", func() { ip.onNudgeCrop("x", -10) }),
+		widget.NewButton("→", func() { ip.onNudgeCrop("x", 10) }),
+		widget.NewButton("↑", func() { ip.onNudgeCrop("y", -10) }),
+		widget.NewButton("↓", func() { ip.onNudgeCrop("y", 10) }),
+	)
+	cropSizeButtons := container.NewHBox(
+		widget.NewLabel("Size:"),
+		widget.NewButton("W-", func() { ip.onNudgeCrop("w", -10) }),
+		widget.NewButton("W+", func() { ip.onNudgeCrop("w", 10) }),
+		widget.NewButton("H-", func() { ip.onNudgeCrop("h", -10) }),
+		widget.NewButton("H+", func() { ip.onNudgeCrop("h", 10) }),
+	)
+	reImportButton := widget.NewButton("Re-import with Crop", func() { ip.onReImportWithCrop() })
+
 	// Layout
 	ip.container = container.NewVBox(
 		widget.NewCard("Board Type", "", container.NewVBox(
@@ -307,6 +359,7 @@ func NewImportPanel(state *app.State, cvs *canvas.ImageCanvas) *ImportPanel {
 			container.NewHBox(ip.detectButton, ip.sampleButton),
 		)),
 		widget.NewCard("Alignment", "", container.NewVBox(
+			ip.autoAlignButton,
 			ip.alignButton,
 			ip.alignStatus,
 			widget.NewSeparator(),
@@ -322,6 +375,12 @@ func NewImportPanel(state *app.State, cvs *canvas.ImageCanvas) *ImportPanel {
 			shearLeftButtons,
 			shearRightButtons,
 			ip.shearLabel,
+			widget.NewSeparator(),
+			widget.NewLabel("Crop Bounds:"),
+			cropPosButtons,
+			cropSizeButtons,
+			ip.cropLabel,
+			reImportButton,
 		)),
 	)
 
@@ -346,6 +405,71 @@ func NewImportPanel(state *app.State, cvs *canvas.ImageCanvas) *ImportPanel {
 // SetWindow sets the parent window for dialogs.
 func (ip *ImportPanel) SetWindow(w fyne.Window) {
 	ip.window = w
+}
+
+// RefreshLabels updates all labels from current state.
+func (ip *ImportPanel) RefreshLabels() {
+	ip.updateBoardSpecInfo()
+	ip.updateCropLabel()
+	ip.updateRotationCenterOverlay()
+
+	// Update labels based on selected layer
+	isFront := ip.layerSelect.Selected == "Front"
+	var layer *pcbimage.Layer
+	if isFront {
+		layer = ip.state.FrontImage
+	} else {
+		layer = ip.state.BackImage
+	}
+
+	if layer != nil {
+		ip.offsetLabel.SetText(fmt.Sprintf("Offset: (%d, %d)",
+			layer.ManualOffsetX, layer.ManualOffsetY))
+		ip.rotationLabel.SetText(fmt.Sprintf("Rotation: %.3f°", layer.ManualRotation))
+		ip.shearLabel.SetText(fmt.Sprintf("Shear: T=%.3f B=%.3f L=%.3f R=%.3f",
+			layer.ShearTopX, layer.ShearBottomX, layer.ShearLeftY, layer.ShearRightY))
+	}
+}
+
+// updateRotationCenterOverlay shows a red dot at the rotation center for each image.
+func (ip *ImportPanel) updateRotationCenterOverlay() {
+	// Only show if we have rotation centers set
+	frontCenter := ip.state.FrontRotationCenter
+	backCenter := ip.state.BackRotationCenter
+
+	// If both are zero, clear overlay
+	if frontCenter.X == 0 && frontCenter.Y == 0 && backCenter.X == 0 && backCenter.Y == 0 {
+		ip.canvas.ClearOverlay("rotation_center")
+		return
+	}
+
+	// Create overlay with red circles at rotation centers
+	overlay := &canvas.Overlay{
+		Color: colorutil.Red,
+	}
+
+	// Add front rotation center (if set)
+	if frontCenter.X != 0 || frontCenter.Y != 0 {
+		overlay.Circles = append(overlay.Circles, canvas.OverlayCircle{
+			X:      frontCenter.X,
+			Y:      frontCenter.Y,
+			Radius: 5, // 10 pixel diameter = 5 pixel radius
+			Filled: true,
+		})
+	}
+
+	// Add back rotation center (if set and different from front)
+	// Apply back image offset so the dot appears at the correct position
+	if backCenter.X != 0 || backCenter.Y != 0 {
+		overlay.Circles = append(overlay.Circles, canvas.OverlayCircle{
+			X:      backCenter.X + float64(ip.state.BackManualOffset.X),
+			Y:      backCenter.Y + float64(ip.state.BackManualOffset.Y),
+			Radius: 5,
+			Filled: true,
+		})
+	}
+
+	ip.canvas.SetOverlay("rotation_center", overlay)
 }
 
 func (ip *ImportPanel) updateBoardSpecInfo() {
@@ -685,17 +809,61 @@ func (ip *ImportPanel) onNudgeRotation(degrees float64) {
 	isFront := ip.layerSelect.Selected == "Front"
 
 	var layer *pcbimage.Layer
+	var detectionResult *alignment.DetectionResult
 	if isFront {
 		layer = ip.state.FrontImage
+		detectionResult = ip.state.FrontDetectionResult
 		ip.state.FrontManualRotation += degrees
 	} else {
 		layer = ip.state.BackImage
+		detectionResult = ip.state.BackDetectionResult
 		ip.state.BackManualRotation += degrees
 	}
 
 	if layer == nil {
 		ip.alignStatus.SetText("No image loaded for " + ip.layerSelect.Selected)
 		return
+	}
+
+	// Set rotation center to board center (from contacts) if not already set
+	if layer.RotationCenterX == 0 && layer.RotationCenterY == 0 {
+		if detectionResult != nil && len(detectionResult.Contacts) > 0 {
+			// Calculate center from contacts bounding box
+			minX, minY := detectionResult.Contacts[0].Center.X, detectionResult.Contacts[0].Center.Y
+			maxX, maxY := minX, minY
+			for _, c := range detectionResult.Contacts {
+				if c.Center.X < minX {
+					minX = c.Center.X
+				}
+				if c.Center.X > maxX {
+					maxX = c.Center.X
+				}
+				if c.Center.Y < minY {
+					minY = c.Center.Y
+				}
+				if c.Center.Y > maxY {
+					maxY = c.Center.Y
+				}
+			}
+			// Board center is offset from contact center (contacts are at edge)
+			// Use contact center X, but estimate board center Y from image
+			layer.RotationCenterX = (minX + maxX) / 2
+			if layer.Image != nil {
+				// Board center Y is roughly middle of image
+				layer.RotationCenterY = float64(layer.Image.Bounds().Dy()) / 2
+			} else {
+				layer.RotationCenterY = (minY + maxY) / 2
+			}
+
+			// Also update state
+			if isFront {
+				ip.state.FrontRotationCenter.X = layer.RotationCenterX
+				ip.state.FrontRotationCenter.Y = layer.RotationCenterY
+			} else {
+				ip.state.BackRotationCenter.X = layer.RotationCenterX
+				ip.state.BackRotationCenter.Y = layer.RotationCenterY
+			}
+		}
 	}
 
 	// Apply rotation to layer for rendering
@@ -763,6 +931,357 @@ func (ip *ImportPanel) onNudgeShear(edge string, delta float64) {
 	// Update shear label
 	ip.shearLabel.SetText(fmt.Sprintf("Shear: T=%.3f B=%.3f L=%.3f R=%.3f",
 		layer.ShearTopX, layer.ShearBottomX, layer.ShearLeftY, layer.ShearRightY))
+}
+
+// onNudgeCrop adjusts the crop bounds for the selected layer.
+// dimension is one of: "x", "y", "w", "h"
+func (ip *ImportPanel) onNudgeCrop(dimension string, delta int) {
+	isFront := ip.layerSelect.Selected == "Front"
+
+	var crop *geometry.RectInt
+	if isFront {
+		crop = &ip.state.FrontCropBounds
+	} else {
+		crop = &ip.state.BackCropBounds
+	}
+
+	// Apply delta to the appropriate dimension
+	switch dimension {
+	case "x":
+		crop.X += delta
+		if crop.X < 0 {
+			crop.X = 0
+		}
+	case "y":
+		crop.Y += delta
+		if crop.Y < 0 {
+			crop.Y = 0
+		}
+	case "w":
+		crop.Width += delta
+		if crop.Width < 10 {
+			crop.Width = 10
+		}
+	case "h":
+		crop.Height += delta
+		if crop.Height < 10 {
+			crop.Height = 10
+		}
+	}
+
+	ip.updateCropLabel()
+}
+
+// onReImportWithCrop reloads the image with the updated crop bounds.
+func (ip *ImportPanel) onReImportWithCrop() {
+	isFront := ip.layerSelect.Selected == "Front"
+
+	var layer *pcbimage.Layer
+	var crop geometry.RectInt
+	if isFront {
+		layer = ip.state.FrontImage
+		crop = ip.state.FrontCropBounds
+	} else {
+		layer = ip.state.BackImage
+		crop = ip.state.BackCropBounds
+	}
+
+	if layer == nil || layer.Path == "" {
+		ip.alignStatus.SetText("No image loaded for " + ip.layerSelect.Selected)
+		return
+	}
+
+	// Validate crop bounds
+	if crop.Width <= 0 || crop.Height <= 0 {
+		ip.alignStatus.SetText("Invalid crop bounds")
+		return
+	}
+
+	ip.alignStatus.SetText("Re-importing with new crop...")
+
+	// Reload the image using the Load function (which applies saved crop bounds)
+	var err error
+	if isFront {
+		err = ip.state.LoadFrontImage(layer.Path)
+	} else {
+		err = ip.state.LoadBackImage(layer.Path)
+	}
+
+	if err != nil {
+		ip.alignStatus.SetText(fmt.Sprintf("Re-import failed: %v", err))
+		return
+	}
+
+	ip.state.SetModified(true)
+	ip.alignStatus.SetText("Re-imported with new crop bounds")
+	ip.updateCropLabel()
+}
+
+// updateCropLabel updates the crop label from state.
+func (ip *ImportPanel) updateCropLabel() {
+	isFront := ip.layerSelect.Selected == "Front"
+
+	var crop geometry.RectInt
+	if isFront {
+		crop = ip.state.FrontCropBounds
+	} else {
+		crop = ip.state.BackCropBounds
+	}
+
+	if crop.Width > 0 && crop.Height > 0 {
+		ip.cropLabel.SetText(fmt.Sprintf("Crop: %d,%d %dx%d", crop.X, crop.Y, crop.Width, crop.Height))
+	} else {
+		ip.cropLabel.SetText("Crop: (none)")
+	}
+}
+
+// onToggleStepEdgeViz enables/disables the step-edge striped visualization.
+// This shows alternating 1cm horizontal stripes from front and back images
+// in the step-edge region to help verify alignment precision.
+// Also draws horizontal lines where the step edge detection thinks the edges are.
+func (ip *ImportPanel) onToggleStepEdgeViz(enabled bool) {
+	if !enabled {
+		ip.canvas.SetStepEdgeViz(false, 0, 0)
+		ip.canvas.ClearOverlay("front_step_edge")
+		ip.canvas.ClearOverlay("back_step_edge")
+		return
+	}
+
+	// Need DPI to calculate stripe width
+	dpi := ip.state.DPI
+	if dpi == 0 && ip.state.FrontDetectionResult != nil {
+		dpi = ip.state.FrontDetectionResult.DPI
+	}
+	if dpi == 0 && ip.state.BackDetectionResult != nil {
+		dpi = ip.state.BackDetectionResult.DPI
+	}
+	if dpi == 0 {
+		dpi = 400 // Default fallback
+	}
+
+	// Calculate step-edge Y position from contacts for the stripe visualization
+	var stepY float64
+	if ip.state.FrontDetectionResult != nil && len(ip.state.FrontDetectionResult.Contacts) > 0 {
+		var sumY float64
+		for _, c := range ip.state.FrontDetectionResult.Contacts {
+			sumY += c.Center.Y
+		}
+		avgContactY := sumY / float64(len(ip.state.FrontDetectionResult.Contacts))
+		stepY = avgContactY + (0.3 * dpi)
+	}
+
+	ip.canvas.SetStepEdgeViz(true, stepY, dpi)
+
+	// Now run actual step edge detection and draw horizontal lines
+	var frontStepY, backStepY float64
+	var frontDetected, backDetected bool
+
+	// Get image width for the line
+	imgWidth := 0
+	if ip.state.FrontImage != nil && ip.state.FrontImage.Image != nil {
+		imgWidth = ip.state.FrontImage.Image.Bounds().Dx()
+	}
+
+	// Detect front step edges
+	if ip.state.FrontImage != nil && ip.state.FrontDetectionResult != nil {
+		edges := alignment.DetectStepEdgesFromImage(ip.state.FrontImage.Image,
+			ip.state.FrontDetectionResult.Contacts, dpi)
+		if len(edges) > 0 {
+			var sumY float64
+			for _, e := range edges {
+				sumY += e.EdgeY
+			}
+			frontStepY = sumY / float64(len(edges))
+			frontDetected = true
+			fmt.Printf("Front step edge detected at Y=%.1f\n", frontStepY)
+		}
+	}
+
+	// Detect back step edges
+	if ip.state.BackImage != nil && ip.state.BackDetectionResult != nil {
+		edges := alignment.DetectStepEdgesFromImage(ip.state.BackImage.Image,
+			ip.state.BackDetectionResult.Contacts, dpi)
+		if len(edges) > 0 {
+			var sumY float64
+			for _, e := range edges {
+				sumY += e.EdgeY
+			}
+			backStepY = sumY / float64(len(edges))
+			backDetected = true
+			fmt.Printf("Back step edge detected at Y=%.1f\n", backStepY)
+		}
+	}
+
+	// Draw horizontal lines as overlays
+	lineHeight := 3 // pixels thick
+
+	if frontDetected && imgWidth > 0 {
+		ip.canvas.SetOverlay("front_step_edge", &canvas.Overlay{
+			Rectangles: []canvas.OverlayRect{{
+				X: 0, Y: int(frontStepY) - lineHeight/2,
+				Width: imgWidth, Height: lineHeight,
+			}},
+			Color: color.RGBA{R: 0, G: 0, B: 255, A: 200}, // Blue for front
+		})
+	}
+
+	if backDetected && imgWidth > 0 {
+		ip.canvas.SetOverlay("back_step_edge", &canvas.Overlay{
+			Rectangles: []canvas.OverlayRect{{
+				X: 0, Y: int(backStepY) - lineHeight/2,
+				Width: imgWidth, Height: lineHeight,
+			}},
+			Color: color.RGBA{R: 255, G: 0, B: 0, A: 200}, // Red for back
+		})
+	}
+
+	// Show status with detected positions
+	status := fmt.Sprintf("Step-edge: front=%.0f back=%.0f (delta=%.1f px)",
+		frontStepY, backStepY, backStepY-frontStepY)
+	ip.alignStatus.SetText(status)
+	fmt.Println(status)
+}
+
+// onAutoAlign runs detection on both images and then aligns them in one step.
+func (ip *ImportPanel) onAutoAlign() {
+	if ip.state.FrontImage == nil || ip.state.BackImage == nil {
+		ip.alignStatus.SetText("Need both front and back images")
+		return
+	}
+
+	ip.alignStatus.SetText("Auto-aligning: detecting contacts...")
+	ip.autoAlignButton.Disable()
+	ip.alignButton.Disable()
+
+	go func() {
+		dpi := ip.state.DPI
+		if dpi == 0 && ip.state.FrontImage.DPI > 0 {
+			dpi = ip.state.FrontImage.DPI
+		}
+
+		// Detect contacts on front image (use top edge detection since images are pre-rotated)
+		frontResult, err := alignment.DetectContactsOnTopEdge(
+			ip.state.FrontImage.Image,
+			ip.state.BoardSpec,
+			dpi,
+			nil,
+		)
+		if err != nil || frontResult == nil || len(frontResult.Contacts) < 10 {
+			ip.alignStatus.SetText("Auto-align failed: not enough front contacts")
+			ip.autoAlignButton.Enable()
+			ip.alignButton.Enable()
+			return
+		}
+		ip.state.FrontDetectionResult = frontResult
+
+		// Detect contacts on back image
+		backResult, err := alignment.DetectContactsOnTopEdge(
+			ip.state.BackImage.Image,
+			ip.state.BoardSpec,
+			dpi,
+			nil,
+		)
+		if err != nil || backResult == nil || len(backResult.Contacts) < 10 {
+			ip.alignStatus.SetText("Auto-align failed: not enough back contacts")
+			ip.autoAlignButton.Enable()
+			ip.alignButton.Enable()
+			return
+		}
+		ip.state.BackDetectionResult = backResult
+
+		ip.alignStatus.SetText(fmt.Sprintf("Detected %d/%d contacts, aligning...",
+			len(frontResult.Contacts), len(backResult.Contacts)))
+
+		// Now run alignment
+		frontContacts := frontResult.Contacts
+		backContacts := backResult.Contacts
+
+		// Step 1: Coarse alignment using contact positions (translation only)
+		var frontSumX, frontSumY, backSumX, backSumY float64
+		minContacts := minInt(len(frontContacts), len(backContacts))
+
+		for i := 0; i < minContacts; i++ {
+			frontSumX += frontContacts[i].Center.X
+			frontSumY += frontContacts[i].Center.Y
+			backSumX += backContacts[i].Center.X
+			backSumY += backContacts[i].Center.Y
+		}
+
+		frontAvgX := frontSumX / float64(minContacts)
+		frontAvgY := frontSumY / float64(minContacts)
+		backAvgX := backSumX / float64(minContacts)
+		backAvgY := backSumY / float64(minContacts)
+
+		// Calculate the offset to align back to front
+		offsetX := int(frontAvgX - backAvgX)
+		offsetY := int(frontAvgY - backAvgY)
+
+		// Step 2: Rotate both images to make contacts horizontal
+		// frontAngle/backAngle are the detected slope of contact lines
+		// Negative rotation corrects the angle to horizontal
+		frontAngle := frontResult.ContactAngle
+		backAngle := backResult.ContactAngle
+
+		// Apply front rotation to make front contacts horizontal
+		ip.state.FrontManualRotation = -frontAngle
+		ip.state.FrontRotationCenter = geometry.Point2D{X: frontAvgX, Y: frontAvgY}
+		ip.state.FrontImage.ManualRotation = -frontAngle
+		ip.state.FrontImage.RotationCenterX = frontAvgX
+		ip.state.FrontImage.RotationCenterY = frontAvgY
+
+		// Apply back rotation to make back contacts horizontal
+		ip.state.BackManualRotation = -backAngle
+		ip.state.BackRotationCenter = geometry.Point2D{X: backAvgX, Y: backAvgY}
+		ip.state.BackImage.ManualRotation = -backAngle
+		ip.state.BackImage.RotationCenterX = backAvgX
+		ip.state.BackImage.RotationCenterY = backAvgY
+
+		// Apply offset to back image (front stays at origin)
+		ip.state.BackManualOffset.X = offsetX
+		ip.state.BackManualOffset.Y = offsetY
+		ip.state.BackImage.ManualOffsetX = offsetX
+		ip.state.BackImage.ManualOffsetY = offsetY
+
+		// Reset shear to 1.0 (no shear) - auto-align uses only rotation and translation
+		ip.state.FrontShearTopX = 1.0
+		ip.state.FrontShearBottomX = 1.0
+		ip.state.FrontShearLeftY = 1.0
+		ip.state.FrontShearRightY = 1.0
+		ip.state.BackShearTopX = 1.0
+		ip.state.BackShearBottomX = 1.0
+		ip.state.BackShearLeftY = 1.0
+		ip.state.BackShearRightY = 1.0
+		ip.state.FrontImage.ShearTopX = 1.0
+		ip.state.FrontImage.ShearBottomX = 1.0
+		ip.state.FrontImage.ShearLeftY = 1.0
+		ip.state.FrontImage.ShearRightY = 1.0
+		ip.state.BackImage.ShearTopX = 1.0
+		ip.state.BackImage.ShearBottomX = 1.0
+		ip.state.BackImage.ShearLeftY = 1.0
+		ip.state.BackImage.ShearRightY = 1.0
+
+		ip.state.Aligned = true
+		ip.state.SetModified(true)
+		ip.state.Emit(app.EventAlignmentComplete, nil)
+
+		// Clear all contact/connector overlays - don't show outlines on the image
+		ip.canvas.ClearOverlay("front_contacts")
+		ip.canvas.ClearOverlay("back_contacts")
+		ip.canvas.ClearOverlay("front_expected")
+		ip.canvas.ClearOverlay("back_expected")
+		ip.canvas.ClearOverlay("front_search_area")
+		ip.canvas.ClearOverlay("back_search_area")
+		ip.canvas.ClearOverlay("front_ejectors")
+		ip.canvas.ClearOverlay("back_ejectors")
+		ip.canvas.ClearOverlay("connectors")
+
+		ip.alignStatus.SetText(fmt.Sprintf("Aligned: front rot=%.3f°, back rot=%.3f°, offset=(%d,%d)",
+			-frontAngle, -backAngle, offsetX, offsetY))
+		ip.autoAlignButton.Enable()
+		ip.alignButton.Enable()
+		ip.RefreshLabels()
+		ip.canvas.Refresh()
+	}()
 }
 
 func (ip *ImportPanel) onAlignImages() {
@@ -1293,10 +1812,6 @@ func (ip *ImportPanel) AutoDetectAndAlign() {
 			dpi = frontResult.DPI
 		}
 		fmt.Printf("Auto-detect: found %d front contacts\n", len(frontResult.Contacts))
-
-		// Create front overlay
-		ip.createContactOverlay("front_contacts", frontResult.Contacts,
-			color.RGBA{R: 255, G: 0, B: 0, A: 255})
 	}
 
 	// Step 2: Detect contacts on back
@@ -1309,10 +1824,6 @@ func (ip *ImportPanel) AutoDetectAndAlign() {
 	if backResult != nil {
 		ip.state.BackDetectionResult = backResult
 		fmt.Printf("Auto-detect: found %d back contacts\n", len(backResult.Contacts))
-
-		// Create back overlay
-		ip.createContactOverlay("back_contacts", backResult.Contacts,
-			color.RGBA{R: 0, G: 0, B: 255, A: 255})
 	}
 
 	// Update contact info
@@ -1701,11 +2212,11 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas) *TracesPanel {
 
 	// Auto-match vias and create connectors when alignment completes
 	state.On(app.EventAlignmentComplete, func(data interface{}) {
-		// Create connectors from detected contacts
+		// Create connectors from detected contacts (but don't show overlay)
 		tp.state.CreateConnectorsFromAlignment()
 		connCount := tp.state.FeaturesLayer.ConnectorCount()
 		fmt.Printf("Created %d connectors from alignment contacts\n", connCount)
-		tp.createConnectorOverlay()
+		// Don't create connector overlay - user doesn't want contacts outlined
 
 		// Auto-match vias if both sides have vias
 		frontVias := tp.state.FeaturesLayer.GetViasBySide(pcbimage.SideFront)

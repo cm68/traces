@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
 	"math"
 
 	pcbimage "pcb-tracer/internal/image"
@@ -12,6 +13,7 @@ import (
 	"fyne.io/fyne/v2"
 	fynecanvas "fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -95,11 +97,15 @@ type ImageCanvas struct {
 	// Background grid DPI (1mm grid when > 0)
 	gridDPI float64
 
+	// Background mode: false = checkerboard, true = solid black
+	solidBlackBackground bool
+
 	// Callbacks
-	onZoomChange func(zoom float64)
-	onSelect     func(x1, y1, x2, y2 float64) // Called with canvas coordinates
-	onLeftClick  func(x, y float64)           // Left click at image coordinates
-	onRightClick func(x, y float64)           // Right click at image coordinates
+	onZoomChange   func(zoom float64)
+	onSelect       func(x1, y1, x2, y2 float64) // Called with canvas coordinates
+	onLeftClick    func(x, y float64)           // Left click at image coordinates
+	onRightClick   func(x, y float64)           // Right click at image coordinates
+	onMiddleClick  func(x, y float64)           // Middle click at canvas coordinates (use GetRenderedOutput)
 }
 
 // zoomScroll is a widget that wraps a scroll container but intercepts wheel for zoom.
@@ -181,12 +187,9 @@ func (dc *draggableContent) Dragged(ev *fyne.DragEvent) {
 		return
 	}
 
-	// ev.Position is relative to viewport, add scroll offset for content position
-	scrollOffset := dc.canvas.scroll.Offset()
-	pos := fyne.Position{
-		X: ev.Position.X + scrollOffset.X,
-		Y: ev.Position.Y + scrollOffset.Y,
-	}
+	// ev.Position is relative to the draggableContent widget (content coordinates)
+	// Fyne handles scroll offset internally, so no adjustment needed
+	pos := ev.Position
 
 	if !dc.canvas.selecting {
 		dc.canvas.selecting = true
@@ -224,14 +227,15 @@ func (dc *draggableContent) DragEnd() {
 	dc.canvas.selecting = false
 	dc.canvas.selectMode = false // Auto-disable after selection
 
-	// Call callback with canvas coordinates
+	// Call callback with image coordinates (convert from canvas coords by dividing by zoom)
 	if dc.canvas.onSelect != nil && dc.canvas.selectionRect != nil {
 		rect := dc.canvas.selectionRect
+		zoom := dc.canvas.zoom
 		dc.canvas.onSelect(
-			float64(rect.X),
-			float64(rect.Y),
-			float64(rect.X+rect.Width),
-			float64(rect.Y+rect.Height),
+			float64(rect.X)/zoom,
+			float64(rect.Y)/zoom,
+			float64(rect.X+rect.Width)/zoom,
+			float64(rect.Y+rect.Height)/zoom,
 		)
 	}
 
@@ -263,10 +267,10 @@ func (dc *draggableContent) Tapped(ev *fyne.PointEvent) {
 		return
 	}
 
-	// Convert screen position to image coordinates
-	scrollOffset := dc.canvas.scroll.Offset()
-	canvasX := float64(ev.Position.X + scrollOffset.X)
-	canvasY := float64(ev.Position.Y + scrollOffset.Y)
+	// ev.Position is relative to the draggableContent widget (content/canvas coordinates)
+	// Fyne handles scroll offset internally, so no adjustment needed
+	canvasX := float64(ev.Position.X)
+	canvasY := float64(ev.Position.Y)
 
 	// Convert from canvas (zoomed) to image coordinates
 	imgX := canvasX / dc.canvas.zoom
@@ -288,10 +292,10 @@ func (dc *draggableContent) TappedSecondary(ev *fyne.PointEvent) {
 		return
 	}
 
-	// Convert screen position to image coordinates
-	scrollOffset := dc.canvas.scroll.Offset()
-	canvasX := float64(ev.Position.X + scrollOffset.X)
-	canvasY := float64(ev.Position.Y + scrollOffset.Y)
+	// ev.Position is relative to the draggableContent widget (content/canvas coordinates)
+	// Fyne handles scroll offset internally, so no adjustment needed
+	canvasX := float64(ev.Position.X)
+	canvasY := float64(ev.Position.Y)
 
 	// Convert from canvas (zoomed) to image coordinates
 	imgX := canvasX / dc.canvas.zoom
@@ -299,6 +303,35 @@ func (dc *draggableContent) TappedSecondary(ev *fyne.PointEvent) {
 
 	dc.canvas.onRightClick(imgX, imgY)
 }
+
+// MouseDown implements desktop.Mouseable for middle-click support.
+func (dc *draggableContent) MouseDown(ev *desktop.MouseEvent) {
+	// Only handle middle button
+	if ev.Button != desktop.MouseButtonTertiary {
+		return
+	}
+
+	if dc.canvas.onMiddleClick == nil {
+		return
+	}
+
+	// Workaround for Fyne bug: reject clicks outside widget bounds
+	size := dc.Size()
+	if ev.Position.X < 0 || ev.Position.Y < 0 ||
+		ev.Position.X > size.Width || ev.Position.Y > size.Height {
+		return
+	}
+
+	// desktop.MouseEvent.Position is relative to the widget (content), not the viewport.
+	// No need to add scroll offset - Fyne already delivers positions in content coordinates.
+	canvasX := float64(ev.Position.X)
+	canvasY := float64(ev.Position.Y)
+
+	dc.canvas.onMiddleClick(canvasX, canvasY)
+}
+
+// MouseUp implements desktop.Mouseable (required but unused).
+func (dc *draggableContent) MouseUp(ev *desktop.MouseEvent) {}
 
 type draggableContentRenderer struct {
 	content *draggableContent
@@ -469,6 +502,12 @@ func (ic *ImageCanvas) SetDPI(dpi float64) {
 	ic.Refresh()
 }
 
+// SetSolidBlackBackground sets whether to use solid black or checkerboard background.
+func (ic *ImageCanvas) SetSolidBlackBackground(solid bool) {
+	ic.solidBlackBackground = solid
+	ic.Refresh()
+}
+
 // SetImage sets a single image to display (convenience method).
 func (ic *ImageCanvas) SetImage(img image.Image) {
 	if img == nil {
@@ -571,6 +610,55 @@ func (ic *ImageCanvas) CheckResize(size fyne.Size) {
 	}
 }
 
+// ScrollToRegion scrolls the canvas so that the given image coordinates are visible.
+// x, y are in source image coordinates (not canvas/zoomed).
+func (ic *ImageCanvas) ScrollToRegion(x, y, width, height int) {
+	if ic.scroll == nil || ic.scroll.scroll == nil {
+		return
+	}
+
+	// Convert image coordinates to canvas coordinates
+	canvasX := float64(x) * ic.zoom
+	canvasY := float64(y) * ic.zoom
+	canvasW := float64(width) * ic.zoom
+	canvasH := float64(height) * ic.zoom
+
+	// Get viewport size
+	viewSize := ic.scroll.scroll.Size()
+	if viewSize.Width <= 0 || viewSize.Height <= 0 {
+		return
+	}
+
+	// Calculate center of the region in canvas coordinates
+	centerX := canvasX + canvasW/2
+	centerY := canvasY + canvasH/2
+
+	// Calculate scroll offset to center the region in the viewport
+	offsetX := centerX - float64(viewSize.Width)/2
+	offsetY := centerY - float64(viewSize.Height)/2
+
+	// Clamp to valid scroll range
+	if offsetX < 0 {
+		offsetX = 0
+	}
+	if offsetY < 0 {
+		offsetY = 0
+	}
+
+	maxX := float64(ic.imgSize.Width) - float64(viewSize.Width)
+	maxY := float64(ic.imgSize.Height) - float64(viewSize.Height)
+	if offsetX > maxX {
+		offsetX = maxX
+	}
+	if offsetY > maxY {
+		offsetY = maxY
+	}
+
+	// Set the scroll offset
+	ic.scroll.scroll.Offset = fyne.NewPos(float32(offsetX), float32(offsetY))
+	ic.scroll.scroll.Refresh()
+}
+
 // SetTool sets the current interaction tool.
 func (ic *ImageCanvas) SetTool(tool Tool) {
 	ic.tool = tool
@@ -596,6 +684,12 @@ func (ic *ImageCanvas) OnLeftClick(callback func(x, y float64)) {
 // Coordinates are in image space (not zoomed).
 func (ic *ImageCanvas) OnRightClick(callback func(x, y float64)) {
 	ic.onRightClick = callback
+}
+
+// OnMiddleClick sets a callback for middle-click events.
+// Coordinates are in image space (not zoomed).
+func (ic *ImageCanvas) OnMiddleClick(callback func(x, y float64)) {
+	ic.onMiddleClick = callback
 }
 
 // GetRenderedOutput returns the last rendered canvas output for sampling.
@@ -676,8 +770,9 @@ func (ic *ImageCanvas) draw(w, h int) image.Image {
 		ic.drawConnectorLabelsForLayer(output, layer)
 	}
 
-	// Store for sampling
-	ic.lastOutput = output
+	// Store for sampling (copy to avoid including overlays)
+	ic.lastOutput = image.NewRGBA(output.Bounds())
+	draw.Draw(ic.lastOutput, ic.lastOutput.Bounds(), output, image.Point{}, draw.Src)
 
 	// Draw overlays
 	for _, overlay := range ic.overlays {
@@ -694,8 +789,22 @@ func (ic *ImageCanvas) draw(w, h int) image.Image {
 	return output
 }
 
-// drawGridBackground fills the output with a 1mm black and white grid pattern.
+// drawGridBackground fills the output with a 1mm black and white grid pattern,
+// or solid black if solidBlackBackground is set.
 func (ic *ImageCanvas) drawGridBackground(output *image.RGBA, w, h int) {
+	black := color.RGBA{R: 0, G: 0, B: 0, A: 255}
+
+	// Solid black mode - just fill with black
+	if ic.solidBlackBackground {
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				output.Set(x, y, black)
+			}
+		}
+		return
+	}
+
+	// Checkerboard mode
 	// 1mm = 0.03937 inches
 	// Grid size in image pixels = dpi * 0.03937
 	// Grid size in canvas pixels = gridSize * zoom
@@ -712,7 +821,6 @@ func (ic *ImageCanvas) drawGridBackground(output *image.RGBA, w, h int) {
 		gridSize = 4
 	}
 
-	black := color.RGBA{R: 0, G: 0, B: 0, A: 255}
 	white := color.RGBA{R: 255, G: 255, B: 255, A: 255}
 
 	for y := 0; y < h; y++ {

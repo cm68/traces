@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/color"
 
+	pcbimage "pcb-tracer/internal/image"
 	"pcb-tracer/pkg/colorutil"
 	"pcb-tracer/pkg/geometry"
 )
@@ -79,12 +80,29 @@ func getCharPattern(ch rune) [5]uint8 {
 // drawOverlay draws an overlay on the output image.
 func (ic *ImageCanvas) drawOverlay(output *image.RGBA, overlay *Overlay) {
 	col := overlay.Color
+
+	// Get layer offset if overlay is associated with a layer
+	var offsetX, offsetY float64
+	if overlay.Layer != LayerNone {
+		for _, layer := range ic.layers {
+			if overlay.Layer == LayerFront && layer.Side == pcbimage.SideFront {
+				offsetX = float64(layer.ManualOffsetX)
+				offsetY = float64(layer.ManualOffsetY)
+				break
+			} else if overlay.Layer == LayerBack && layer.Side == pcbimage.SideBack {
+				offsetX = float64(layer.ManualOffsetX)
+				offsetY = float64(layer.ManualOffsetY)
+				break
+			}
+		}
+	}
+
 	for _, rect := range overlay.Rectangles {
-		// Scale rectangle coordinates by zoom
-		x1 := int(float64(rect.X) * ic.zoom)
-		y1 := int(float64(rect.Y) * ic.zoom)
-		x2 := int(float64(rect.X+rect.Width) * ic.zoom)
-		y2 := int(float64(rect.Y+rect.Height) * ic.zoom)
+		// Scale rectangle coordinates by zoom, applying layer offset
+		x1 := int((float64(rect.X) + offsetX) * ic.zoom)
+		y1 := int((float64(rect.Y) + offsetY) * ic.zoom)
+		x2 := int((float64(rect.X+rect.Width) + offsetX) * ic.zoom)
+		y2 := int((float64(rect.Y+rect.Height) + offsetY) * ic.zoom)
 
 		bounds := output.Bounds()
 
@@ -144,12 +162,12 @@ func (ic *ImageCanvas) drawOverlay(output *image.RGBA, overlay *Overlay) {
 		if len(poly.Points) < 3 {
 			continue
 		}
-		ic.drawPolygon(output, poly, col)
+		ic.drawPolygon(output, poly, col, offsetX, offsetY)
 	}
 
 	// Draw circles
 	for _, circle := range overlay.Circles {
-		ic.drawCircle(output, circle, col)
+		ic.drawCircle(output, circle, col, offsetX, offsetY)
 	}
 }
 
@@ -194,7 +212,7 @@ func (ic *ImageCanvas) drawSelectionRect(output *image.RGBA, rect *OverlayRect) 
 }
 
 // drawPolygon draws a filled or outlined polygon on the output image.
-func (ic *ImageCanvas) drawPolygon(output *image.RGBA, poly OverlayPolygon, col color.RGBA) {
+func (ic *ImageCanvas) drawPolygon(output *image.RGBA, poly OverlayPolygon, col color.RGBA, offsetX, offsetY float64) {
 	fmt.Printf("      drawPolygon: label=%s pts=%d filled=%v\n", poly.Label, len(poly.Points), poly.Filled)
 	if len(poly.Points) < 3 {
 		fmt.Printf("      drawPolygon: SKIPPED (< 3 points)\n")
@@ -203,14 +221,14 @@ func (ic *ImageCanvas) drawPolygon(output *image.RGBA, poly OverlayPolygon, col 
 
 	bounds := output.Bounds()
 
-	// Scale points by zoom
+	// Scale points by zoom, applying offset
 	scaledPoints := make([]geometry.Point2D, len(poly.Points))
 	var minX, minY, maxX, maxY float64
-	minX, minY = poly.Points[0].X*ic.zoom, poly.Points[0].Y*ic.zoom
+	minX, minY = (poly.Points[0].X+offsetX)*ic.zoom, (poly.Points[0].Y+offsetY)*ic.zoom
 	maxX, maxY = minX, minY
 
 	for i, p := range poly.Points {
-		scaledPoints[i] = geometry.Point2D{X: p.X * ic.zoom, Y: p.Y * ic.zoom}
+		scaledPoints[i] = geometry.Point2D{X: (p.X + offsetX) * ic.zoom, Y: (p.Y + offsetY) * ic.zoom}
 		if scaledPoints[i].X < minX {
 			minX = scaledPoints[i].X
 		}
@@ -300,12 +318,12 @@ func (ic *ImageCanvas) drawPolygon(output *image.RGBA, poly OverlayPolygon, col 
 }
 
 // drawCircle draws a filled or outlined circle on the output image.
-func (ic *ImageCanvas) drawCircle(output *image.RGBA, circle OverlayCircle, col color.RGBA) {
+func (ic *ImageCanvas) drawCircle(output *image.RGBA, circle OverlayCircle, col color.RGBA, offsetX, offsetY float64) {
 	bounds := output.Bounds()
 
-	// Scale by zoom
-	cx := circle.X * ic.zoom
-	cy := circle.Y * ic.zoom
+	// Scale by zoom, applying offset
+	cx := (circle.X + offsetX) * ic.zoom
+	cy := (circle.Y + offsetY) * ic.zoom
 	r := circle.Radius * ic.zoom
 
 	// Integer bounds for iteration

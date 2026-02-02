@@ -575,21 +575,52 @@ func BuildGridMapping(components []*Component, tolerance float64) *GridMapping {
 	fmt.Printf("GridMapping variance: letterX=%.0f letterY=%.0f numberX=%.0f numberY=%.0f\n",
 		letterXVar, letterYVar, numberXVar, numberYVar)
 
+	// Check if we have valid variance data for each type
+	letterVarValid := letterXVar != math.MaxFloat64 || letterYVar != math.MaxFloat64
+	numberVarValid := numberXVar != math.MaxFloat64 || numberYVar != math.MaxFloat64
+
 	// Lower variance means better grouping on that axis
-	if letterXVar < letterYVar {
-		mapping.LetterAxis = "X"
-		fmt.Println("GridMapping: letters map to X axis (columns)")
-	} else {
-		mapping.LetterAxis = "Y"
-		fmt.Println("GridMapping: letters map to Y axis (rows)")
+	if letterVarValid {
+		if letterXVar < letterYVar {
+			mapping.LetterAxis = "X"
+			fmt.Println("GridMapping: letters map to X axis (columns)")
+		} else {
+			mapping.LetterAxis = "Y"
+			fmt.Println("GridMapping: letters map to Y axis (rows)")
+		}
 	}
 
-	if numberXVar < numberYVar {
+	if numberVarValid {
+		if numberXVar < numberYVar {
+			mapping.NumberAxis = "X"
+			fmt.Println("GridMapping: numbers map to X axis (columns)")
+		} else {
+			mapping.NumberAxis = "Y"
+			fmt.Println("GridMapping: numbers map to Y axis (rows)")
+		}
+	}
+
+	// If we couldn't determine one axis, infer it from the other
+	// Letters and numbers must be on different axes
+	if letterVarValid && !numberVarValid {
+		if mapping.LetterAxis == "Y" {
+			mapping.NumberAxis = "X"
+		} else {
+			mapping.NumberAxis = "Y"
+		}
+		fmt.Printf("GridMapping: inferred numbers on %s axis (opposite of letters)\n", mapping.NumberAxis)
+	} else if numberVarValid && !letterVarValid {
+		if mapping.NumberAxis == "Y" {
+			mapping.LetterAxis = "X"
+		} else {
+			mapping.LetterAxis = "Y"
+		}
+		fmt.Printf("GridMapping: inferred letters on %s axis (opposite of numbers)\n", mapping.LetterAxis)
+	} else if mapping.LetterAxis == mapping.NumberAxis {
+		// Both valid but same axis - prefer letters on Y (rows), numbers on X (columns)
+		mapping.LetterAxis = "Y"
 		mapping.NumberAxis = "X"
-		fmt.Println("GridMapping: numbers map to X axis (columns)")
-	} else {
-		mapping.NumberAxis = "Y"
-		fmt.Println("GridMapping: numbers map to Y axis (rows)")
+		fmt.Println("GridMapping: conflict resolved - letters=Y, numbers=X")
 	}
 
 	// Build letter coordinate mapping
@@ -685,6 +716,7 @@ func computeGroupVarianceInt(groups map[int][]float64) float64 {
 }
 
 // SuggestGridID suggests a grid-style ID for a new component based on its position.
+// Supports interpolation: if position is between known values, suggests the interpolated ID.
 // Returns empty string if no suggestion can be made.
 func (m *GridMapping) SuggestGridID(centerX, centerY float64) string {
 	if m == nil || (len(m.LetterCoords) == 0 && len(m.NumberCoords) == 0) {
@@ -706,7 +738,7 @@ func (m *GridMapping) SuggestGridID(centerX, centerY float64) string {
 		numberCoord = centerY
 	}
 
-	// Find matching letter
+	// Find matching letter (exact match within tolerance)
 	matchedLetter := ""
 	for _, coord := range m.LetterCoords {
 		diff := math.Abs(coord.Value - letterCoord)
@@ -717,7 +749,7 @@ func (m *GridMapping) SuggestGridID(centerX, centerY float64) string {
 		}
 	}
 
-	// Find matching number
+	// Find matching number (exact match within tolerance)
 	matchedNumber := ""
 	for _, coord := range m.NumberCoords {
 		diff := math.Abs(coord.Value - numberCoord)
@@ -726,6 +758,14 @@ func (m *GridMapping) SuggestGridID(centerX, centerY float64) string {
 			matchedNumber = coord.ID
 			break
 		}
+	}
+
+	// Try interpolation if no exact match
+	if matchedLetter == "" && len(m.LetterCoords) >= 2 {
+		matchedLetter = m.interpolateLetter(letterCoord)
+	}
+	if matchedNumber == "" && len(m.NumberCoords) >= 2 {
+		matchedNumber = m.interpolateNumber(numberCoord)
 	}
 
 	// Build suggestion based on what we found
@@ -738,7 +778,7 @@ func (m *GridMapping) SuggestGridID(centerX, centerY float64) string {
 	}
 
 	if matchedLetter != "" {
-		// We know the column, not the row
+		// We know the row, not the column
 		if m.Format == "NL" {
 			return "?" + matchedLetter
 		}
@@ -746,11 +786,98 @@ func (m *GridMapping) SuggestGridID(centerX, centerY float64) string {
 	}
 
 	if matchedNumber != "" {
-		// We know the row, not the column
+		// We know the column, not the row
 		if m.Format == "NL" {
 			return matchedNumber + "?"
 		}
 		return "?" + matchedNumber
+	}
+
+	return ""
+}
+
+// interpolateLetter finds an interpolated letter based on coordinate position.
+func (m *GridMapping) interpolateLetter(coord float64) string {
+	if len(m.LetterCoords) < 2 {
+		return ""
+	}
+
+	// Find the two closest letters on either side
+	var lower, upper *GridCoordinate
+	var lowerLetter, upperLetter byte = 0, 'Z' + 1
+
+	for i := range m.LetterCoords {
+		gc := &m.LetterCoords[i]
+		letter := gc.ID[0]
+		if gc.Value <= coord && letter > lowerLetter {
+			lower = gc
+			lowerLetter = letter
+		}
+		if gc.Value >= coord && letter < upperLetter {
+			upper = gc
+			upperLetter = letter
+		}
+	}
+
+	if lower == nil || upper == nil || lower == upper {
+		return ""
+	}
+
+	// Calculate interpolated letter
+	if upper.Value-lower.Value > 0 {
+		ratio := (coord - lower.Value) / (upper.Value - lower.Value)
+		interpolated := float64(lowerLetter) + ratio*float64(upperLetter-lowerLetter)
+		result := byte(math.Round(interpolated))
+		if result > lowerLetter && result < upperLetter && result >= 'A' && result <= 'Z' {
+			fmt.Printf("  interpolateLetter: between %c and %c, ratio=%.2f -> %c\n",
+				lowerLetter, upperLetter, ratio, result)
+			return string(result)
+		}
+	}
+
+	return ""
+}
+
+// interpolateNumber finds an interpolated number based on coordinate position.
+func (m *GridMapping) interpolateNumber(coord float64) string {
+	if len(m.NumberCoords) < 2 {
+		return ""
+	}
+
+	// Find the two closest numbers on either side
+	var lower, upper *GridCoordinate
+	lowerNum, upperNum := -1, 1000
+
+	for i := range m.NumberCoords {
+		gc := &m.NumberCoords[i]
+		num, err := strconv.Atoi(gc.ID)
+		if err != nil {
+			continue
+		}
+		if gc.Value <= coord && num > lowerNum {
+			lower = gc
+			lowerNum = num
+		}
+		if gc.Value >= coord && num < upperNum {
+			upper = gc
+			upperNum = num
+		}
+	}
+
+	if lower == nil || upper == nil || lower == upper {
+		return ""
+	}
+
+	// Calculate interpolated number
+	if upper.Value-lower.Value > 0 {
+		ratio := (coord - lower.Value) / (upper.Value - lower.Value)
+		interpolated := float64(lowerNum) + ratio*float64(upperNum-lowerNum)
+		result := int(math.Round(interpolated))
+		if result > lowerNum && result < upperNum {
+			fmt.Printf("  interpolateNumber: between %d and %d, ratio=%.2f -> %d\n",
+				lowerNum, upperNum, ratio, result)
+			return strconv.Itoa(result)
+		}
 	}
 
 	return ""
@@ -772,8 +899,8 @@ func SuggestComponentID(components []*Component, centerX, centerY, tolerance flo
 	}
 
 	// If no grid match, try rectangle overlap matching
-	// Look for components whose bounding boxes overlap on X or Y axis
-	suggestion = suggestFromRectOverlap(components, centerX, centerY, tolerance)
+	// Pass the mapping so we know which axis maps to letter vs number
+	suggestion = suggestFromRectOverlap(components, centerX, centerY, tolerance, mapping)
 	if suggestion != "" {
 		fmt.Printf("SuggestComponentID: rect overlap match -> %s\n", suggestion)
 		return suggestion
@@ -785,81 +912,341 @@ func SuggestComponentID(components []*Component, centerX, centerY, tolerance flo
 	return fallback
 }
 
+// overlapInfo holds information about a component that overlaps with a target position.
+type overlapInfo struct {
+	comp    *Component
+	grid    *GridID
+	sharedX bool    // true if X ranges overlap
+	sharedY bool    // true if Y ranges overlap
+	centerX float64 // component center X
+	centerY float64 // component center Y
+}
+
 // suggestFromRectOverlap finds components with overlapping X or Y ranges and suggests based on their IDs.
-func suggestFromRectOverlap(components []*Component, centerX, centerY, tolerance float64) string {
-	var sameRowComps []*Component  // Same Y range (horizontal neighbors)
-	var sameColComps []*Component  // Same X range (vertical neighbors)
+// Uses the axis mapping from BuildGridMapping to correctly extract letters vs numbers.
+// Also supports interpolation: if position is between A9 and A11, suggest A10.
+func suggestFromRectOverlap(components []*Component, centerX, centerY, tolerance float64, mapping *GridMapping) string {
+	var overlaps []overlapInfo
 
 	for _, comp := range components {
-		// Check if Y ranges overlap (same row)
-		compMinY := comp.Bounds.Y
-		compMaxY := comp.Bounds.Y + comp.Bounds.Height
-		if centerY >= compMinY-tolerance && centerY <= compMaxY+tolerance {
-			sameRowComps = append(sameRowComps, comp)
+		grid := ParseGridID(comp.ID)
+		if grid == nil {
+			continue
 		}
 
-		// Check if X ranges overlap (same column)
 		compMinX := comp.Bounds.X
 		compMaxX := comp.Bounds.X + comp.Bounds.Width
-		if centerX >= compMinX-tolerance && centerX <= compMaxX+tolerance {
-			sameColComps = append(sameColComps, comp)
+		compMinY := comp.Bounds.Y
+		compMaxY := comp.Bounds.Y + comp.Bounds.Height
+		compCenterX := comp.Bounds.X + comp.Bounds.Width/2
+		compCenterY := comp.Bounds.Y + comp.Bounds.Height/2
+
+		sharedX := centerX >= compMinX-tolerance && centerX <= compMaxX+tolerance
+		sharedY := centerY >= compMinY-tolerance && centerY <= compMaxY+tolerance
+
+		if sharedX || sharedY {
+			overlaps = append(overlaps, overlapInfo{
+				comp:    comp,
+				grid:    grid,
+				sharedX: sharedX,
+				sharedY: sharedY,
+				centerX: compCenterX,
+				centerY: compCenterY,
+			})
+			fmt.Printf("  overlap with %s: sharedX=%v sharedY=%v (letter=%s num=%d)\n",
+				comp.ID, sharedX, sharedY, grid.Letter, grid.Number)
 		}
 	}
 
-	fmt.Printf("suggestFromRectOverlap: found %d same-row, %d same-col components\n",
-		len(sameRowComps), len(sameColComps))
-
-	// Try to extract grid info from overlapping components
-	var matchedLetter, matchedNumber string
-	var format string = "LN"
-
-	// From same-row components, extract the letter (row identifier)
-	for _, comp := range sameRowComps {
-		grid := ParseGridID(comp.ID)
-		if grid != nil {
-			matchedLetter = grid.Letter
-			format = grid.Format
-			fmt.Printf("  same-row %s has letter %s\n", comp.ID, matchedLetter)
-			break
-		}
+	if len(overlaps) == 0 {
+		fmt.Println("suggestFromRectOverlap: no overlapping components found")
+		return ""
 	}
 
-	// From same-column components, extract the number (column identifier)
-	for _, comp := range sameColComps {
-		grid := ParseGridID(comp.ID)
-		if grid != nil {
-			matchedNumber = strconv.Itoa(grid.Number)
-			if matchedLetter == "" {
-				format = grid.Format
+	// Use axis mapping to correctly assign overlaps
+	// If LetterAxis == "Y", then Y-only overlaps share the letter (same row)
+	// If LetterAxis == "X", then X-only overlaps share the letter (same column)
+	letterAxis := "Y" // default
+	numberAxis := "X" // default
+	format := "LN"
+
+	if mapping != nil {
+		letterAxis = mapping.LetterAxis
+		numberAxis = mapping.NumberAxis
+		format = mapping.Format
+	}
+
+	fmt.Printf("  Using axis mapping: LetterAxis=%s NumberAxis=%s\n", letterAxis, numberAxis)
+
+	// Collect letters and numbers based on axis mapping
+	var sameRowLetters []string
+	var sameColNumbers []int
+	var sameRowComps, sameColComps []overlapInfo
+	var bothLetters []string
+	var bothNumbers []int
+
+	for _, o := range overlaps {
+		if o.grid.Format != "" {
+			format = o.grid.Format
+		}
+
+		if o.sharedX && o.sharedY {
+			// Direct overlap
+			bothLetters = append(bothLetters, o.grid.Letter)
+			bothNumbers = append(bothNumbers, o.grid.Number)
+			fmt.Printf("  %s: BOTH overlap\n", o.comp.ID)
+		} else if o.sharedY && !o.sharedX {
+			// Same row (Y overlap only)
+			if letterAxis == "Y" {
+				sameRowLetters = append(sameRowLetters, o.grid.Letter)
+				fmt.Printf("  %s: Y-only -> letter %s (same row)\n", o.comp.ID, o.grid.Letter)
+			} else {
+				// Letter is on X axis, so Y-only gives us the number
+				sameColNumbers = append(sameColNumbers, o.grid.Number)
+				fmt.Printf("  %s: Y-only -> number %d (letter on X)\n", o.comp.ID, o.grid.Number)
 			}
-			fmt.Printf("  same-col %s has number %s\n", comp.ID, matchedNumber)
-			break
+			sameRowComps = append(sameRowComps, o)
+		} else if o.sharedX && !o.sharedY {
+			// Same column (X overlap only)
+			if numberAxis == "X" {
+				sameColNumbers = append(sameColNumbers, o.grid.Number)
+				fmt.Printf("  %s: X-only -> number %d (same col)\n", o.comp.ID, o.grid.Number)
+			} else {
+				// Number is on Y axis, so X-only gives us the letter
+				sameRowLetters = append(sameRowLetters, o.grid.Letter)
+				fmt.Printf("  %s: X-only -> letter %s (number on Y)\n", o.comp.ID, o.grid.Letter)
+			}
+			sameColComps = append(sameColComps, o)
 		}
+	}
+
+	fmt.Printf("  sameRowLetters=%v sameColNumbers=%v\n", sameRowLetters, sameColNumbers)
+
+	var resultLetter, resultNumber string
+
+	// Get letter from same-row components
+	if len(sameRowLetters) > 0 && allSame(sameRowLetters) {
+		resultLetter = sameRowLetters[0]
+		fmt.Printf("  Letter: %s from same-row\n", resultLetter)
+	}
+
+	// Get number from same-column components, with interpolation support
+	if len(sameColNumbers) > 0 {
+		if allSameInt(sameColNumbers) {
+			resultNumber = strconv.Itoa(sameColNumbers[0])
+			fmt.Printf("  Number: %s from same-col\n", resultNumber)
+		}
+	}
+
+	// Try interpolation if we have same-row components but no exact number match
+	// Example: between A9 and A11, suggest A10
+	if resultLetter != "" && resultNumber == "" && len(sameRowComps) >= 2 {
+		interpolated := interpolateNumber(sameRowComps, centerX, centerY, numberAxis)
+		if interpolated != "" {
+			resultNumber = interpolated
+			fmt.Printf("  Number: %s from interpolation\n", resultNumber)
+		}
+	}
+
+	// Try interpolation for letters if we have same-col components but no exact letter
+	if resultNumber != "" && resultLetter == "" && len(sameColComps) >= 2 {
+		interpolated := interpolateLetter(sameColComps, centerX, centerY, letterAxis)
+		if interpolated != "" {
+			resultLetter = interpolated
+			fmt.Printf("  Letter: %s from interpolation\n", resultLetter)
+		}
+	}
+
+	// Fallback to "both" overlaps
+	if resultLetter == "" && len(bothLetters) > 0 {
+		resultLetter = bothLetters[0]
+		fmt.Printf("  Fallback: letter %s from both-overlap\n", resultLetter)
+	}
+	if resultNumber == "" && len(bothNumbers) > 0 {
+		resultNumber = strconv.Itoa(bothNumbers[0])
+		fmt.Printf("  Fallback: number %s from both-overlap\n", resultNumber)
 	}
 
 	// Build suggestion
-	if matchedLetter != "" && matchedNumber != "" {
+	if resultLetter != "" && resultNumber != "" {
 		if format == "NL" {
-			return matchedNumber + matchedLetter
+			return resultNumber + resultLetter
 		}
-		return matchedLetter + matchedNumber
+		return resultLetter + resultNumber
 	}
 
-	if matchedLetter != "" {
+	if resultLetter != "" {
 		if format == "NL" {
-			return "?" + matchedLetter
+			return "?" + resultLetter
 		}
-		return matchedLetter + "?"
+		return resultLetter + "?"
 	}
 
-	if matchedNumber != "" {
+	if resultNumber != "" {
 		if format == "NL" {
-			return matchedNumber + "?"
+			return resultNumber + "?"
 		}
-		return "?" + matchedNumber
+		return "?" + resultNumber
 	}
 
 	return ""
+}
+
+// interpolateNumber finds the number between two components based on position.
+// Example: if between A9 (at x=100) and A11 (at x=300), and centerX=200, returns "10".
+func interpolateNumber(comps []overlapInfo, centerX, centerY float64, numberAxis string) string {
+	if len(comps) < 2 {
+		return ""
+	}
+
+	// Find the two closest components on either side
+	var lower, upper *overlapInfo
+	var lowerNum, upperNum int = -1, 1000
+
+	coord := centerX
+	if numberAxis == "Y" {
+		coord = centerY
+	}
+
+	for i := range comps {
+		o := &comps[i]
+		compCoord := o.centerX
+		if numberAxis == "Y" {
+			compCoord = o.centerY
+		}
+
+		if compCoord <= coord && o.grid.Number > lowerNum {
+			lower = o
+			lowerNum = o.grid.Number
+		}
+		if compCoord >= coord && o.grid.Number < upperNum {
+			upper = o
+			upperNum = o.grid.Number
+		}
+	}
+
+	if lower == nil || upper == nil || lower == upper {
+		return ""
+	}
+
+	// Check if we're between them and can interpolate
+	lowerCoord := lower.centerX
+	upperCoord := upper.centerX
+	if numberAxis == "Y" {
+		lowerCoord = lower.centerY
+		upperCoord = upper.centerY
+	}
+
+	if lowerCoord > upperCoord {
+		// Swap if lower is actually at higher coordinate
+		lowerCoord, upperCoord = upperCoord, lowerCoord
+		lowerNum, upperNum = upperNum, lowerNum
+	}
+
+	// Calculate interpolated number
+	if upperCoord-lowerCoord > 0 {
+		ratio := (coord - lowerCoord) / (upperCoord - lowerCoord)
+		interpolated := float64(lowerNum) + ratio*float64(upperNum-lowerNum)
+		result := int(math.Round(interpolated))
+		if result > lowerNum && result < upperNum {
+			fmt.Printf("  interpolateNumber: between %d and %d, ratio=%.2f -> %d\n",
+				lowerNum, upperNum, ratio, result)
+			return strconv.Itoa(result)
+		}
+	}
+
+	return ""
+}
+
+// interpolateLetter finds the letter between two components based on position.
+// Example: if between A (at y=100) and C (at y=300), and centerY=200, returns "B".
+func interpolateLetter(comps []overlapInfo, centerX, centerY float64, letterAxis string) string {
+	if len(comps) < 2 {
+		return ""
+	}
+
+	coord := centerY
+	if letterAxis == "X" {
+		coord = centerX
+	}
+
+	// Find the two closest components on either side
+	var lower, upper *overlapInfo
+	var lowerLetter, upperLetter byte = 0, 'Z' + 1
+
+	for i := range comps {
+		o := &comps[i]
+		compCoord := o.centerY
+		if letterAxis == "X" {
+			compCoord = o.centerX
+		}
+
+		letter := o.grid.Letter[0]
+		if compCoord <= coord && letter > lowerLetter {
+			lower = o
+			lowerLetter = letter
+		}
+		if compCoord >= coord && letter < upperLetter {
+			upper = o
+			upperLetter = letter
+		}
+	}
+
+	if lower == nil || upper == nil || lower == upper {
+		return ""
+	}
+
+	lowerCoord := lower.centerY
+	upperCoord := upper.centerY
+	if letterAxis == "X" {
+		lowerCoord = lower.centerX
+		upperCoord = upper.centerX
+	}
+
+	if lowerCoord > upperCoord {
+		lowerCoord, upperCoord = upperCoord, lowerCoord
+		lowerLetter, upperLetter = upperLetter, lowerLetter
+	}
+
+	// Calculate interpolated letter
+	if upperCoord-lowerCoord > 0 {
+		ratio := (coord - lowerCoord) / (upperCoord - lowerCoord)
+		interpolated := float64(lowerLetter) + ratio*float64(upperLetter-lowerLetter)
+		result := byte(math.Round(interpolated))
+		if result > lowerLetter && result < upperLetter && result >= 'A' && result <= 'Z' {
+			fmt.Printf("  interpolateLetter: between %c and %c, ratio=%.2f -> %c\n",
+				lowerLetter, upperLetter, ratio, result)
+			return string(result)
+		}
+	}
+
+	return ""
+}
+
+// allSame returns true if all strings in the slice are identical.
+func allSame(s []string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] != s[0] {
+			return false
+		}
+	}
+	return true
+}
+
+// allSameInt returns true if all ints in the slice are identical.
+func allSameInt(s []int) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] != s[0] {
+			return false
+		}
+	}
+	return true
 }
 
 // average calculates the average of a slice of float64.

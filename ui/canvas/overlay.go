@@ -7,12 +7,22 @@ import (
 	"pcb-tracer/pkg/geometry"
 )
 
+// LayerRef indicates which layer an overlay is associated with.
+type LayerRef int
+
+const (
+	LayerNone  LayerRef = iota // No layer association (use canvas coordinates)
+	LayerFront                 // Associated with front layer
+	LayerBack                  // Associated with back layer
+)
+
 // Overlay represents a drawable overlay on the canvas.
 type Overlay struct {
 	Rectangles []OverlayRect
 	Polygons   []OverlayPolygon
 	Circles    []OverlayCircle
 	Color      color.RGBA
+	Layer      LayerRef // Which layer this overlay is associated with (for offset)
 }
 
 // OverlayCircle represents a circle to draw on the overlay.

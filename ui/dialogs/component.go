@@ -4,16 +4,21 @@ package dialogs
 import (
 	"fmt"
 	"image"
+	"image/color"
 	goimage "image"
 	"regexp"
 	"strings"
 
 	"pcb-tracer/internal/component"
+	"pcb-tracer/internal/datecode"
+	"pcb-tracer/internal/logo"
 	"pcb-tracer/internal/ocr"
+	"pcb-tracer/pkg/geometry"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 	"gocv.io/x/gocv"
 )
@@ -44,6 +49,13 @@ type ComponentEditDialog struct {
 	learnedParams   *ocr.LearnedParams
 	onParamsUpdated func(*ocr.LearnedParams) // Callback when params are updated
 
+	// Default orientation (sticky from last use)
+	defaultOrientation   string
+	onOrientationChanged func(string) // Callback when orientation changes
+
+	// Logo detection
+	logoLibrary *logo.LogoLibrary
+
 	// Callbacks
 	onSave   func(*component.Component)
 	onDelete func(*component.Component)
@@ -67,16 +79,23 @@ func (d *ComponentEditDialog) SetOCRTraining(params *ocr.LearnedParams, onUpdate
 	d.onParamsUpdated = onUpdate
 }
 
+// SetDefaultOrientation sets the default OCR orientation and a callback for when it changes.
+func (d *ComponentEditDialog) SetDefaultOrientation(orientation string, onChange func(string)) {
+	d.defaultOrientation = orientation
+	d.onOrientationChanged = onChange
+}
+
+// SetLogoLibrary sets the logo library for detecting manufacturer logos during OCR.
+func (d *ComponentEditDialog) SetLogoLibrary(lib *logo.LogoLibrary) {
+	d.logoLibrary = lib
+}
+
 // Show displays the dialog.
 func (d *ComponentEditDialog) Show() {
 	content := d.createContent()
 
-	// Create custom dialog with three buttons
-	dlg := dialog.NewCustomWithoutButtons(
-		"Edit Component: "+d.comp.ID,
-		content,
-		d.window,
-	)
+	// Create a new window for the dialog
+	editWindow := fyne.CurrentApp().NewWindow("Edit Component: " + d.comp.ID)
 
 	// Create buttons
 	saveBtn := widget.NewButton("Save", func() {
@@ -84,12 +103,12 @@ func (d *ComponentEditDialog) Show() {
 		if d.onSave != nil {
 			d.onSave(d.comp)
 		}
-		dlg.Hide()
+		editWindow.Close()
 	})
 	saveBtn.Importance = widget.HighImportance
 
 	cancelBtn := widget.NewButton("Cancel", func() {
-		dlg.Hide()
+		editWindow.Close()
 	})
 
 	deleteBtn := widget.NewButton("Delete", func() {
@@ -100,16 +119,16 @@ func (d *ComponentEditDialog) Show() {
 					if d.onDelete != nil {
 						d.onDelete(d.comp)
 					}
-					dlg.Hide()
+					editWindow.Close()
 				}
-			}, d.window)
+			}, editWindow)
 	})
 	deleteBtn.Importance = widget.DangerImportance
 
 	// Layout buttons
 	buttons := container.NewHBox(
 		deleteBtn,
-		container.NewHBox(), // spacer
+		layout.NewSpacer(),
 		cancelBtn,
 		saveBtn,
 	)
@@ -117,13 +136,9 @@ func (d *ComponentEditDialog) Show() {
 	// Wrap content with buttons at bottom
 	fullContent := container.NewBorder(nil, buttons, nil, nil, content)
 
-	dlg = dialog.NewCustomWithoutButtons(
-		"Edit Component: "+d.comp.ID,
-		fullContent,
-		d.window,
-	)
-	dlg.Resize(fyne.NewSize(500, 700))
-	dlg.Show()
+	editWindow.SetContent(fullContent)
+	editWindow.Resize(fyne.NewSize(500, 700))
+	editWindow.Show()
 }
 
 func (d *ComponentEditDialog) createContent() fyne.CanvasObject {
@@ -179,11 +194,18 @@ func (d *ComponentEditDialog) createContent() fyne.CanvasObject {
 
 	// OCR orientation selector - indicates which direction text bottom faces
 	// N = normal (bottom at bottom), S = upside down, E = bottom at right, W = bottom at left
-	d.ocrOrientation = widget.NewRadioGroup([]string{"N", "S", "E", "W"}, nil)
+	d.ocrOrientation = widget.NewRadioGroup([]string{"N", "S", "E", "W"}, func(selected string) {
+		// Notify callback when orientation changes (for sticky persistence)
+		if d.onOrientationChanged != nil {
+			d.onOrientationChanged(selected)
+		}
+	})
 	d.ocrOrientation.Horizontal = true
-	// Restore saved orientation or default to "N"
+	// Priority: component's saved orientation > sticky default > "N"
 	if d.comp.OCROrientation != "" {
 		d.ocrOrientation.SetSelected(d.comp.OCROrientation)
+	} else if d.defaultOrientation != "" {
+		d.ocrOrientation.SetSelected(d.defaultOrientation)
 	} else {
 		d.ocrOrientation.SetSelected("N")
 	}
@@ -259,8 +281,10 @@ func (d *ComponentEditDialog) applyChanges() {
 
 // runOCR performs OCR on the component's bounding rectangle.
 func (d *ComponentEditDialog) runOCR() {
+	fmt.Println("[OCR] Starting runOCR...")
+
 	if d.img == nil {
-		fmt.Println("No image available for OCR")
+		fmt.Println("[OCR] No image available for OCR")
 		return
 	}
 
@@ -270,6 +294,7 @@ func (d *ComponentEditDialog) runOCR() {
 	y := int(bounds.Y)
 	w := int(bounds.Width)
 	h := int(bounds.Height)
+	fmt.Printf("[OCR] Component bounds: (%d,%d) %dx%d\n", x, y, w, h)
 
 	// Clamp to image bounds
 	imgBounds := d.img.Bounds()
@@ -292,19 +317,48 @@ func (d *ComponentEditDialog) runOCR() {
 	}
 
 	// Create cropped region
+	fmt.Println("[OCR] Creating cropped region...")
 	cropped := image.NewRGBA(image.Rect(0, 0, w, h))
 	for dy := 0; dy < h; dy++ {
 		for dx := 0; dx < w; dx++ {
 			cropped.Set(dx, dy, d.img.At(x+dx, y+dy))
 		}
 	}
+	fmt.Println("[OCR] Cropped region created")
 
 	// Apply rotation based on selected orientation
-	// The orientation indicates where the text bottom is facing
 	orientation := d.ocrOrientation.Selected
+	logoRotation := orientationToRotation(orientation)
+
+	// Detect logos in the cropped region
+	var detectedLogos []logo.LogoMatch
+	if d.logoLibrary != nil && len(d.logoLibrary.Logos) > 0 {
+		fmt.Printf("[OCR] Detecting logos (%d templates in library, rotation %d)...\n", len(d.logoLibrary.Logos), logoRotation)
+		searchBounds := geometry.RectInt{X: 0, Y: 0, Width: w, Height: h}
+		detectedLogos = d.logoLibrary.DetectLogos(cropped, searchBounds, 0.75, logoRotation)
+		fmt.Printf("[OCR] Logo detection complete, found %d\n", len(detectedLogos))
+		if len(detectedLogos) > 0 {
+			fmt.Printf("OCR: detected %d logos in component\n", len(detectedLogos))
+			for _, m := range detectedLogos {
+				fmt.Printf("  <%s> at (%d,%d) score=%.2f rot=%d\n",
+					m.Logo.Name, m.Bounds.X, m.Bounds.Y, m.Score, m.Rotation)
+			}
+
+			// Mask out logo regions with average background color
+			bgColor := d.calculateBackgroundColor(cropped)
+			for _, m := range detectedLogos {
+				d.maskRegion(cropped, m.Bounds, bgColor)
+			}
+		}
+	}
+
+	// Rotate the image for OCR
+	fmt.Printf("[OCR] Rotating for orientation %s...\n", orientation)
 	rotated := rotateForOCR(cropped, orientation)
+	fmt.Println("[OCR] Rotation complete")
 
 	// Convert to gocv.Mat
+	fmt.Println("[OCR] Converting to OpenCV Mat...")
 	rotBounds := rotated.Bounds()
 	mat, err := gocv.NewMatFromBytes(rotBounds.Dy(), rotBounds.Dx(), gocv.MatTypeCV8UC4, rotated.Pix)
 	if err != nil {
@@ -319,26 +373,30 @@ func (d *ComponentEditDialog) runOCR() {
 	gocv.CvtColor(mat, &bgr, gocv.ColorRGBAToBGR)
 
 	// Create OCR engine and run
+	fmt.Println("[OCR] Creating OCR engine...")
 	engine, err := ocr.NewEngine()
 	if err != nil {
-		fmt.Printf("Failed to create OCR engine: %v\n", err)
+		fmt.Printf("[OCR] Failed to create OCR engine: %v\n", err)
 		return
 	}
 	defer engine.Close()
+	fmt.Println("[OCR] OCR engine created")
 
 	// Run OCR on the component region
-	fmt.Printf("OCR with orientation %s on region %dx%d\n", orientation, rotBounds.Dx(), rotBounds.Dy())
+	fmt.Printf("[OCR] Running OCR with orientation %s on region %dx%d\n", orientation, rotBounds.Dx(), rotBounds.Dy())
 
 	var text string
 
 	// Use learned params if available and they have good training data
 	if d.learnedParams != nil && len(d.learnedParams.Samples) > 0 && d.learnedParams.AvgScore > 0.5 {
-		fmt.Printf("OCR: using learned params (avg score %.2f from %d samples)\n",
+		fmt.Printf("[OCR] Using learned params (avg score %.2f from %d samples)\n",
 			d.learnedParams.AvgScore, len(d.learnedParams.Samples))
 		text, err = engine.RecognizeWithParams(bgr, d.learnedParams.BestParams)
 	} else {
+		fmt.Println("[OCR] Using default OCR params...")
 		text, err = engine.RecognizeImage(bgr)
 	}
+	fmt.Printf("[OCR] Initial OCR complete, text length=%d\n", len(text))
 
 	if err != nil {
 		fmt.Printf("OCR failed: %v\n", err)
@@ -347,8 +405,24 @@ func (d *ComponentEditDialog) runOCR() {
 
 	// If no text found, try enhanced preprocessing with histogram-based thresholding
 	if strings.TrimSpace(text) == "" {
-		fmt.Println("No text found, trying histogram-based enhancement...")
+		fmt.Println("[OCR] No text found, trying histogram-based enhancement...")
 		text = d.runOCRWithHistogramThreshold(bgr, engine)
+		fmt.Printf("[OCR] Histogram enhancement complete, text length=%d\n", len(text))
+	}
+
+	fmt.Println("[OCR] Updating UI fields...")
+	// Prepend detected logos to the OCR text
+	var detectedManufacturer string
+	if len(detectedLogos) > 0 {
+		var logoNames []string
+		for _, m := range detectedLogos {
+			logoNames = append(logoNames, fmt.Sprintf("<%s>", m.Logo.Name))
+			// Use the first logo with a ManufacturerID as the manufacturer
+			if detectedManufacturer == "" && m.Logo.ManufacturerID != "" {
+				detectedManufacturer = m.Logo.ManufacturerID
+			}
+		}
+		text = strings.Join(logoNames, " ") + "\n" + text
 	}
 
 	// Update the OCR text field
@@ -360,22 +434,32 @@ func (d *ComponentEditDialog) runOCR() {
 	if info.PartNumber != "" && d.partNumberEntry.Text == "" {
 		d.partNumberEntry.SetText(info.PartNumber)
 	}
-	if info.Manufacturer != "" && d.manufacturerEntry.Text == "" {
+	// Prefer logo-detected manufacturer over OCR-parsed manufacturer
+	if detectedManufacturer != "" && d.manufacturerEntry.Text == "" {
+		d.manufacturerEntry.SetText(detectedManufacturer)
+	} else if info.Manufacturer != "" && d.manufacturerEntry.Text == "" {
 		d.manufacturerEntry.SetText(info.Manufacturer)
 	}
-	if info.DateCode != "" && d.dateCodeEntry.Text == "" {
-		d.dateCodeEntry.SetText(info.DateCode)
+	// Try datecode package for better date code extraction
+	if d.dateCodeEntry.Text == "" {
+		if code, decoded := datecode.ExtractDateCode(text, 1990); decoded != nil {
+			d.dateCodeEntry.SetText(code)
+			fmt.Printf("[OCR] Decoded date code %s -> %s (%s)\n", code, decoded.String(), decoded.Format)
+		} else if info.DateCode != "" {
+			d.dateCodeEntry.SetText(info.DateCode)
+		}
 	}
 	if info.Place != "" && d.placeEntry.Text == "" {
 		d.placeEntry.SetText(info.Place)
 	}
 
-	fmt.Printf("OCR result for %s: %s\n", d.comp.ID, text)
+	fmt.Printf("[OCR] Complete for %s: %s\n", d.comp.ID, text)
 }
 
 // runOCRWithHistogramThreshold uses histogram analysis to find the whitest pixels (text)
 // and creates a high-contrast binary image for better OCR detection.
 func (d *ComponentEditDialog) runOCRWithHistogramThreshold(bgr gocv.Mat, engine *ocr.Engine) string {
+	fmt.Println("[OCR-Hist] Starting histogram threshold enhancement...")
 	// Convert to grayscale
 	gray := gocv.NewMat()
 	defer gray.Close()
@@ -411,7 +495,7 @@ func (d *ComponentEditDialog) runOCRWithHistogramThreshold(bgr gocv.Mat, engine 
 		threshold = 128
 	}
 
-	fmt.Printf("  Histogram threshold: %d (capturing ~%d%% of pixels)\n", threshold, cumulative*100/totalPixels)
+	fmt.Printf("[OCR-Hist] Threshold: %d (capturing ~%d%% of pixels)\n", threshold, cumulative*100/totalPixels)
 
 	// Create binary image: bright pixels become white, dark pixels become black
 	binary := gocv.NewMat()
@@ -431,14 +515,17 @@ func (d *ComponentEditDialog) runOCRWithHistogramThreshold(bgr gocv.Mat, engine 
 	gocv.CvtColor(inverted, &bgrOut, gocv.ColorGrayToBGR)
 
 	// Try OCR on enhanced image
+	fmt.Println("[OCR-Hist] Running OCR on enhanced image...")
 	text, err := engine.RecognizeImage(bgrOut)
 	if err != nil {
-		fmt.Printf("  Enhanced OCR failed: %v\n", err)
+		fmt.Printf("[OCR-Hist] Enhanced OCR failed: %v\n", err)
 		return ""
 	}
 
 	if strings.TrimSpace(text) != "" {
-		fmt.Printf("  Enhanced OCR found text: %s\n", strings.TrimSpace(text))
+		fmt.Printf("[OCR-Hist] Found text: %s\n", strings.TrimSpace(text))
+	} else {
+		fmt.Println("[OCR-Hist] No text found")
 	}
 
 	return text
@@ -499,6 +586,10 @@ func (d *ComponentEditDialog) runOCRTraining() {
 
 	// Apply rotation based on selected orientation
 	orientation := d.ocrOrientation.Selected
+	logoRotation := orientationToRotation(orientation)
+
+	// Logo training: compare detected logos to expected logos from ground truth
+	d.trainLogoDetection(cropped, w, h, groundTruth, logoRotation)
 	rotated := rotateForOCR(cropped, orientation)
 
 	// Convert to gocv.Mat
@@ -550,6 +641,27 @@ func (d *ComponentEditDialog) runOCRTraining() {
 		}
 	}
 
+	// Parse the corrected text (ground truth) into form fields
+	info := parseComponentInfo(groundTruth)
+	if info.PartNumber != "" && d.partNumberEntry.Text == "" {
+		d.partNumberEntry.SetText(info.PartNumber)
+	}
+	if info.Manufacturer != "" && d.manufacturerEntry.Text == "" {
+		d.manufacturerEntry.SetText(info.Manufacturer)
+	}
+	// Try datecode package for better date code extraction
+	if d.dateCodeEntry.Text == "" {
+		if code, decoded := datecode.ExtractDateCode(groundTruth, 1990); decoded != nil {
+			d.dateCodeEntry.SetText(code)
+			fmt.Printf("[Train] Decoded date code %s -> %s (%s)\n", code, decoded.String(), decoded.Format)
+		} else if info.DateCode != "" {
+			d.dateCodeEntry.SetText(info.DateCode)
+		}
+	}
+	if info.Place != "" && d.placeEntry.Text == "" {
+		d.placeEntry.SetText(info.Place)
+	}
+
 	// Show result dialog
 	resultMsg := fmt.Sprintf("Best score: %.1f%%\nDetected: %s", bestScore*100, bestText)
 	if bestScore >= 0.9 {
@@ -563,6 +675,116 @@ func (d *ComponentEditDialog) runOCRTraining() {
 	}
 
 	dialog.ShowInformation("OCR Training Complete", resultMsg, d.window)
+}
+
+// trainLogoDetection compares detected logos against expected logos from ground truth
+// and provides feedback for improving logo detection.
+func (d *ComponentEditDialog) trainLogoDetection(cropped *image.RGBA, w, h int, groundTruth string, rotation int) {
+	if d.logoLibrary == nil || len(d.logoLibrary.Logos) == 0 {
+		return
+	}
+
+	// Extract expected logos from ground truth (format: <LOGO_NAME>)
+	expectedLogos := extractLogoNames(groundTruth)
+	if len(expectedLogos) == 0 {
+		fmt.Println("[Logo Train] No logos in ground truth")
+		return
+	}
+	fmt.Printf("[Logo Train] Expected logos from ground truth: %v\n", expectedLogos)
+
+	// Detect logos in the cropped region with orientation-based rotation
+	searchBounds := geometry.RectInt{X: 0, Y: 0, Width: w, Height: h}
+	detectedMatches := d.logoLibrary.DetectLogos(cropped, searchBounds, 0.70, rotation) // Lower threshold for training
+
+	// Build set of detected logo names
+	detectedLogos := make(map[string]logo.LogoMatch)
+	for _, m := range detectedMatches {
+		detectedLogos[m.Logo.Name] = m
+	}
+	fmt.Printf("[Logo Train] Detected logos: %v\n", mapKeys(detectedLogos))
+
+	// Analyze: find false positives and missed logos
+	var falsePositives []string
+	var missedLogos []string
+	var correctDetections []string
+
+	// Check expected logos
+	for _, expected := range expectedLogos {
+		if _, found := detectedLogos[expected]; found {
+			correctDetections = append(correctDetections, expected)
+		} else {
+			missedLogos = append(missedLogos, expected)
+		}
+	}
+
+	// Check for false positives (detected but not expected)
+	expectedSet := make(map[string]bool)
+	for _, e := range expectedLogos {
+		expectedSet[e] = true
+	}
+	for name := range detectedLogos {
+		if !expectedSet[name] {
+			falsePositives = append(falsePositives, name)
+		}
+	}
+
+	// Report results
+	if len(correctDetections) > 0 {
+		fmt.Printf("[Logo Train] Correct detections: %v\n", correctDetections)
+	}
+	if len(falsePositives) > 0 {
+		fmt.Printf("[Logo Train] FALSE POSITIVES (raise threshold?): %v\n", falsePositives)
+		for _, name := range falsePositives {
+			if m, ok := detectedLogos[name]; ok {
+				fmt.Printf("  <%s> score=%.2f at (%d,%d) - consider raising minScore above %.2f\n",
+					name, m.Score, m.Bounds.X, m.Bounds.Y, m.Score)
+			}
+		}
+	}
+	if len(missedLogos) > 0 {
+		fmt.Printf("[Logo Train] MISSED LOGOS (check template): %v\n", missedLogos)
+		for _, name := range missedLogos {
+			// Check if logo template exists
+			found := false
+			for _, l := range d.logoLibrary.Logos {
+				if l.Name == name {
+					found = true
+					fmt.Printf("  <%s> template exists (%dx%d) but wasn't detected - may need recapture\n",
+						name, l.Width, l.Height)
+					break
+				}
+			}
+			if !found {
+				fmt.Printf("  <%s> NO TEMPLATE - need to capture this logo\n", name)
+			}
+		}
+	}
+
+	if len(falsePositives) == 0 && len(missedLogos) == 0 {
+		fmt.Println("[Logo Train] Logo detection is accurate!")
+	}
+}
+
+// extractLogoNames extracts logo names from text in <NAME> format.
+func extractLogoNames(text string) []string {
+	re := regexp.MustCompile(`<([A-Za-z0-9]+)>`)
+	matches := re.FindAllStringSubmatch(text, -1)
+	var names []string
+	for _, m := range matches {
+		if len(m) >= 2 {
+			names = append(names, strings.ToUpper(m[1]))
+		}
+	}
+	return names
+}
+
+// mapKeys returns the keys of a map as a slice.
+func mapKeys(m map[string]logo.LogoMatch) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // componentInfo holds parsed component information from OCR text.
@@ -732,22 +954,47 @@ func parseComponentInfo(text string) componentInfo {
 		}
 	}
 
-	// Look for manufacturing locations
+	// Look for manufacturing locations (check longer patterns first to avoid partial matches)
 	locations := []struct {
 		pattern string
 		place   string
 	}{
-		{"MALAYSIA", "Malaysia"},
+		// Full country names
 		{"PHILIPPINES", "Philippines"},
-		{"MEXICO", "Mexico"},
+		{"SINGAPORE", "Singapore"},
+		{"INDONESIA", "Indonesia"},
+		{"MALAYSIA", "Malaysia"},
+		{"THAILAND", "Thailand"},
+		{"VIETNAM", "Vietnam"},
+		{"HONG KONG", "Hong Kong"},
+		{"IRELAND", "Ireland"},
+		{"GERMANY", "Germany"},
+		{"ENGLAND", "UK"},
+		{"SCOTLAND", "UK"},
+		{"CANADA", "Canada"},
+		{"BRAZIL", "Brazil"},
 		{"TAIWAN", "Taiwan"},
+		{"EL SALVADOR", "El Salvador"},
+		{"MEXICO", "Mexico"},
 		{"KOREA", "Korea"},
 		{"JAPAN", "Japan"},
 		{"CHINA", "China"},
-		{"SINGAPORE", "Singapore"},
-		{"THAILAND", "Thailand"},
+		{"INDIA", "India"},
+		// Common abbreviations on ICs
+		{"S'PORE", "Singapore"},
+		{"SPORE", "Singapore"},
+		{"M'SIA", "Malaysia"},
+		{"MSIA", "Malaysia"},
+		{"HONGKONG", "Hong Kong"},
+		{"H.K.", "Hong Kong"},
+		{"R.O.C", "Taiwan"},
+		{"ROC", "Taiwan"},
+		{"P.R.C", "China"},
+		{"PRC", "China"},
+		// Short codes (check last to avoid false positives)
 		{"USA", "USA"},
-		{"IRELAND", "Ireland"},
+		{" UK ", "UK"},
+		{" HK ", "Hong Kong"},
 	}
 	for _, loc := range locations {
 		if strings.Contains(text, loc.pattern) {
@@ -757,6 +1004,22 @@ func parseComponentInfo(text string) componentInfo {
 	}
 
 	return info
+}
+
+// orientationToRotation converts text orientation to rotation degrees for logo detection.
+// Logos are assumed to be captured at orientation N (0°).
+// Returns the rotation needed to match logos in an image at the given orientation.
+func orientationToRotation(orientation string) int {
+	switch orientation {
+	case "S":
+		return 180
+	case "E":
+		return 90
+	case "W":
+		return 270 // -90 degrees
+	default:
+		return 0
+	}
 }
 
 // rotateForOCR rotates an image based on the text orientation selector.
@@ -801,5 +1064,93 @@ func rotateForOCR(img *image.RGBA, orientation string) *image.RGBA {
 
 	default: // "N" or unknown - no rotation
 		return img
+	}
+}
+
+// calculateBackgroundColor estimates the dominant background color of an image
+// by sampling pixels from the edges (where text is less likely to be).
+func (d *ComponentEditDialog) calculateBackgroundColor(img *image.RGBA) color.RGBA {
+	bounds := img.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+
+	// Sample pixels along the edges
+	var rSum, gSum, bSum, count uint64
+
+	// Sample from the border (2 pixels deep on each side)
+	samplePixel := func(x, y int) {
+		c := img.RGBAAt(x, y)
+		rSum += uint64(c.R)
+		gSum += uint64(c.G)
+		bSum += uint64(c.B)
+		count++
+	}
+
+	borderDepth := 3
+	if borderDepth > w/4 {
+		borderDepth = w / 4
+	}
+	if borderDepth > h/4 {
+		borderDepth = h / 4
+	}
+	if borderDepth < 1 {
+		borderDepth = 1
+	}
+
+	// Top and bottom edges
+	for x := 0; x < w; x++ {
+		for d := 0; d < borderDepth; d++ {
+			samplePixel(x, d)         // Top edge
+			samplePixel(x, h-1-d)     // Bottom edge
+		}
+	}
+
+	// Left and right edges (excluding corners already counted)
+	for y := borderDepth; y < h-borderDepth; y++ {
+		for d := 0; d < borderDepth; d++ {
+			samplePixel(d, y)         // Left edge
+			samplePixel(w-1-d, y)     // Right edge
+		}
+	}
+
+	if count == 0 {
+		return color.RGBA{R: 40, G: 40, B: 40, A: 255} // Default dark background
+	}
+
+	return color.RGBA{
+		R: uint8(rSum / count),
+		G: uint8(gSum / count),
+		B: uint8(bSum / count),
+		A: 255,
+	}
+}
+
+// maskRegion fills a rectangular region of the image with a solid color.
+func (d *ComponentEditDialog) maskRegion(img *image.RGBA, bounds geometry.RectInt, c color.RGBA) {
+	imgBounds := img.Bounds()
+
+	// Clamp to image bounds
+	x0 := bounds.X
+	y0 := bounds.Y
+	x1 := bounds.X + bounds.Width
+	y1 := bounds.Y + bounds.Height
+
+	if x0 < imgBounds.Min.X {
+		x0 = imgBounds.Min.X
+	}
+	if y0 < imgBounds.Min.Y {
+		y0 = imgBounds.Min.Y
+	}
+	if x1 > imgBounds.Max.X {
+		x1 = imgBounds.Max.X
+	}
+	if y1 > imgBounds.Max.Y {
+		y1 = imgBounds.Max.Y
+	}
+
+	// Fill with the specified color
+	for y := y0; y < y1; y++ {
+		for x := x0; x < x1; x++ {
+			img.SetRGBA(x, y, c)
+		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"math"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"sync"
 	"time"
 
@@ -37,6 +38,7 @@ const (
 	PanelComponents = "components"
 	PanelTraces     = "traces"
 	PanelProperties = "properties"
+	PanelLogos      = "logos"
 )
 
 // SidePanel provides the main side panel with switchable views.
@@ -50,6 +52,7 @@ type SidePanel struct {
 	componentsPanel  *ComponentsPanel
 	tracesPanel      *TracesPanel
 	propertiesPanel  *PropertySheet
+	logosPanel       *LogosPanel
 
 	// Currently visible panel name
 	currentPanel string
@@ -71,6 +74,7 @@ func NewSidePanel(state *app.State, canvas *canvas.ImageCanvas) *SidePanel {
 		// Callback when properties are applied - refresh import panel labels
 		sp.importPanel.RefreshLabels()
 	})
+	sp.logosPanel = NewLogosPanel(state, canvas)
 
 	// Create container showing import panel by default
 	sp.container = container.NewStack(sp.importPanel.Container())
@@ -100,8 +104,22 @@ func (sp *SidePanel) ShowPanel(name string) {
 	case PanelProperties:
 		sp.propertiesPanel.Refresh()
 		panel = sp.propertiesPanel.Container()
+	case PanelLogos:
+		sp.logosPanel.Refresh()
+		panel = sp.logosPanel.Container()
 	default:
 		return
+	}
+
+	// Set up appropriate middle-click handler based on active panel
+	switch name {
+	case PanelLogos:
+		sp.canvas.OnMiddleClick(sp.logosPanel.OnMiddleClick)
+	case PanelComponents:
+		sp.canvas.OnMiddleClick(sp.componentsPanel.OnMiddleClickFloodFill)
+	default:
+		// No middle-click handler for other panels
+		sp.canvas.OnMiddleClick(nil)
 	}
 
 	sp.currentPanel = name
@@ -112,6 +130,11 @@ func (sp *SidePanel) ShowPanel(name string) {
 // CurrentPanel returns the name of the currently visible panel.
 func (sp *SidePanel) CurrentPanel() string {
 	return sp.currentPanel
+}
+
+// LogosPanel returns the logos panel for external access (e.g., middle-click handling).
+func (sp *SidePanel) LogosPanel() *LogosPanel {
+	return sp.logosPanel
 }
 
 // SyncLayers updates the canvas with layers from state.
@@ -164,6 +187,7 @@ func (sp *SidePanel) SetWindow(w fyne.Window) {
 	sp.importPanel.SetWindow(w)
 	sp.propertiesPanel.SetWindow(w)
 	sp.componentsPanel.SetWindow(w)
+	sp.logosPanel.SetWindow(w)
 }
 
 // AutoDetectAndAlign runs automatic contact detection on both images and aligns them.
@@ -2067,9 +2091,35 @@ type ComponentsPanel struct {
 	container fyne.CanvasObject
 	window    fyne.Window
 
-	list         *widget.List
-	detailCard   *widget.Card
-	hoveredIndex int // -1 when no component is hovered
+	list          *widget.List
+	detailCard    *widget.Card
+	hoveredIndex  int   // -1 when no component is hovered
+	sortedIndices []int // Indices into state.Components, sorted by Y then X
+}
+
+// rebuildSortedIndices rebuilds the sorted indices based on component Y, X positions.
+func (cp *ComponentsPanel) rebuildSortedIndices() {
+	n := len(cp.state.Components)
+	cp.sortedIndices = make([]int, n)
+	for i := range cp.sortedIndices {
+		cp.sortedIndices[i] = i
+	}
+
+	// Sort by Y first, then by X
+	sort.Slice(cp.sortedIndices, func(i, j int) bool {
+		ci := cp.state.Components[cp.sortedIndices[i]]
+		cj := cp.state.Components[cp.sortedIndices[j]]
+		// Compare Y (center)
+		yi := ci.Bounds.Y + ci.Bounds.Height/2
+		yj := cj.Bounds.Y + cj.Bounds.Height/2
+		if yi != yj {
+			return yi < yj
+		}
+		// Same Y, compare X
+		xi := ci.Bounds.X + ci.Bounds.Width/2
+		xj := cj.Bounds.X + cj.Bounds.Width/2
+		return xi < xj
+	})
 }
 
 // focusableContainer wraps a container to receive keyboard events.
@@ -2203,13 +2253,17 @@ func NewComponentsPanel(state *app.State, canv *canvas.ImageCanvas) *ComponentsP
 		hoveredIndex: -1,
 	}
 
+	// Build initial sorted indices
+	cp.rebuildSortedIndices()
+
 	// Create focusable wrapper for keyboard input (will be set up after list creation)
 	var focusWrapper *focusableContainer
 
 	// Component list with right-click delete support
+	// Uses sortedIndices to display components sorted by Y, X
 	cp.list = widget.NewList(
 		func() int {
-			return len(state.Components)
+			return len(cp.sortedIndices)
 		},
 		func() fyne.CanvasObject {
 			// Create a tappable item - onRightClick will be set in update
@@ -2217,32 +2271,43 @@ func NewComponentsPanel(state *app.State, canv *canvas.ImageCanvas) *ComponentsP
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			item := obj.(*tappableListItem)
-			if id < len(state.Components) {
-				comp := state.Components[id]
-				item.SetText(fmt.Sprintf("%s - %s", comp.ID, comp.Package))
-				// Set up right-click edit handler for this item
-				itemID := id // Capture current id
-				item.onRightClick = func() {
-					cp.showEditDialog(itemID)
+			if id < len(cp.sortedIndices) {
+				compIdx := cp.sortedIndices[id]
+				if compIdx < len(state.Components) {
+					comp := state.Components[compIdx]
+					// Mark unsaved components with asterisk prefix
+					prefix := ""
+					if !comp.Confirmed {
+						prefix = "* "
+					}
+					item.SetText(fmt.Sprintf("%s%s - %s", prefix, comp.ID, comp.Package))
+					// Set up right-click edit handler for this item (use actual component index)
+					actualIdx := compIdx
+					item.onRightClick = func() {
+						cp.showEditDialog(actualIdx)
+					}
+					// Set up hover handlers for highlighting and keyboard focus
+					item.onMouseIn = func() {
+						cp.hoveredIndex = actualIdx
+						cp.highlightComponent(actualIdx)
+					}
+					item.onMouseOut = func() {
+						cp.hoveredIndex = -1
+						cp.clearHighlight()
+					}
+					// Set focus target for keyboard input
+					item.focusTarget = focusWrapper
 				}
-				// Set up hover handlers for highlighting and keyboard focus
-				item.onMouseIn = func() {
-					cp.hoveredIndex = itemID
-					cp.highlightComponent(itemID)
-				}
-				item.onMouseOut = func() {
-					cp.hoveredIndex = -1
-					cp.clearHighlight()
-				}
-				// Set focus target for keyboard input
-				item.focusTarget = focusWrapper
 			}
 		},
 	)
 
 	cp.list.OnSelected = func(id widget.ListItemID) {
-		if id < len(state.Components) {
-			cp.showComponentDetail(state.Components[id])
+		if id < len(cp.sortedIndices) {
+			compIdx := cp.sortedIndices[id]
+			if compIdx < len(state.Components) {
+				cp.showComponentDetail(state.Components[compIdx])
+			}
 		}
 	}
 
@@ -2261,7 +2326,7 @@ func NewComponentsPanel(state *app.State, canv *canvas.ImageCanvas) *ComponentsP
 	cp.canvas.OnLeftClick(cp.onLeftClickResize)
 
 	// Set up middle-click handler for flood fill component detection
-	cp.canvas.OnMiddleClick(cp.onMiddleClickFloodFill)
+	cp.canvas.OnMiddleClick(cp.OnMiddleClickFloodFill)
 
 	// Wrap list in a scroll container with fixed height for ~5 items
 	listScroll := container.NewVScroll(cp.list)
@@ -2280,6 +2345,7 @@ func NewComponentsPanel(state *app.State, canv *canvas.ImageCanvas) *ComponentsP
 
 	// Subscribe to component change events to refresh the list
 	state.On(app.EventComponentsChanged, func(_ interface{}) {
+		cp.rebuildSortedIndices()
 		cp.list.Refresh()
 		cp.updateComponentOverlay()
 	})
@@ -2287,6 +2353,7 @@ func NewComponentsPanel(state *app.State, canv *canvas.ImageCanvas) *ComponentsP
 	// Also subscribe to project loaded to handle startup case where
 	// components are loaded before panel is created
 	state.On(app.EventProjectLoaded, func(_ interface{}) {
+		cp.rebuildSortedIndices()
 		cp.list.Refresh()
 		cp.updateComponentOverlay()
 	})
@@ -2316,8 +2383,23 @@ func (cp *ComponentsPanel) showEditDialog(index int) {
 
 	comp := cp.state.Components[index]
 
-	// Get the rendered canvas image for OCR
-	img := cp.canvas.GetRenderedOutput()
+	// Get the original layer image for OCR (not the zoomed canvas output)
+	// Component bounds are stored in original image coordinates
+	var img image.Image
+	switch comp.Layer {
+	case pcbimage.SideBack:
+		if cp.state.BackImage != nil {
+			img = cp.state.BackImage.Image
+		}
+	default: // SideFront or unset
+		if cp.state.FrontImage != nil {
+			img = cp.state.FrontImage.Image
+		}
+	}
+	if img == nil {
+		// Fallback to rendered output if layer image not available
+		img = cp.canvas.GetRenderedOutput()
+	}
 
 	dlg := dialogs.NewComponentEditDialog(
 		comp,
@@ -2348,6 +2430,32 @@ func (cp *ComponentsPanel) showEditDialog(index int) {
 		fmt.Printf("OCR params updated: %d samples, avg score %.2f\n",
 			len(params.Samples), params.AvgScore)
 	})
+
+	// Set default orientation based on most common orientation among existing components
+	// This helps when the board has a dominant component orientation
+	defaultOrientation := cp.state.LastOCROrientation
+	if len(cp.state.Components) > 0 {
+		orientationCounts := make(map[string]int)
+		for _, c := range cp.state.Components {
+			if c.OCROrientation != "" {
+				orientationCounts[c.OCROrientation]++
+			}
+		}
+		// Find most common orientation
+		maxCount := 0
+		for orient, count := range orientationCounts {
+			if count > maxCount {
+				maxCount = count
+				defaultOrientation = orient
+			}
+		}
+	}
+	dlg.SetDefaultOrientation(defaultOrientation, func(orientation string) {
+		cp.state.LastOCROrientation = orientation
+	})
+
+	// Set logo library for logo detection during OCR
+	dlg.SetLogoLibrary(cp.state.LogoLibrary)
 
 	dlg.Show()
 }
@@ -2382,16 +2490,16 @@ func (cp *ComponentsPanel) highlightComponent(index int) {
 
 	comp := cp.state.Components[index]
 
-	// Create a highlight overlay with a bright color
+	// Create a highlight overlay with magenta outline (no fill)
 	highlight := &canvas.Overlay{
-		Color: color.RGBA{R: 255, G: 255, B: 0, A: 255}, // Yellow highlight
+		Color: color.RGBA{R: 255, G: 0, B: 255, A: 255}, // Magenta outline
 		Rectangles: []canvas.OverlayRect{
 			{
 				X:      int(comp.Bounds.X),
 				Y:      int(comp.Bounds.Y),
 				Width:  int(comp.Bounds.Width),
 				Height: int(comp.Bounds.Height),
-				Fill:   canvas.FillCrosshatch,
+				Fill:   canvas.FillNone, // Outline only
 			},
 		},
 		Layer: canvas.LayerFront,
@@ -2399,6 +2507,10 @@ func (cp *ComponentsPanel) highlightComponent(index int) {
 
 	cp.canvas.SetOverlay("component_highlight", highlight)
 	cp.canvas.Refresh()
+
+	// Scroll canvas to show the component
+	cp.canvas.ScrollToRegion(int(comp.Bounds.X), int(comp.Bounds.Y),
+		int(comp.Bounds.Width), int(comp.Bounds.Height))
 }
 
 // clearHighlight removes the component highlight overlay.
@@ -2552,8 +2664,8 @@ func abs64(x float64) float64 {
 	return x
 }
 
-// onMiddleClickFloodFill handles middle-click for flood fill component detection.
-func (cp *ComponentsPanel) onMiddleClickFloodFill(x, y float64) {
+// OnMiddleClickFloodFill handles middle-click for flood fill component detection.
+func (cp *ComponentsPanel) OnMiddleClickFloodFill(x, y float64) {
 	// Get the rendered canvas output (composited, aligned, stretched)
 	img := cp.canvas.GetRenderedOutput()
 	if img == nil {
@@ -2640,6 +2752,7 @@ func (cp *ComponentsPanel) onMiddleClickFloodFill(x, y float64) {
 
 	cp.state.Components = append(cp.state.Components, newComp)
 	cp.state.SetModified(true)
+	cp.rebuildSortedIndices()
 	cp.list.Refresh()
 
 	fmt.Printf("Created component %s (%s) at (%.0f,%.0f) size %.0fx%.0f (%.1fx%.1f mm)\n",

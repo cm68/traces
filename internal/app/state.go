@@ -16,6 +16,7 @@ import (
 	"pcb-tracer/internal/connector"
 	"pcb-tracer/internal/features"
 	"pcb-tracer/internal/image"
+	"pcb-tracer/internal/logo"
 	"pcb-tracer/internal/ocr"
 	"pcb-tracer/internal/via"
 	"pcb-tracer/pkg/geometry"
@@ -107,6 +108,12 @@ type State struct {
 	// OCR learned parameters from user corrections
 	OCRLearnedParams *ocr.LearnedParams
 
+	// Last used OCR orientation (N/S/E/W) - sticky across dialogs
+	LastOCROrientation string
+
+	// Logo library for manufacturer marks
+	LogoLibrary *logo.LogoLibrary
+
 	// Board definition for pin mapping
 	BoardDefinition *connector.BoardDefinition
 
@@ -149,14 +156,34 @@ type EventListener func(data interface{})
 
 // NewState creates a new application state.
 func NewState() *State {
+	// Load logo library from shared preferences
+	logoLib, err := logo.LoadFromPreferences()
+	if err != nil {
+		fmt.Printf("Warning: could not load logo library: %v\n", err)
+		logoLib = logo.NewLogoLibrary()
+	}
+
 	return &State{
 		BoardSpec:        board.S100Spec(),
 		FeaturesLayer:    features.NewDetectedFeaturesLayer(),
 		ViaTrainingSet:   via.NewTrainingSet(),
 		OCRLearnedParams: ocr.NewLearnedParams(),
+		LogoLibrary:      logoLib,
 		BoardDefinition:  connector.S100Definition(),
 		listeners:        make(map[EventType][]EventListener),
 	}
+}
+
+// SaveLogoLibrary saves the logo library to shared preferences.
+func (s *State) SaveLogoLibrary() error {
+	s.mu.RLock()
+	lib := s.LogoLibrary
+	s.mu.RUnlock()
+
+	if lib == nil {
+		return nil
+	}
+	return lib.SaveToPreferences()
 }
 
 // On registers an event listener for the specified event type.
@@ -383,6 +410,9 @@ func (s *State) LoadProject(path string) error {
 	if proj.OCRLearnedParams != nil && len(proj.OCRLearnedParams.Samples) > 0 {
 		s.OCRLearnedParams = proj.OCRLearnedParams
 	}
+
+	// Logo library is now loaded from shared preferences, not project file
+	// Legacy project files with logos are ignored - logos are shared across all projects
 	s.mu.Unlock()
 
 	// Load components from external file (legacy support)
@@ -476,6 +506,8 @@ func (s *State) SaveProject(path string) error {
 	if s.OCRLearnedParams != nil && len(s.OCRLearnedParams.Samples) > 0 {
 		proj.OCRLearnedParams = s.OCRLearnedParams
 	}
+
+	// Logo library is saved to shared preferences, not project file
 
 	projectDir := filepath.Dir(path)
 
@@ -940,6 +972,9 @@ type ProjectFile struct {
 
 	// OCR learned parameters (v6+)
 	OCRLearnedParams *ocr.LearnedParams `json:"ocr_params,omitempty"`
+
+	// Logo library (v7+) - manufacturer mark templates
+	LogoLibrary *logo.LogoLibrary `json:"logo_library,omitempty"`
 }
 
 // ContactData is a JSON-serializable representation of a detected contact.

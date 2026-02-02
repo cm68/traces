@@ -36,14 +36,12 @@ type MainWindow struct {
 	sidePanel *panels.SidePanel
 	statusBar *widget.Label
 
-	// Menu items that need state tracking
-	fitToWindowItem *fyne.MenuItem
-
 	// View menu items for panel switching (some need disable until aligned)
 	viewImportItem      *fyne.MenuItem
 	viewComponentsItem  *fyne.MenuItem
 	viewTracesItem      *fyne.MenuItem
 	viewPropertiesItem  *fyne.MenuItem
+	viewLogosItem       *fyne.MenuItem
 
 	// Opacity sliders in toolbar
 	frontOpacitySlider *widget.Slider
@@ -207,17 +205,7 @@ func (mw *MainWindow) setupMenus() {
 		fyne.NewMenuItem("Quit", func() { mw.app.Quit() }),
 	)
 
-	// Edit menu
-	editMenu := fyne.NewMenu("Edit",
-		fyne.NewMenuItem("Undo", mw.onUndo),
-		fyne.NewMenuItem("Redo", mw.onRedo),
-		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("Align...", mw.onShowAlignPanel),
-		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("Preferences...", mw.onPreferences),
-	)
-
-	// View menu - panel switching and zoom controls
+	// View menu - panel switching
 	mw.viewImportItem = fyne.NewMenuItem("Align", func() {
 		mw.sidePanel.ShowPanel(panels.PanelImport)
 		mw.updateViewMenuChecks()
@@ -234,6 +222,10 @@ func (mw *MainWindow) setupMenus() {
 		mw.sidePanel.ShowPanel(panels.PanelProperties)
 		mw.updateViewMenuChecks()
 	})
+	mw.viewLogosItem = fyne.NewMenuItem("Logos", func() {
+		mw.sidePanel.ShowPanel(panels.PanelLogos)
+		mw.updateViewMenuChecks()
+	})
 
 	// Disable alignment-dependent items initially
 	if !mw.state.Aligned {
@@ -245,30 +237,12 @@ func (mw *MainWindow) setupMenus() {
 	// Mark current panel
 	mw.updateViewMenuChecks()
 
-	mw.fitToWindowItem = fyne.NewMenuItem("  Fit to Window", mw.onToggleFitToWindow)
-
 	viewMenu := fyne.NewMenu("View",
 		mw.viewImportItem,
 		mw.viewComponentsItem,
 		mw.viewTracesItem,
 		mw.viewPropertiesItem,
-		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("Zoom In", mw.onZoomIn),
-		fyne.NewMenuItem("Zoom Out", mw.onZoomOut),
-		mw.fitToWindowItem,
-		fyne.NewMenuItem("Actual Size", mw.onActualSize),
-	)
-
-	// Tools menu
-	toolsMenu := fyne.NewMenu("Tools",
-		fyne.NewMenuItem("Detect Contacts", mw.onDetectContacts),
-		fyne.NewMenuItem("Align Images", mw.onAlignImages),
-		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("Detect Components", mw.onDetectComponents),
-		fyne.NewMenuItem("Run OCR", mw.onRunOCR),
-		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("Detect Traces", mw.onDetectTraces),
-		fyne.NewMenuItem("Generate Netlist", mw.onGenerateNetlist),
+		mw.viewLogosItem,
 	)
 
 	// Board menu
@@ -286,7 +260,7 @@ func (mw *MainWindow) setupMenus() {
 		fyne.NewMenuItem("About", mw.onAbout),
 	)
 
-	mainMenu := fyne.NewMainMenu(fileMenu, editMenu, viewMenu, toolsMenu, boardMenu, helpMenu)
+	mainMenu := fyne.NewMainMenu(fileMenu, viewMenu, boardMenu, helpMenu)
 	mw.SetMainMenu(mainMenu)
 }
 
@@ -353,6 +327,12 @@ func (mw *MainWindow) updateViewMenuChecks() {
 		mw.viewPropertiesItem.Label = "✓ Properties"
 	} else {
 		mw.viewPropertiesItem.Label = "  Properties"
+	}
+
+	if current == panels.PanelLogos {
+		mw.viewLogosItem.Label = "✓ Logos"
+	} else {
+		mw.viewLogosItem.Label = "  Logos"
 	}
 }
 
@@ -668,13 +648,6 @@ func (mw *MainWindow) onToggleFitToWindow() {
 	// Toggle state
 	enabled := !mw.canvas.GetFitToWindow()
 	mw.canvas.SetFitToWindow(enabled)
-
-	// Update menu label to show state
-	if enabled {
-		mw.fitToWindowItem.Label = "✓ Fit to Window"
-	} else {
-		mw.fitToWindowItem.Label = "  Fit to Window"
-	}
 }
 
 func (mw *MainWindow) onActualSize() {
@@ -702,7 +675,6 @@ func (mw *MainWindow) onToggleCheckerboard(enabled bool) {
 func (mw *MainWindow) disableFitToWindow() {
 	if mw.canvas.GetFitToWindow() {
 		mw.canvas.SetFitToWindow(false)
-		mw.fitToWindowItem.Label = "  Fit to Window"
 	}
 }
 

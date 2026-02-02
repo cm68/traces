@@ -69,9 +69,10 @@ func New(fyneApp fyne.App, state *app.State) *MainWindow {
 	mw.setupMenus()
 	mw.setupEventHandlers()
 
-	// Save window size on close
+	// Save window size and panel preferences on close
 	win.SetCloseIntercept(func() {
 		mw.saveWindowSize()
+		mw.sidePanel.SavePreferences()
 		fyneApp.Quit()
 	})
 

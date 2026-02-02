@@ -2,10 +2,14 @@
 package ocr
 
 import (
+	"encoding/json"
 	"fmt"
 	"image"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/otiai10/gosseract/v2"
@@ -646,4 +650,475 @@ func (lp *LearnedParams) UpdateLearnedParams(sample TrainingSample) {
 	lp.AvgScore = totalScore / float64(len(lp.Samples))
 
 	fmt.Printf("OCR Training: %d samples, avg score=%.3f\n", len(lp.Samples), lp.AvgScore)
+}
+
+// =============================================================================
+// Global Shared Training Database
+// =============================================================================
+
+// GlobalTrainingSample represents a successful OCR training result stored globally.
+type GlobalTrainingSample struct {
+	// Ground truth and result
+	GroundTruth  string  `json:"truth"`
+	DetectedText string  `json:"detected"`
+	Score        float64 `json:"score"`
+
+	// Configuration that achieved this result
+	Orientation string    `json:"orientation"`
+	Params      OCRParams `json:"params"`
+
+	// Metadata for intelligent parameter selection
+	TextLength   int    `json:"text_length"`   // Number of characters in ground truth
+	LineCount    int    `json:"line_count"`    // Number of lines
+	HasLogos     bool   `json:"has_logos"`     // Whether logos were present
+	Manufacturer string `json:"manufacturer"`  // If known
+	Package      string `json:"package"`       // Package type if known
+
+	// Timestamp for recency weighting
+	Timestamp int64 `json:"timestamp"`
+}
+
+// GlobalTrainingDB holds accumulated OCR training data across all projects.
+type GlobalTrainingDB struct {
+	Version int                     `json:"version"`
+	Samples []GlobalTrainingSample  `json:"samples"`
+
+	// Aggregated statistics for quick lookup
+	OrientationStats map[string]*OrientationStats `json:"orientation_stats"`
+	ParamStats       *ParamStatistics             `json:"param_stats"`
+}
+
+// OrientationStats tracks success rates per orientation.
+type OrientationStats struct {
+	Count    int     `json:"count"`
+	AvgScore float64 `json:"avg_score"`
+	Best     float64 `json:"best"`
+}
+
+// ParamStatistics tracks which parameter values work best.
+type ParamStatistics struct {
+	// Threshold method success rates
+	OtsuSuccessRate     float64 `json:"otsu_rate"`
+	FixedSuccessRate    float64 `json:"fixed_rate"`
+	AdaptiveSuccessRate float64 `json:"adaptive_rate"`
+	HistogramSuccessRate float64 `json:"histogram_rate"`
+
+	// Best fixed thresholds (weighted by score)
+	BestFixedThresholds []int `json:"best_fixed_thresholds"`
+
+	// Best CLAHE settings
+	BestCLAHEClip float64 `json:"best_clahe_clip"`
+	BestCLAHETile int     `json:"best_clahe_tile"`
+
+	// Best scale
+	BestMinScale int `json:"best_min_scale"`
+
+	// PSM mode success rates
+	PSMModeStats map[int]float64 `json:"psm_stats"`
+
+	// Invert polarity success rate
+	InvertTrueRate  float64 `json:"invert_true_rate"`
+	InvertFalseRate float64 `json:"invert_false_rate"`
+}
+
+// NewGlobalTrainingDB creates an empty training database.
+func NewGlobalTrainingDB() *GlobalTrainingDB {
+	return &GlobalTrainingDB{
+		Version:          1,
+		Samples:          make([]GlobalTrainingSample, 0),
+		OrientationStats: make(map[string]*OrientationStats),
+		ParamStats:       &ParamStatistics{PSMModeStats: make(map[int]float64)},
+	}
+}
+
+// AddSample adds a training sample and updates statistics.
+func (db *GlobalTrainingDB) AddSample(sample GlobalTrainingSample) {
+	db.Samples = append(db.Samples, sample)
+	db.updateStats()
+}
+
+// updateStats recalculates aggregate statistics from all samples.
+func (db *GlobalTrainingDB) updateStats() {
+	// Reset stats
+	db.OrientationStats = make(map[string]*OrientationStats)
+	db.ParamStats = &ParamStatistics{PSMModeStats: make(map[int]float64)}
+
+	if len(db.Samples) == 0 {
+		return
+	}
+
+	// Track method counts and scores
+	var otsuCount, fixedCount, adaptiveCount, histCount int
+	var otsuScore, fixedScore, adaptiveScore, histScore float64
+	var invertTrueCount, invertFalseCount int
+	var invertTrueScore, invertFalseScore float64
+	fixedThresholdScores := make(map[int]float64)
+	claheClipScores := make(map[float64]float64)
+	claheTileScores := make(map[int]float64)
+	scaleScores := make(map[int]float64)
+	psmScores := make(map[int]float64)
+	psmCounts := make(map[int]int)
+
+	for _, s := range db.Samples {
+		// Only count good samples (score >= 0.7)
+		if s.Score < 0.7 {
+			continue
+		}
+
+		// Orientation stats
+		if db.OrientationStats[s.Orientation] == nil {
+			db.OrientationStats[s.Orientation] = &OrientationStats{}
+		}
+		os := db.OrientationStats[s.Orientation]
+		os.Count++
+		os.AvgScore = (os.AvgScore*float64(os.Count-1) + s.Score) / float64(os.Count)
+		if s.Score > os.Best {
+			os.Best = s.Score
+		}
+
+		// Threshold method stats
+		p := s.Params
+		if p.UseAdaptive {
+			adaptiveCount++
+			adaptiveScore += s.Score
+		} else if p.UseOtsu {
+			otsuCount++
+			otsuScore += s.Score
+		} else if p.FixedThreshold > 0 {
+			fixedCount++
+			fixedScore += s.Score
+			fixedThresholdScores[p.FixedThreshold] += s.Score
+		} else if p.BrightestPercent > 0 {
+			histCount++
+			histScore += s.Score
+		}
+
+		// CLAHE stats
+		if p.CLAHEClipLimit > 0 {
+			claheClipScores[p.CLAHEClipLimit] += s.Score
+			claheTileScores[p.CLAHETileSize] += s.Score
+		}
+
+		// Scale stats
+		if p.MinScaleDim > 0 {
+			scaleScores[p.MinScaleDim] += s.Score
+		}
+
+		// PSM stats
+		psmScores[p.PSMMode] += s.Score
+		psmCounts[p.PSMMode]++
+
+		// Invert polarity stats
+		if p.InvertPolarity {
+			invertTrueCount++
+			invertTrueScore += s.Score
+		} else {
+			invertFalseCount++
+			invertFalseScore += s.Score
+		}
+	}
+
+	// Calculate rates
+	total := float64(otsuCount + fixedCount + adaptiveCount + histCount)
+	if total > 0 {
+		if otsuCount > 0 {
+			db.ParamStats.OtsuSuccessRate = otsuScore / float64(otsuCount)
+		}
+		if fixedCount > 0 {
+			db.ParamStats.FixedSuccessRate = fixedScore / float64(fixedCount)
+		}
+		if adaptiveCount > 0 {
+			db.ParamStats.AdaptiveSuccessRate = adaptiveScore / float64(adaptiveCount)
+		}
+		if histCount > 0 {
+			db.ParamStats.HistogramSuccessRate = histScore / float64(histCount)
+		}
+	}
+
+	// Find best fixed thresholds
+	type threshScore struct {
+		thresh int
+		score  float64
+	}
+	var thresholds []threshScore
+	for t, s := range fixedThresholdScores {
+		thresholds = append(thresholds, threshScore{t, s})
+	}
+	// Sort by score descending
+	for i := 0; i < len(thresholds); i++ {
+		for j := i + 1; j < len(thresholds); j++ {
+			if thresholds[j].score > thresholds[i].score {
+				thresholds[i], thresholds[j] = thresholds[j], thresholds[i]
+			}
+		}
+	}
+	for i := 0; i < len(thresholds) && i < 5; i++ {
+		db.ParamStats.BestFixedThresholds = append(db.ParamStats.BestFixedThresholds, thresholds[i].thresh)
+	}
+
+	// Find best CLAHE settings
+	bestClip, bestClipScore := 2.0, 0.0
+	for clip, score := range claheClipScores {
+		if score > bestClipScore {
+			bestClip = clip
+			bestClipScore = score
+		}
+	}
+	db.ParamStats.BestCLAHEClip = bestClip
+
+	bestTile, bestTileScore := 8, 0.0
+	for tile, score := range claheTileScores {
+		if score > bestTileScore {
+			bestTile = tile
+			bestTileScore = score
+		}
+	}
+	db.ParamStats.BestCLAHETile = bestTile
+
+	// Find best scale
+	bestScale, bestScaleScore := 150, 0.0
+	for scale, score := range scaleScores {
+		if score > bestScaleScore {
+			bestScale = scale
+			bestScaleScore = score
+		}
+	}
+	db.ParamStats.BestMinScale = bestScale
+
+	// PSM mode stats
+	for psm, score := range psmScores {
+		if psmCounts[psm] > 0 {
+			db.ParamStats.PSMModeStats[psm] = score / float64(psmCounts[psm])
+		}
+	}
+
+	// Invert polarity rates
+	if invertTrueCount > 0 {
+		db.ParamStats.InvertTrueRate = invertTrueScore / float64(invertTrueCount)
+	}
+	if invertFalseCount > 0 {
+		db.ParamStats.InvertFalseRate = invertFalseScore / float64(invertFalseCount)
+	}
+}
+
+// GetRecommendedParams returns OCR parameters based on accumulated training data.
+// If no training data, returns defaults.
+func (db *GlobalTrainingDB) GetRecommendedParams() OCRParams {
+	if len(db.Samples) < 5 {
+		// Not enough data, use defaults
+		return DefaultOCRParams()
+	}
+
+	params := OCRParams{}
+
+	// Choose threshold method based on success rates
+	bestRate := db.ParamStats.OtsuSuccessRate
+	method := "otsu"
+	if db.ParamStats.FixedSuccessRate > bestRate {
+		bestRate = db.ParamStats.FixedSuccessRate
+		method = "fixed"
+	}
+	if db.ParamStats.AdaptiveSuccessRate > bestRate {
+		bestRate = db.ParamStats.AdaptiveSuccessRate
+		method = "adaptive"
+	}
+
+	switch method {
+	case "otsu":
+		params.UseOtsu = true
+		params.CLAHEClipLimit = db.ParamStats.BestCLAHEClip
+		params.CLAHETileSize = db.ParamStats.BestCLAHETile
+	case "fixed":
+		if len(db.ParamStats.BestFixedThresholds) > 0 {
+			params.FixedThreshold = db.ParamStats.BestFixedThresholds[0]
+		} else {
+			params.FixedThreshold = 130
+		}
+	case "adaptive":
+		params.UseAdaptive = true
+		params.AdaptiveBlock = 21
+		params.AdaptiveC = 10
+	}
+
+	// Set scale
+	params.MinScaleDim = db.ParamStats.BestMinScale
+	if params.MinScaleDim == 0 {
+		params.MinScaleDim = 150
+	}
+
+	// Set invert polarity based on success rates
+	params.InvertPolarity = db.ParamStats.InvertTrueRate >= db.ParamStats.InvertFalseRate
+
+	// Find best PSM mode
+	bestPSM := 6
+	bestPSMRate := 0.0
+	for psm, rate := range db.ParamStats.PSMModeStats {
+		if rate > bestPSMRate {
+			bestPSM = psm
+			bestPSMRate = rate
+		}
+	}
+	params.PSMMode = bestPSM
+
+	return params
+}
+
+// GetBestOrientation returns the orientation with highest average score.
+func (db *GlobalTrainingDB) GetBestOrientation() string {
+	if len(db.OrientationStats) == 0 {
+		return "N"
+	}
+
+	best := "N"
+	bestScore := 0.0
+	for orient, stats := range db.OrientationStats {
+		if stats.AvgScore > bestScore {
+			best = orient
+			bestScore = stats.AvgScore
+		}
+	}
+	return best
+}
+
+// GetParamsForOrientation returns the best params seen for a specific orientation.
+func (db *GlobalTrainingDB) GetParamsForOrientation(orientation string) (OCRParams, bool) {
+	var bestParams OCRParams
+	bestScore := 0.0
+	found := false
+
+	for _, s := range db.Samples {
+		if s.Orientation == orientation && s.Score > bestScore {
+			bestParams = s.Params
+			bestScore = s.Score
+			found = true
+		}
+	}
+
+	return bestParams, found
+}
+
+// Summary returns a human-readable summary of the training database.
+func (db *GlobalTrainingDB) Summary() string {
+	if len(db.Samples) == 0 {
+		return "No training data"
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("OCR Training Database: %d samples\n", len(db.Samples)))
+
+	// Orientation stats
+	sb.WriteString("\nOrientation performance:\n")
+	for orient, stats := range db.OrientationStats {
+		sb.WriteString(fmt.Sprintf("  %s: %d samples, avg=%.1f%%, best=%.1f%%\n",
+			orient, stats.Count, stats.AvgScore*100, stats.Best*100))
+	}
+
+	// Method stats
+	sb.WriteString("\nThreshold method performance:\n")
+	sb.WriteString(fmt.Sprintf("  Otsu: %.1f%%\n", db.ParamStats.OtsuSuccessRate*100))
+	sb.WriteString(fmt.Sprintf("  Fixed: %.1f%%\n", db.ParamStats.FixedSuccessRate*100))
+	sb.WriteString(fmt.Sprintf("  Adaptive: %.1f%%\n", db.ParamStats.AdaptiveSuccessRate*100))
+	sb.WriteString(fmt.Sprintf("  Histogram: %.1f%%\n", db.ParamStats.HistogramSuccessRate*100))
+
+	if len(db.ParamStats.BestFixedThresholds) > 0 {
+		sb.WriteString(fmt.Sprintf("\nBest fixed thresholds: %v\n", db.ParamStats.BestFixedThresholds))
+	}
+
+	sb.WriteString(fmt.Sprintf("\nRecommended: CLAHE clip=%.1f tile=%d, scale=%d\n",
+		db.ParamStats.BestCLAHEClip, db.ParamStats.BestCLAHETile, db.ParamStats.BestMinScale))
+
+	return sb.String()
+}
+
+// =============================================================================
+// Persistence
+// =============================================================================
+
+// GetTrainingDBPath returns the path to the global training database file.
+func GetTrainingDBPath() (string, error) {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+
+	appDir := filepath.Join(configDir, "pcb-tracer")
+	if err := os.MkdirAll(appDir, 0755); err != nil {
+		return "", err
+	}
+
+	return filepath.Join(appDir, "ocr_training.json"), nil
+}
+
+// SaveGlobalTraining saves the training database to disk.
+func SaveGlobalTraining(db *GlobalTrainingDB) error {
+	path, err := GetTrainingDBPath()
+	if err != nil {
+		return err
+	}
+
+	data, err := json.MarshalIndent(db, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return err
+	}
+
+	fmt.Printf("Saved OCR training database: %d samples to %s\n", len(db.Samples), path)
+	return nil
+}
+
+// LoadGlobalTraining loads the training database from disk.
+// Returns an empty database if the file doesn't exist.
+func LoadGlobalTraining() (*GlobalTrainingDB, error) {
+	path, err := GetTrainingDBPath()
+	if err != nil {
+		return NewGlobalTrainingDB(), err
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return NewGlobalTrainingDB(), nil
+		}
+		return NewGlobalTrainingDB(), err
+	}
+
+	var db GlobalTrainingDB
+	if err := json.Unmarshal(data, &db); err != nil {
+		return NewGlobalTrainingDB(), err
+	}
+
+	// Ensure maps are initialized
+	if db.OrientationStats == nil {
+		db.OrientationStats = make(map[string]*OrientationStats)
+	}
+	if db.ParamStats == nil {
+		db.ParamStats = &ParamStatistics{PSMModeStats: make(map[int]float64)}
+	}
+	if db.ParamStats.PSMModeStats == nil {
+		db.ParamStats.PSMModeStats = make(map[int]float64)
+	}
+
+	fmt.Printf("Loaded OCR training database: %d samples from %s\n", len(db.Samples), path)
+	return &db, nil
+}
+
+// CreateSampleFromResult creates a GlobalTrainingSample from OCR results.
+func CreateSampleFromResult(groundTruth, detected string, score float64, orientation string, params OCRParams) GlobalTrainingSample {
+	lines := strings.Split(strings.TrimSpace(groundTruth), "\n")
+	hasLogos := strings.Contains(groundTruth, "<") && strings.Contains(groundTruth, ">")
+
+	return GlobalTrainingSample{
+		GroundTruth:  groundTruth,
+		DetectedText: detected,
+		Score:        score,
+		Orientation:  orientation,
+		Params:       params,
+		TextLength:   len(strings.ReplaceAll(groundTruth, " ", "")),
+		LineCount:    len(lines),
+		HasLogos:     hasLogos,
+		Timestamp:    time.Now().Unix(),
+	}
 }

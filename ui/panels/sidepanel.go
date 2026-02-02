@@ -7,8 +7,10 @@ import (
 	"image/color"
 	"math"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,7 +18,9 @@ import (
 	"pcb-tracer/internal/app"
 	"pcb-tracer/internal/board"
 	"pcb-tracer/internal/component"
+	"pcb-tracer/internal/datecode"
 	pcbimage "pcb-tracer/internal/image"
+	"pcb-tracer/internal/logo"
 	"pcb-tracer/internal/ocr"
 	"pcb-tracer/internal/via"
 	"pcb-tracer/pkg/colorutil"
@@ -130,6 +134,13 @@ func (sp *SidePanel) ShowPanel(name string) {
 // CurrentPanel returns the name of the currently visible panel.
 func (sp *SidePanel) CurrentPanel() string {
 	return sp.currentPanel
+}
+
+// SavePreferences saves panel preferences (e.g., split positions) to app preferences.
+func (sp *SidePanel) SavePreferences() {
+	if sp.componentsPanel != nil {
+		sp.componentsPanel.SaveSplitOffset()
+	}
 }
 
 // LogosPanel returns the logos panel for external access (e.g., middle-click handling).
@@ -2093,11 +2104,30 @@ type ComponentsPanel struct {
 
 	list          *widget.List
 	detailCard    *widget.Card
-	hoveredIndex  int   // -1 when no component is hovered
-	sortedIndices []int // Indices into state.Components, sorted by Y then X
+	split         *container.Split // Draggable split between list and edit form
+	hoveredIndex  int              // -1 when no component is hovered
+	sortedIndices []int            // Indices into state.Components, sorted by Y then X
+
+	// Inline edit form
+	editingComp        *component.Component // Currently editing component (nil if none)
+	editingIndex       int                  // Index in state.Components
+	editForm           *fyne.Container      // The edit form container
+	idEntry            *widget.Entry
+	partNumberEntry    *widget.Entry
+	packageEntry       *widget.Entry
+	manufacturerEntry  *widget.Entry
+	placeEntry         *widget.Entry
+	dateCodeEntry      *widget.Entry
+	revisionEntry      *widget.Entry
+	speedGradeEntry    *widget.Entry
+	descriptionEntry   *widget.Entry
+	ocrTextEntry       *widget.Entry
+	correctedTextEntry *widget.Entry
+	ocrOrientation     *widget.RadioGroup
 }
 
-// rebuildSortedIndices rebuilds the sorted indices based on component Y, X positions.
+// rebuildSortedIndices rebuilds the sorted indices using natural numeric sorting by component ID.
+// This ensures A2 comes before A10, U1 before U2 before U10, etc.
 func (cp *ComponentsPanel) rebuildSortedIndices() {
 	n := len(cp.state.Components)
 	cp.sortedIndices = make([]int, n)
@@ -2105,21 +2135,91 @@ func (cp *ComponentsPanel) rebuildSortedIndices() {
 		cp.sortedIndices[i] = i
 	}
 
-	// Sort by Y first, then by X
+	// Sort by component ID using natural numeric ordering
 	sort.Slice(cp.sortedIndices, func(i, j int) bool {
 		ci := cp.state.Components[cp.sortedIndices[i]]
 		cj := cp.state.Components[cp.sortedIndices[j]]
-		// Compare Y (center)
-		yi := ci.Bounds.Y + ci.Bounds.Height/2
-		yj := cj.Bounds.Y + cj.Bounds.Height/2
-		if yi != yj {
-			return yi < yj
-		}
-		// Same Y, compare X
-		xi := ci.Bounds.X + ci.Bounds.Width/2
-		xj := cj.Bounds.X + cj.Bounds.Width/2
-		return xi < xj
+		return naturalLess(ci.ID, cj.ID)
 	})
+}
+
+// naturalLess compares two strings using natural numeric ordering.
+// "A2" < "A10", "U1" < "U2" < "U10", etc.
+func naturalLess(a, b string) bool {
+	// Split each string into chunks of letters and numbers
+	chunksA := splitNatural(a)
+	chunksB := splitNatural(b)
+
+	// Compare chunk by chunk
+	for i := 0; i < len(chunksA) && i < len(chunksB); i++ {
+		ca, cb := chunksA[i], chunksB[i]
+
+		// If both chunks are numeric, compare numerically
+		if isNumeric(ca) && isNumeric(cb) {
+			na := parseNum(ca)
+			nb := parseNum(cb)
+			if na != nb {
+				return na < nb
+			}
+		} else {
+			// Compare as strings (case-insensitive)
+			cmp := strings.Compare(strings.ToUpper(ca), strings.ToUpper(cb))
+			if cmp != 0 {
+				return cmp < 0
+			}
+		}
+	}
+
+	// If all compared chunks are equal, shorter string comes first
+	return len(chunksA) < len(chunksB)
+}
+
+// splitNatural splits a string into alternating chunks of letters and digits.
+// "A10BC2" -> ["A", "10", "BC", "2"]
+func splitNatural(s string) []string {
+	var chunks []string
+	var current strings.Builder
+
+	wasDigit := false
+	for i, r := range s {
+		isDigit := r >= '0' && r <= '9'
+
+		if i > 0 && isDigit != wasDigit {
+			// Transition between letter and digit, save current chunk
+			chunks = append(chunks, current.String())
+			current.Reset()
+		}
+
+		current.WriteRune(r)
+		wasDigit = isDigit
+	}
+
+	if current.Len() > 0 {
+		chunks = append(chunks, current.String())
+	}
+
+	return chunks
+}
+
+// isNumeric checks if a string is all digits.
+func isNumeric(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
+// parseNum parses a numeric string to int, returns 0 on error.
+func parseNum(s string) int {
+	n := 0
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			n = n*10 + int(r-'0')
+		}
+	}
+	return n
 }
 
 // focusableContainer wraps a container to receive keyboard events.
@@ -2280,7 +2380,12 @@ func NewComponentsPanel(state *app.State, canv *canvas.ImageCanvas) *ComponentsP
 					if !comp.Confirmed {
 						prefix = "* "
 					}
-					item.SetText(fmt.Sprintf("%s%s - %s", prefix, comp.ID, comp.Package))
+					// Show part number if available, otherwise package
+					detail := comp.PartNumber
+					if detail == "" {
+						detail = comp.Package
+					}
+					item.SetText(fmt.Sprintf("%s%s %s", prefix, comp.ID, detail))
 					// Set up right-click edit handler for this item (use actual component index)
 					actualIdx := compIdx
 					item.onRightClick = func() {
@@ -2289,7 +2394,7 @@ func NewComponentsPanel(state *app.State, canv *canvas.ImageCanvas) *ComponentsP
 					// Set up hover handlers for highlighting and keyboard focus
 					item.onMouseIn = func() {
 						cp.hoveredIndex = actualIdx
-						cp.highlightComponent(actualIdx)
+						cp.highlightComponent(actualIdx, false)
 					}
 					item.onMouseOut = func() {
 						cp.hoveredIndex = -1
@@ -2311,11 +2416,112 @@ func NewComponentsPanel(state *app.State, canv *canvas.ImageCanvas) *ComponentsP
 		}
 	}
 
-	// Detail card (empty initially)
-	cp.detailCard = widget.NewCard("Component Details", "", widget.NewLabel("Select a component"))
+	// Create inline edit form entries
+	cp.idEntry = widget.NewEntry()
+	cp.idEntry.SetPlaceHolder("Component ID")
 
-	// OCR button
-	ocrBtn := widget.NewButton("OCR Silkscreen", func() {
+	cp.partNumberEntry = widget.NewEntry()
+	cp.partNumberEntry.SetPlaceHolder("e.g., 74LS244")
+
+	cp.packageEntry = widget.NewEntry()
+	cp.packageEntry.SetPlaceHolder("e.g., DIP-20")
+
+	cp.manufacturerEntry = widget.NewEntry()
+	cp.manufacturerEntry.SetPlaceHolder("e.g., Texas Instruments")
+
+	cp.placeEntry = widget.NewEntry()
+	cp.placeEntry.SetPlaceHolder("e.g., Malaysia")
+
+	cp.dateCodeEntry = widget.NewEntry()
+	cp.dateCodeEntry.SetPlaceHolder("e.g., 8523")
+
+	cp.revisionEntry = widget.NewEntry()
+	cp.speedGradeEntry = widget.NewEntry()
+	cp.speedGradeEntry.SetPlaceHolder("e.g., -25")
+
+	cp.descriptionEntry = widget.NewEntry()
+	cp.descriptionEntry.MultiLine = true
+	cp.descriptionEntry.SetMinRowsVisible(2)
+
+	cp.correctedTextEntry = widget.NewEntry()
+	cp.correctedTextEntry.MultiLine = true
+	cp.correctedTextEntry.SetMinRowsVisible(2)
+	cp.correctedTextEntry.SetPlaceHolder("Corrected text (for training)")
+
+	cp.ocrTextEntry = widget.NewEntry()
+	cp.ocrTextEntry.MultiLine = true
+	cp.ocrTextEntry.SetMinRowsVisible(2)
+	cp.ocrTextEntry.SetPlaceHolder("OCR detected text")
+
+	// OCR orientation selector
+	cp.ocrOrientation = widget.NewRadioGroup([]string{"N", "S", "E", "W"}, nil)
+	cp.ocrOrientation.Horizontal = true
+	cp.ocrOrientation.SetSelected("N")
+
+	// OCR buttons
+	ocrBtn := widget.NewButton("OCR", func() {
+		cp.runOCR()
+	})
+	trainBtn := widget.NewButton("Train", func() {
+		cp.runOCRTraining()
+	})
+
+	// Save/Delete buttons for the form
+	saveBtn := widget.NewButton("Save", func() {
+		cp.saveEditingComponent()
+	})
+	saveBtn.Importance = widget.HighImportance
+
+	deleteBtn := widget.NewButton("Delete", func() {
+		cp.deleteEditingComponent()
+	})
+	deleteBtn.Importance = widget.DangerImportance
+
+	// Build the edit form using compact layout
+	formGrid := container.NewGridWithColumns(2,
+		widget.NewLabel("ID:"), cp.idEntry,
+		widget.NewLabel("Part #:"), cp.partNumberEntry,
+		widget.NewLabel("Package:"), cp.packageEntry,
+		widget.NewLabel("Mfr:"), cp.manufacturerEntry,
+		widget.NewLabel("Place:"), cp.placeEntry,
+		widget.NewLabel("Date:"), cp.dateCodeEntry,
+		widget.NewLabel("Rev:"), cp.revisionEntry,
+		widget.NewLabel("Speed:"), cp.speedGradeEntry,
+	)
+
+	ocrControls := container.NewHBox(
+		ocrBtn, trainBtn,
+		widget.NewLabel("Dir:"), cp.ocrOrientation,
+	)
+
+	formButtons := container.NewHBox(
+		deleteBtn,
+		layout.NewSpacer(),
+		saveBtn,
+	)
+
+	// Combine into edit form
+	cp.editForm = container.NewVBox(
+		formGrid,
+		widget.NewSeparator(),
+		widget.NewLabel("Description:"),
+		cp.descriptionEntry,
+		widget.NewSeparator(),
+		ocrControls,
+		widget.NewLabel("Corrected:"),
+		cp.correctedTextEntry,
+		widget.NewLabel("OCR Result:"),
+		cp.ocrTextEntry,
+		widget.NewSeparator(),
+		formButtons,
+	)
+
+	// Detail card containing the edit form (scrollable)
+	editScroll := container.NewVScroll(cp.editForm)
+	cp.detailCard = widget.NewCard("Component", "Select a component to edit", editScroll)
+
+	// OCR Silkscreen button (batch OCR)
+	ocrSilkscreenBtn := widget.NewButton("OCR All Silkscreen", func() {
 		cp.onOCRSilkscreen()
 	})
 
@@ -2328,19 +2534,25 @@ func NewComponentsPanel(state *app.State, canv *canvas.ImageCanvas) *ComponentsP
 	// Set up middle-click handler for flood fill component detection
 	cp.canvas.OnMiddleClick(cp.OnMiddleClickFloodFill)
 
-	// Wrap list in a scroll container with fixed height for ~5 items
+	// Wrap list in a scroll container
 	listScroll := container.NewVScroll(cp.list)
-	listScroll.SetMinSize(fyne.NewSize(0, 175)) // ~35px per item * 5 items
 
 	// Create focusable wrapper with key handler
 	focusWrapper = newFocusableContainer(listScroll, cp.onKeyPressed)
 
-	// Layout
+	// Create VSplit between list and edit form with draggable divider
+	cp.split = container.NewVSplit(focusWrapper, cp.detailCard)
+
+	// Load saved split offset from preferences (default 0.5 = equal split)
+	prefs := fyne.CurrentApp().Preferences()
+	savedOffset := prefs.FloatWithFallback("components_split_offset", 0.5)
+	cp.split.SetOffset(savedOffset)
+
+	// Layout: OCR button at top, split fills remaining space
 	cp.container = container.NewBorder(
-		ocrBtn,
-		cp.detailCard,
-		nil, nil,
-		focusWrapper,
+		ocrSilkscreenBtn, // top: OCR button
+		nil, nil, nil,
+		cp.split, // center: draggable split between list and edit form
 	)
 
 	// Subscribe to component change events to refresh the list
@@ -2371,22 +2583,152 @@ func (cp *ComponentsPanel) SetWindow(w fyne.Window) {
 	cp.window = w
 }
 
-// showEditDialog opens the component edit dialog for the given index.
+// SaveSplitOffset saves the current split position to preferences.
+func (cp *ComponentsPanel) SaveSplitOffset() {
+	if cp.split != nil {
+		prefs := fyne.CurrentApp().Preferences()
+		prefs.SetFloat("components_split_offset", cp.split.Offset)
+	}
+}
+
+// showEditDialog populates the inline edit form for the given component index.
 func (cp *ComponentsPanel) showEditDialog(index int) {
 	if index < 0 || index >= len(cp.state.Components) {
 		return
 	}
-	if cp.window == nil {
-		fmt.Println("No window set for ComponentsPanel")
+
+	comp := cp.state.Components[index]
+	cp.editingComp = comp
+	cp.editingIndex = index
+
+	// Populate form fields
+	cp.idEntry.SetText(comp.ID)
+	cp.partNumberEntry.SetText(comp.PartNumber)
+	cp.packageEntry.SetText(comp.Package)
+	cp.manufacturerEntry.SetText(comp.Manufacturer)
+	cp.placeEntry.SetText(comp.Place)
+	cp.dateCodeEntry.SetText(comp.DateCode)
+	cp.revisionEntry.SetText(comp.Revision)
+	cp.speedGradeEntry.SetText(comp.SpeedGrade)
+	cp.descriptionEntry.SetText(comp.Description)
+	cp.ocrTextEntry.SetText(comp.OCRText)
+	cp.correctedTextEntry.SetText(comp.CorrectedText)
+
+	// Set orientation - priority: component's saved orientation > sticky default > "N"
+	if comp.OCROrientation != "" {
+		cp.ocrOrientation.SetSelected(comp.OCROrientation)
+	} else if cp.state.LastOCROrientation != "" {
+		cp.ocrOrientation.SetSelected(cp.state.LastOCROrientation)
+	} else {
+		cp.ocrOrientation.SetSelected("N")
+	}
+
+	// Update card title
+	cp.detailCard.SetTitle(comp.ID)
+	cp.detailCard.SetSubTitle(fmt.Sprintf("%s - %s", comp.Package, comp.PartNumber))
+	cp.detailCard.Refresh()
+
+	// Highlight the component on canvas and scroll to it (initial selection)
+	cp.highlightComponent(index, true)
+}
+
+func (cp *ComponentsPanel) showComponentDetail(c interface{}) {
+	if comp, ok := c.(*component.Component); ok {
+		// Find the index of this component
+		for i, stateComp := range cp.state.Components {
+			if stateComp == comp {
+				cp.showEditDialog(i)
+				return
+			}
+		}
+	}
+}
+
+// saveEditingComponent saves changes from the inline form to the editing component.
+func (cp *ComponentsPanel) saveEditingComponent() {
+	if cp.editingComp == nil {
 		return
 	}
 
-	comp := cp.state.Components[index]
+	// Apply changes from form
+	cp.editingComp.ID = cp.idEntry.Text
+	cp.editingComp.PartNumber = cp.partNumberEntry.Text
+	cp.editingComp.Package = cp.packageEntry.Text
+	cp.editingComp.Manufacturer = cp.manufacturerEntry.Text
+	cp.editingComp.Place = cp.placeEntry.Text
+	cp.editingComp.DateCode = cp.dateCodeEntry.Text
+	cp.editingComp.Revision = cp.revisionEntry.Text
+	cp.editingComp.SpeedGrade = cp.speedGradeEntry.Text
+	cp.editingComp.Description = cp.descriptionEntry.Text
+	cp.editingComp.OCRText = cp.ocrTextEntry.Text
+	cp.editingComp.CorrectedText = cp.correctedTextEntry.Text
+	cp.editingComp.OCROrientation = cp.ocrOrientation.Selected
+
+	// Update sticky orientation
+	cp.state.LastOCROrientation = cp.ocrOrientation.Selected
+
+	cp.state.SetModified(true)
+	cp.rebuildSortedIndices()
+	cp.list.Refresh()
+	cp.updateComponentOverlay()
+
+	// Update card title
+	cp.detailCard.SetTitle(cp.editingComp.ID)
+	cp.detailCard.SetSubTitle(fmt.Sprintf("%s - %s", cp.editingComp.Package, cp.editingComp.PartNumber))
+
+	// Save split offset while we're saving
+	cp.SaveSplitOffset()
+
+	fmt.Printf("Saved component %s\n", cp.editingComp.ID)
+}
+
+// deleteEditingComponent deletes the currently editing component.
+func (cp *ComponentsPanel) deleteEditingComponent() {
+	if cp.editingComp == nil || cp.editingIndex < 0 {
+		return
+	}
+
+	cp.deleteComponent(cp.editingIndex)
+
+	// Clear the form
+	cp.editingComp = nil
+	cp.editingIndex = -1
+	cp.clearEditForm()
+}
+
+// clearEditForm clears all form fields and the highlight.
+func (cp *ComponentsPanel) clearEditForm() {
+	cp.idEntry.SetText("")
+	cp.partNumberEntry.SetText("")
+	cp.packageEntry.SetText("")
+	cp.manufacturerEntry.SetText("")
+	cp.placeEntry.SetText("")
+	cp.dateCodeEntry.SetText("")
+	cp.revisionEntry.SetText("")
+	cp.speedGradeEntry.SetText("")
+	cp.descriptionEntry.SetText("")
+	cp.ocrTextEntry.SetText("")
+	cp.correctedTextEntry.SetText("")
+	cp.ocrOrientation.SetSelected("N")
+
+	cp.detailCard.SetTitle("Component")
+	cp.detailCard.SetSubTitle("Select a component to edit")
+	cp.detailCard.Refresh()
+
+	// Clear the highlight overlay since no component is selected
+	cp.canvas.SetOverlay("component_highlight", nil)
+	cp.canvas.Refresh()
+}
+
+// getComponentImage returns the source image for the currently editing component.
+func (cp *ComponentsPanel) getComponentImage() image.Image {
+	if cp.editingComp == nil {
+		return nil
+	}
 
 	// Get the original layer image for OCR (not the zoomed canvas output)
-	// Component bounds are stored in original image coordinates
 	var img image.Image
-	switch comp.Layer {
+	switch cp.editingComp.Layer {
 	case pcbimage.SideBack:
 		if cp.state.BackImage != nil {
 			img = cp.state.BackImage.Image
@@ -2397,71 +2739,695 @@ func (cp *ComponentsPanel) showEditDialog(index int) {
 		}
 	}
 	if img == nil {
-		// Fallback to rendered output if layer image not available
 		img = cp.canvas.GetRenderedOutput()
 	}
+	return img
+}
 
-	dlg := dialogs.NewComponentEditDialog(
-		comp,
-		cp.window,
-		img,
-		func(c *component.Component) {
-			// On save - update UI
-			cp.state.SetModified(true)
-			cp.list.Refresh()
-			cp.updateComponentOverlay()
-			fmt.Printf("Saved component %s\n", c.ID)
-		},
-		func(c *component.Component) {
-			// On delete - find and remove component
-			for i, comp := range cp.state.Components {
-				if comp == c {
-					cp.deleteComponent(i)
-					break
-				}
-			}
-		},
-	)
+// runOCR performs OCR on the currently editing component.
+func (cp *ComponentsPanel) runOCR() {
+	if cp.editingComp == nil {
+		fmt.Println("[OCR] No component selected")
+		return
+	}
 
-	// Set OCR training params and callback
-	dlg.SetOCRTraining(cp.state.OCRLearnedParams, func(params *ocr.LearnedParams) {
-		// Mark project as modified when OCR params are updated
-		cp.state.SetModified(true)
-		fmt.Printf("OCR params updated: %d samples, avg score %.2f\n",
-			len(params.Samples), params.AvgScore)
-	})
+	img := cp.getComponentImage()
+	if img == nil {
+		fmt.Println("[OCR] No image available")
+		return
+	}
 
-	// Set default orientation based on most common orientation among existing components
-	// This helps when the board has a dominant component orientation
-	defaultOrientation := cp.state.LastOCROrientation
-	if len(cp.state.Components) > 0 {
-		orientationCounts := make(map[string]int)
-		for _, c := range cp.state.Components {
-			if c.OCROrientation != "" {
-				orientationCounts[c.OCROrientation]++
-			}
+	// Extract the component region from the image
+	bounds := cp.editingComp.Bounds
+	x, y := int(bounds.X), int(bounds.Y)
+	w, h := int(bounds.Width), int(bounds.Height)
+	fmt.Printf("[OCR] Component bounds: (%d,%d) %dx%d\n", x, y, w, h)
+
+	// Clamp to image bounds
+	imgBounds := img.Bounds()
+	if x < imgBounds.Min.X {
+		x = imgBounds.Min.X
+	}
+	if y < imgBounds.Min.Y {
+		y = imgBounds.Min.Y
+	}
+	w = min(w, imgBounds.Max.X-x)
+	h = min(h, imgBounds.Max.Y-y)
+
+	if w <= 0 || h <= 0 {
+		fmt.Println("[OCR] Invalid bounds")
+		return
+	}
+
+	// Create cropped region
+	cropped := image.NewRGBA(image.Rect(0, 0, w, h))
+	for dy := 0; dy < h; dy++ {
+		for dx := 0; dx < w; dx++ {
+			cropped.Set(dx, dy, img.At(x+dx, y+dy))
 		}
-		// Find most common orientation
-		maxCount := 0
-		for orient, count := range orientationCounts {
-			if count > maxCount {
-				maxCount = count
-				defaultOrientation = orient
+	}
+
+	// Get orientation and logo rotation
+	orientation := cp.ocrOrientation.Selected
+	logoRotation := orientationToRotation(orientation)
+
+	// Detect logos
+	var detectedLogos []logo.LogoMatch
+	if cp.state.LogoLibrary != nil && len(cp.state.LogoLibrary.Logos) > 0 {
+		searchBounds := geometry.RectInt{X: 0, Y: 0, Width: w, Height: h}
+		detectedLogos = cp.state.LogoLibrary.DetectLogos(cropped, searchBounds, 0.75, logoRotation)
+		if len(detectedLogos) > 0 {
+			fmt.Printf("[OCR] Detected %d logos\n", len(detectedLogos))
+			// Mask logo regions
+			bgColor := calculateBackgroundColor(cropped)
+			for _, m := range detectedLogos {
+				maskRegion(cropped, m.Bounds, bgColor)
 			}
 		}
 	}
-	dlg.SetDefaultOrientation(defaultOrientation, func(orientation string) {
-		cp.state.LastOCROrientation = orientation
-	})
 
-	// Set logo library for logo detection during OCR
-	dlg.SetLogoLibrary(cp.state.LogoLibrary)
+	// Rotate for OCR
+	rotated := rotateForOCR(cropped, orientation)
 
-	dlg.Show()
+	// Convert to gocv.Mat
+	rotBounds := rotated.Bounds()
+	mat, err := gocv.NewMatFromBytes(rotBounds.Dy(), rotBounds.Dx(), gocv.MatTypeCV8UC4, rotated.Pix)
+	if err != nil {
+		fmt.Printf("[OCR] Mat conversion failed: %v\n", err)
+		return
+	}
+	defer mat.Close()
+
+	// Convert RGBA to BGR
+	bgr := gocv.NewMat()
+	defer bgr.Close()
+	gocv.CvtColor(mat, &bgr, gocv.ColorRGBAToBGR)
+
+	// Create OCR engine
+	engine, err := ocr.NewEngine()
+	if err != nil {
+		fmt.Printf("[OCR] Engine creation failed: %v\n", err)
+		return
+	}
+	defer engine.Close()
+
+	// Run OCR - use best available params:
+	// 1. Per-project learned params (if good enough)
+	// 2. Global training database params
+	// 3. Default params
+	var text string
+	var params ocr.OCRParams
+	paramsSource := "default"
+
+	if cp.state.OCRLearnedParams != nil && len(cp.state.OCRLearnedParams.Samples) > 0 && cp.state.OCRLearnedParams.AvgScore > 0.5 {
+		params = cp.state.OCRLearnedParams.BestParams
+		paramsSource = fmt.Sprintf("project (%.0f%% avg)", cp.state.OCRLearnedParams.AvgScore*100)
+	} else if cp.state.GlobalOCRTraining != nil && len(cp.state.GlobalOCRTraining.Samples) >= 5 {
+		params = cp.state.GlobalOCRTraining.GetRecommendedParams()
+		paramsSource = fmt.Sprintf("global (%d samples)", len(cp.state.GlobalOCRTraining.Samples))
+	} else {
+		params = ocr.DefaultOCRParams()
+	}
+
+	fmt.Printf("[OCR] Using %s params\n", paramsSource)
+	text, err = engine.RecognizeWithParams(bgr, params)
+
+	if err != nil {
+		fmt.Printf("[OCR] Failed: %v\n", err)
+		return
+	}
+
+	// If empty, try histogram enhancement
+	if strings.TrimSpace(text) == "" {
+		text = cp.runOCRWithHistogramThreshold(bgr, engine)
+	}
+
+	// Prepend detected logos
+	var detectedManufacturer string
+	if len(detectedLogos) > 0 {
+		var logoNames []string
+		for _, m := range detectedLogos {
+			logoNames = append(logoNames, fmt.Sprintf("<%s>", m.Logo.Name))
+			if detectedManufacturer == "" && m.Logo.ManufacturerID != "" {
+				detectedManufacturer = m.Logo.ManufacturerID
+			}
+		}
+		text = strings.Join(logoNames, " ") + "\n" + text
+	}
+
+	// Update form fields
+	cp.ocrTextEntry.SetText(text)
+	cp.editingComp.OCRText = text
+
+	// Parse component info
+	info := parseComponentInfo(text)
+	if info.PartNumber != "" && cp.partNumberEntry.Text == "" {
+		cp.partNumberEntry.SetText(info.PartNumber)
+	}
+	if detectedManufacturer != "" && cp.manufacturerEntry.Text == "" {
+		cp.manufacturerEntry.SetText(detectedManufacturer)
+	} else if info.Manufacturer != "" && cp.manufacturerEntry.Text == "" {
+		cp.manufacturerEntry.SetText(info.Manufacturer)
+	}
+	if cp.dateCodeEntry.Text == "" {
+		if code, decoded := datecode.ExtractDateCode(text, 1990); decoded != nil {
+			cp.dateCodeEntry.SetText(code)
+			fmt.Printf("[OCR] Decoded date: %s -> %s\n", code, decoded.String())
+		} else if info.DateCode != "" {
+			cp.dateCodeEntry.SetText(info.DateCode)
+		}
+	}
+	if info.Place != "" && cp.placeEntry.Text == "" {
+		cp.placeEntry.SetText(info.Place)
+	}
+
+	// Update sticky orientation
+	cp.state.LastOCROrientation = orientation
+
+	fmt.Printf("[OCR] Complete: %s\n", text)
 }
 
-func (cp *ComponentsPanel) showComponentDetail(comp interface{}) {
-	// TODO: Show component details
+// runOCRWithHistogramThreshold uses histogram analysis for better OCR.
+func (cp *ComponentsPanel) runOCRWithHistogramThreshold(bgr gocv.Mat, engine *ocr.Engine) string {
+	gray := gocv.NewMat()
+	defer gray.Close()
+	gocv.CvtColor(bgr, &gray, gocv.ColorBGRToGray)
+
+	// Build histogram
+	hist := make([]int, 256)
+	totalPixels := gray.Rows() * gray.Cols()
+	for y := 0; y < gray.Rows(); y++ {
+		for x := 0; x < gray.Cols(); x++ {
+			v := gray.GetUCharAt(y, x)
+			hist[v]++
+		}
+	}
+
+	// Find threshold for brightest 5%
+	targetPixels := totalPixels * 5 / 100
+	cumulative := 0
+	threshold := 255
+	for i := 255; i >= 0; i-- {
+		cumulative += hist[i]
+		if cumulative >= targetPixels {
+			threshold = i
+			break
+		}
+	}
+	if threshold < 128 {
+		threshold = 128
+	}
+
+	// Create binary image
+	binary := gocv.NewMat()
+	defer binary.Close()
+	gocv.Threshold(gray, &binary, float32(threshold), 255, gocv.ThresholdBinary)
+
+	// Invert
+	inverted := gocv.NewMat()
+	defer inverted.Close()
+	gocv.BitwiseNot(binary, &inverted)
+
+	// Convert back to BGR
+	bgrOut := gocv.NewMat()
+	defer bgrOut.Close()
+	gocv.CvtColor(inverted, &bgrOut, gocv.ColorGrayToBGR)
+
+	text, err := engine.RecognizeImage(bgrOut)
+	if err != nil {
+		return ""
+	}
+	return text
+}
+
+// runOCRTraining runs parameter annealing to find the best OCR settings.
+func (cp *ComponentsPanel) runOCRTraining() {
+	if cp.editingComp == nil {
+		fmt.Println("[OCR Train] No component selected")
+		return
+	}
+
+	groundTruth := cp.correctedTextEntry.Text
+	if strings.TrimSpace(groundTruth) == "" {
+		fmt.Println("[OCR Train] No ground truth provided")
+		return
+	}
+
+	img := cp.getComponentImage()
+	if img == nil {
+		fmt.Println("[OCR Train] No image available")
+		return
+	}
+
+	// Extract component region
+	bounds := cp.editingComp.Bounds
+	x, y := int(bounds.X), int(bounds.Y)
+	w, h := int(bounds.Width), int(bounds.Height)
+
+	imgBounds := img.Bounds()
+	if x < imgBounds.Min.X {
+		x = imgBounds.Min.X
+	}
+	if y < imgBounds.Min.Y {
+		y = imgBounds.Min.Y
+	}
+	w = min(w, imgBounds.Max.X-x)
+	h = min(h, imgBounds.Max.Y-y)
+
+	if w <= 0 || h <= 0 {
+		return
+	}
+
+	// Create cropped region
+	cropped := image.NewRGBA(image.Rect(0, 0, w, h))
+	for dy := 0; dy < h; dy++ {
+		for dx := 0; dx < w; dx++ {
+			cropped.Set(dx, dy, img.At(x+dx, y+dy))
+		}
+	}
+
+	// Logo training
+	orientation := cp.ocrOrientation.Selected
+	logoRotation := orientationToRotation(orientation)
+	cp.trainLogoDetection(cropped, w, h, groundTruth, logoRotation)
+
+	// Rotate for OCR
+	rotated := rotateForOCR(cropped, orientation)
+
+	// Convert to gocv.Mat
+	rotBounds := rotated.Bounds()
+	mat, err := gocv.NewMatFromBytes(rotBounds.Dy(), rotBounds.Dx(), gocv.MatTypeCV8UC4, rotated.Pix)
+	if err != nil {
+		return
+	}
+	defer mat.Close()
+
+	bgr := gocv.NewMat()
+	defer bgr.Close()
+	gocv.CvtColor(mat, &bgr, gocv.ColorRGBAToBGR)
+
+	engine, err := ocr.NewEngine()
+	if err != nil {
+		return
+	}
+	defer engine.Close()
+
+	// Run parameter search
+	bestParams, bestScore, bestText := engine.AnnealOCRParams(bgr, groundTruth, 5000)
+	fmt.Printf("[OCR Train] Best score: %.1f%% text: %s\n", bestScore*100, bestText)
+
+	// Update per-project learned params
+	if cp.state.OCRLearnedParams == nil {
+		cp.state.OCRLearnedParams = &ocr.LearnedParams{}
+	}
+	if bestScore > 0.3 {
+		cp.state.OCRLearnedParams.BestParams = bestParams
+		sample := ocr.TrainingSample{
+			GroundTruth: groundTruth,
+			BestScore:   bestScore,
+		}
+		cp.state.OCRLearnedParams.UpdateLearnedParams(sample)
+		cp.state.SetModified(true)
+	}
+
+	// Save to global training database if good enough (score >= 0.7)
+	if bestScore >= 0.7 {
+		cp.state.AddOCRTrainingSample(groundTruth, bestText, bestScore, orientation, bestParams)
+		fmt.Printf("[OCR Train] Added to global training database\n")
+	}
+
+	// Parse ground truth into form fields and component properties
+	info := parseComponentInfo(groundTruth)
+
+	// Part number: use parsed value if form is empty
+	if info.PartNumber != "" && cp.partNumberEntry.Text == "" {
+		cp.partNumberEntry.SetText(info.PartNumber)
+		cp.editingComp.PartNumber = info.PartNumber
+	}
+
+	// Manufacturer: use parsed value if form is empty
+	if info.Manufacturer != "" && cp.manufacturerEntry.Text == "" {
+		cp.manufacturerEntry.SetText(info.Manufacturer)
+		cp.editingComp.Manufacturer = info.Manufacturer
+	}
+
+	// Date code: any 4 consecutive digits
+	if info.DateCode != "" && cp.dateCodeEntry.Text == "" {
+		cp.dateCodeEntry.SetText(info.DateCode)
+		cp.editingComp.DateCode = info.DateCode
+	}
+
+	// Place: manufacturing location
+	if info.Place != "" && cp.placeEntry.Text == "" {
+		cp.placeEntry.SetText(info.Place)
+		cp.editingComp.Place = info.Place
+	}
+
+	// Store corrected text as ground truth
+	cp.editingComp.CorrectedText = groundTruth
+
+	// Update sticky orientation
+	cp.state.LastOCROrientation = orientation
+	cp.state.SetModified(true)
+
+	fmt.Printf("[OCR Train] Parsed: part=%q mfr=%q date=%q place=%q\n",
+		info.PartNumber, info.Manufacturer, info.DateCode, info.Place)
+}
+
+// trainLogoDetection compares detected logos to ground truth.
+func (cp *ComponentsPanel) trainLogoDetection(cropped *image.RGBA, w, h int, groundTruth string, rotation int) {
+	if cp.state.LogoLibrary == nil || len(cp.state.LogoLibrary.Logos) == 0 {
+		return
+	}
+
+	// Extract expected logos from ground truth
+	expectedLogos := extractLogoNames(groundTruth)
+	if len(expectedLogos) == 0 {
+		return
+	}
+	fmt.Printf("[Logo Train] Expected: %v\n", expectedLogos)
+
+	// Detect logos
+	searchBounds := geometry.RectInt{X: 0, Y: 0, Width: w, Height: h}
+	detectedMatches := cp.state.LogoLibrary.DetectLogos(cropped, searchBounds, 0.70, rotation)
+
+	detectedLogos := make(map[string]logo.LogoMatch)
+	for _, m := range detectedMatches {
+		detectedLogos[m.Logo.Name] = m
+	}
+
+	// Report results
+	for _, expected := range expectedLogos {
+		if _, found := detectedLogos[expected]; found {
+			fmt.Printf("[Logo Train] %s: detected\n", expected)
+		} else {
+			fmt.Printf("[Logo Train] %s: MISSED\n", expected)
+		}
+	}
+
+	expectedSet := make(map[string]bool)
+	for _, e := range expectedLogos {
+		expectedSet[e] = true
+	}
+	for name, m := range detectedLogos {
+		if !expectedSet[name] {
+			fmt.Printf("[Logo Train] %s: FALSE POSITIVE (score=%.2f)\n", name, m.Score)
+		}
+	}
+}
+
+// Helper functions for OCR
+
+func orientationToRotation(orientation string) int {
+	switch orientation {
+	case "S":
+		return 180
+	case "E":
+		return 90
+	case "W":
+		return 270
+	default:
+		return 0
+	}
+}
+
+func rotateForOCR(img *image.RGBA, orientation string) *image.RGBA {
+	bounds := img.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+
+	switch orientation {
+	case "S": // 180°
+		rotated := image.NewRGBA(image.Rect(0, 0, w, h))
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				rotated.Set(w-1-x, h-1-y, img.At(x, y))
+			}
+		}
+		return rotated
+	case "E": // 90° CCW
+		rotated := image.NewRGBA(image.Rect(0, 0, h, w))
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				rotated.Set(y, w-1-x, img.At(x, y))
+			}
+		}
+		return rotated
+	case "W": // 90° CW
+		rotated := image.NewRGBA(image.Rect(0, 0, h, w))
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				rotated.Set(h-1-y, x, img.At(x, y))
+			}
+		}
+		return rotated
+	default:
+		return img
+	}
+}
+
+func calculateBackgroundColor(img *image.RGBA) color.RGBA {
+	bounds := img.Bounds()
+	var r, g, b, count uint64
+
+	// Sample edge pixels
+	for x := bounds.Min.X; x < bounds.Max.X; x++ {
+		c := img.RGBAAt(x, bounds.Min.Y)
+		r += uint64(c.R)
+		g += uint64(c.G)
+		b += uint64(c.B)
+		count++
+		c = img.RGBAAt(x, bounds.Max.Y-1)
+		r += uint64(c.R)
+		g += uint64(c.G)
+		b += uint64(c.B)
+		count++
+	}
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		c := img.RGBAAt(bounds.Min.X, y)
+		r += uint64(c.R)
+		g += uint64(c.G)
+		b += uint64(c.B)
+		count++
+		c = img.RGBAAt(bounds.Max.X-1, y)
+		r += uint64(c.R)
+		g += uint64(c.G)
+		b += uint64(c.B)
+		count++
+	}
+
+	if count == 0 {
+		return color.RGBA{A: 255}
+	}
+	return color.RGBA{
+		R: uint8(r / count),
+		G: uint8(g / count),
+		B: uint8(b / count),
+		A: 255,
+	}
+}
+
+func maskRegion(img *image.RGBA, bounds geometry.RectInt, c color.RGBA) {
+	imgBounds := img.Bounds()
+	x0 := max(bounds.X, imgBounds.Min.X)
+	y0 := max(bounds.Y, imgBounds.Min.Y)
+	x1 := min(bounds.X+bounds.Width, imgBounds.Max.X)
+	y1 := min(bounds.Y+bounds.Height, imgBounds.Max.Y)
+
+	for y := y0; y < y1; y++ {
+		for x := x0; x < x1; x++ {
+			img.SetRGBA(x, y, c)
+		}
+	}
+}
+
+func extractLogoNames(text string) []string {
+	re := regexp.MustCompile(`<([A-Za-z0-9]+)>`)
+	matches := re.FindAllStringSubmatch(text, -1)
+	var names []string
+	for _, m := range matches {
+		if len(m) >= 2 {
+			names = append(names, strings.ToUpper(m[1]))
+		}
+	}
+	return names
+}
+
+// componentInfo holds parsed component information from OCR text.
+type componentInfo struct {
+	PartNumber   string
+	Manufacturer string
+	DateCode     string
+	Place        string
+}
+
+func parseComponentInfo(text string) componentInfo {
+	var info componentInfo
+	upperText := strings.ToUpper(text)
+	lines := strings.Split(strings.TrimSpace(text), "\n")
+
+	// Extract logos from text (e.g., <TI> <MOTOROLA>)
+	logoPattern := regexp.MustCompile(`<([A-Za-z0-9]+)>`)
+	logoMatches := logoPattern.FindAllStringSubmatch(text, -1)
+
+	// First non-logo, non-empty line is the part number
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Skip lines that are only logos
+		withoutLogos := logoPattern.ReplaceAllString(line, "")
+		withoutLogos = strings.TrimSpace(withoutLogos)
+		if withoutLogos != "" {
+			info.PartNumber = withoutLogos
+			break
+		}
+	}
+
+	// Check for 74-series part numbers with manufacturer prefixes (e.g., SN7438, DM74LS244)
+	logic74Pattern := regexp.MustCompile(`(?i)\b([A-Z]{1,3})?(74[A-Z]{0,4}\d{1,4})([A-Z]{1,3})?\b`)
+	if matches := logic74Pattern.FindStringSubmatch(upperText); len(matches) > 0 {
+		prefix := matches[1]
+		if prefix != "" && info.Manufacturer == "" {
+			// Map manufacturer prefixes
+			prefixToMfr := map[string]string{
+				"SN": "Texas Instruments", "TL": "Texas Instruments", "UC": "Texas Instruments",
+				"DM": "National Semiconductor", "LM": "National Semiconductor", "DS": "National Semiconductor",
+				"MC": "Motorola", "MJ": "Motorola",
+				"UA": "Fairchild", "9N": "Fairchild",
+				"AM": "AMD",
+				"CD": "RCA", "CA": "RCA",
+				"HD": "Hitachi", "HA": "Hitachi",
+				"TC": "Toshiba",
+				"MB": "Fujitsu",
+				"N": "Signetics", "NE": "Signetics",
+			}
+			if mfr, ok := prefixToMfr[strings.ToUpper(prefix)]; ok {
+				info.Manufacturer = mfr
+			}
+		}
+	}
+
+	// Any 4 consecutive digits is a date code (YYWW format is most common)
+	datePattern := regexp.MustCompile(`\b([0-9]{4})\b`)
+	if matches := datePattern.FindStringSubmatch(upperText); len(matches) >= 2 {
+		info.DateCode = matches[1]
+	}
+
+	// Map common logo names to manufacturers
+	logoToManufacturer := map[string]string{
+		"TI":        "Texas Instruments",
+		"MOTOROLA":  "Motorola",
+		"MOT":       "Motorola",
+		"NATIONAL":  "National Semiconductor",
+		"NSC":       "National Semiconductor",
+		"NS":        "National Semiconductor",
+		"FAIRCHILD": "Fairchild",
+		"SIGNETICS": "Signetics",
+		"AMD":       "AMD",
+		"INTEL":     "Intel",
+		"ZILOG":     "Zilog",
+		"NEC":       "NEC",
+		"HITACHI":   "Hitachi",
+		"TOSHIBA":   "Toshiba",
+		"FUJITSU":   "Fujitsu",
+		"MITSUBISHI": "Mitsubishi",
+		"SAMSUNG":   "Samsung",
+		"PHILIPS":   "Philips",
+		"SIEMENS":   "Siemens",
+		"SGS":       "SGS-Thomson",
+		"ST":        "STMicroelectronics",
+		"MOSTEK":    "Mostek",
+		"RCA":       "RCA",
+		"CYPRESS":   "Cypress",
+		"LATTICE":   "Lattice",
+		"XILINX":    "Xilinx",
+		"ALTERA":    "Altera",
+		"MICROCHIP": "Microchip",
+		"ATMEL":     "Atmel",
+		"MAXIM":     "Maxim",
+		"ANALOG":    "Analog Devices",
+		"LINEAR":    "Linear Technology",
+		"BURRBROWN": "Burr-Brown",
+		"HARRIS":    "Harris",
+		"IDT":       "IDT",
+		"MICRON":    "Micron",
+		"HYUNDAI":   "Hyundai",
+		"HYNIX":     "Hynix",
+		"ELPIDA":    "Elpida",
+		"INFINEON":  "Infineon",
+		"RENESAS":   "Renesas",
+		"SHARP":     "Sharp",
+		"SANYO":     "Sanyo",
+		"SONY":      "Sony",
+		"PANASONIC": "Panasonic",
+		"ROHM":      "Rohm",
+		"MURATA":    "Murata",
+		"TDK":       "TDK",
+		"VISHAY":    "Vishay",
+		"ONSEMI":    "ON Semiconductor",
+		"DIODES":    "Diodes Inc",
+		"NEXPERIA":  "Nexperia",
+	}
+
+	// Use first recognized logo as manufacturer
+	for _, match := range logoMatches {
+		if len(match) >= 2 {
+			logoName := strings.ToUpper(match[1])
+			if mfr, ok := logoToManufacturer[logoName]; ok {
+				info.Manufacturer = mfr
+				break
+			}
+		}
+	}
+
+	// Look for manufacturing locations
+	locations := []struct {
+		pattern string
+		place   string
+	}{
+		{"PHILIPPINES", "Philippines"},
+		{"SINGAPORE", "Singapore"},
+		{"INDONESIA", "Indonesia"},
+		{"MALAYSIA", "Malaysia"},
+		{"THAILAND", "Thailand"},
+		{"VIETNAM", "Vietnam"},
+		{"HONG KONG", "Hong Kong"},
+		{"IRELAND", "Ireland"},
+		{"GERMANY", "Germany"},
+		{"ENGLAND", "UK"},
+		{"SCOTLAND", "UK"},
+		{"CANADA", "Canada"},
+		{"BRAZIL", "Brazil"},
+		{"TAIWAN", "Taiwan"},
+		{"EL SALVADOR", "El Salvador"},
+		{"MEXICO", "Mexico"},
+		{"KOREA", "Korea"},
+		{"JAPAN", "Japan"},
+		{"CHINA", "China"},
+		{"INDIA", "India"},
+		{"S'PORE", "Singapore"},
+		{"SPORE", "Singapore"},
+		{"M'SIA", "Malaysia"},
+		{"MSIA", "Malaysia"},
+		{"HONGKONG", "Hong Kong"},
+		{"H.K.", "Hong Kong"},
+		{"R.O.C", "Taiwan"},
+		{"ROC", "Taiwan"},
+		{"P.R.C", "China"},
+		{"PRC", "China"},
+		{"USA", "USA"},
+		{" UK ", "UK"},
+		{" HK ", "Hong Kong"},
+	}
+	for _, loc := range locations {
+		if strings.Contains(upperText, loc.pattern) {
+			info.Place = loc.place
+			break
+		}
+	}
+
+	return info
 }
 
 // deleteComponent removes a component by index.
@@ -2483,7 +3449,8 @@ func (cp *ComponentsPanel) deleteComponent(index int) {
 }
 
 // highlightComponent shows a highlight overlay for the component at the given index.
-func (cp *ComponentsPanel) highlightComponent(index int) {
+// If scrollToView is true, the canvas will scroll to center the component.
+func (cp *ComponentsPanel) highlightComponent(index int, scrollToView bool) {
 	if index < 0 || index >= len(cp.state.Components) {
 		return
 	}
@@ -2508,13 +3475,21 @@ func (cp *ComponentsPanel) highlightComponent(index int) {
 	cp.canvas.SetOverlay("component_highlight", highlight)
 	cp.canvas.Refresh()
 
-	// Scroll canvas to show the component
-	cp.canvas.ScrollToRegion(int(comp.Bounds.X), int(comp.Bounds.Y),
-		int(comp.Bounds.Width), int(comp.Bounds.Height))
+	// Only scroll if explicitly requested (e.g., initial selection, not during editing)
+	if scrollToView {
+		cp.canvas.ScrollToRegion(int(comp.Bounds.X), int(comp.Bounds.Y),
+			int(comp.Bounds.Width), int(comp.Bounds.Height))
+	}
 }
 
 // clearHighlight removes the component highlight overlay.
+// If a component is being edited, it re-highlights that component instead of clearing.
 func (cp *ComponentsPanel) clearHighlight() {
+	// If we're editing a component, keep its highlight visible
+	if cp.editingComp != nil && cp.editingIndex >= 0 {
+		cp.highlightComponent(cp.editingIndex, false)
+		return
+	}
 	cp.canvas.SetOverlay("component_highlight", nil)
 	cp.canvas.Refresh()
 }
@@ -2564,7 +3539,7 @@ func (cp *ComponentsPanel) onKeyPressed(ev *fyne.KeyEvent) {
 
 	cp.state.SetModified(true)
 	cp.updateComponentOverlay()
-	cp.highlightComponent(cp.hoveredIndex)
+	cp.highlightComponent(cp.hoveredIndex, false)
 	cp.list.Refresh()
 
 	fmt.Printf("Adjusted component %s: pos=(%.1f,%.1f) size=%.1fx%.1f\n",

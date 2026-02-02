@@ -105,8 +105,11 @@ type State struct {
 	// Via training set for machine learning
 	ViaTrainingSet *via.TrainingSet
 
-	// OCR learned parameters from user corrections
+	// OCR learned parameters from user corrections (per-project)
 	OCRLearnedParams *ocr.LearnedParams
+
+	// Global OCR training database (shared across all projects)
+	GlobalOCRTraining *ocr.GlobalTrainingDB
 
 	// Last used OCR orientation (N/S/E/W) - sticky across dialogs
 	LastOCROrientation string
@@ -163,14 +166,22 @@ func NewState() *State {
 		logoLib = logo.NewLogoLibrary()
 	}
 
+	// Load global OCR training database
+	globalOCR, err := ocr.LoadGlobalTraining()
+	if err != nil {
+		fmt.Printf("Warning: could not load global OCR training: %v\n", err)
+		globalOCR = ocr.NewGlobalTrainingDB()
+	}
+
 	return &State{
-		BoardSpec:        board.S100Spec(),
-		FeaturesLayer:    features.NewDetectedFeaturesLayer(),
-		ViaTrainingSet:   via.NewTrainingSet(),
-		OCRLearnedParams: ocr.NewLearnedParams(),
-		LogoLibrary:      logoLib,
-		BoardDefinition:  connector.S100Definition(),
-		listeners:        make(map[EventType][]EventListener),
+		BoardSpec:         board.S100Spec(),
+		FeaturesLayer:     features.NewDetectedFeaturesLayer(),
+		ViaTrainingSet:    via.NewTrainingSet(),
+		OCRLearnedParams:  ocr.NewLearnedParams(),
+		GlobalOCRTraining: globalOCR,
+		LogoLibrary:       logoLib,
+		BoardDefinition:   connector.S100Definition(),
+		listeners:         make(map[EventType][]EventListener),
 	}
 }
 
@@ -184,6 +195,43 @@ func (s *State) SaveLogoLibrary() error {
 		return nil
 	}
 	return lib.SaveToPreferences()
+}
+
+// SaveGlobalOCRTraining saves the global OCR training database.
+func (s *State) SaveGlobalOCRTraining() error {
+	s.mu.RLock()
+	db := s.GlobalOCRTraining
+	s.mu.RUnlock()
+
+	if db == nil {
+		return nil
+	}
+	return ocr.SaveGlobalTraining(db)
+}
+
+// AddOCRTrainingSample adds a sample to the global OCR training database.
+func (s *State) AddOCRTrainingSample(groundTruth, detected string, score float64, orientation string, params ocr.OCRParams) {
+	s.mu.Lock()
+	if s.GlobalOCRTraining == nil {
+		s.GlobalOCRTraining = ocr.NewGlobalTrainingDB()
+	}
+	sample := ocr.CreateSampleFromResult(groundTruth, detected, score, orientation, params)
+	s.GlobalOCRTraining.AddSample(sample)
+	s.mu.Unlock()
+
+	// Auto-save after adding
+	s.SaveGlobalOCRTraining()
+}
+
+// GetRecommendedOCRParams returns OCR params based on global training data.
+func (s *State) GetRecommendedOCRParams() ocr.OCRParams {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.GlobalOCRTraining != nil && len(s.GlobalOCRTraining.Samples) >= 5 {
+		return s.GlobalOCRTraining.GetRecommendedParams()
+	}
+	return ocr.DefaultOCRParams()
 }
 
 // On registers an event listener for the specified event type.

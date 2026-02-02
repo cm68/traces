@@ -894,13 +894,13 @@ var packageSuffixes = map[string]string{
 	"LP":  "TO-92",
 }
 
-// Pattern for 74-series logic chips
-var logic74Pattern = regexp.MustCompile(`(?i)([A-Z]{1,3})?(\d{2})?([A-Z]{0,4})?(74[A-Z]{0,4}\d{2,4})([A-Z]{1,3})?`)
+// Pattern for 74-series logic chips (e.g., 7438, 74LS244, SN74LS244N, DM7438)
+// Group 1: optional manufacturer prefix (SN, DM, MC, etc.)
+// Group 2: core part number (74xx, 74LSxx, 74HCTxxx, etc.)
+// Group 3: optional package suffix (N, D, W, etc.)
+var logic74Pattern = regexp.MustCompile(`(?i)\b([A-Z]{1,3})?(74[A-Z]{0,4}\d{1,4})([A-Z]{1,3})?\b`)
 
-// Pattern for date codes (YYWW format - 2 digit year, 2 digit week)
-var dateCodePattern = regexp.MustCompile(`\b([789]\d)([0-5]\d)\b`)
-
-// Pattern for 4-digit date codes (might also be YYWW)
+// Pattern for 4-digit date codes (any 4 consecutive digits = YYWW)
 var dateCode4Pattern = regexp.MustCompile(`\b(\d{4})\b`)
 
 // parseComponentInfo extracts component information from raw OCR text.
@@ -912,11 +912,11 @@ func parseComponentInfo(text string) componentInfo {
 	text = strings.ReplaceAll(text, "\n", " ")
 	text = strings.ReplaceAll(text, "\r", " ")
 
-	// Try to find a 74-series part number
+	// Try to find a 74-series part number (e.g., 7438, 74LS244, SN74LS244N)
 	if matches := logic74Pattern.FindStringSubmatch(text); len(matches) > 0 {
-		prefix := matches[1]
-		corePN := matches[4] // The 74xxx part
-		suffix := matches[5]
+		prefix := matches[1] // Optional manufacturer prefix (SN, DM, etc.)
+		corePN := matches[2] // Core part number (74xx, 74LSxxx)
+		suffix := matches[3] // Optional package suffix (N, D, etc.)
 
 		// Look up manufacturer from prefix
 		if prefix != "" {
@@ -937,21 +937,9 @@ func parseComponentInfo(text string) componentInfo {
 		}
 	}
 
-	// Try to find date code (YYWW format)
-	if matches := dateCodePattern.FindStringSubmatch(text); len(matches) > 0 {
-		info.DateCode = matches[0]
-	} else if matches := dateCode4Pattern.FindStringSubmatch(text); len(matches) > 0 {
-		// Check if it looks like a valid date code (80s-90s era ICs)
-		code := matches[1]
-		year := code[0:2]
-		week := code[2:4]
-		// Valid year range: 70-99 or 00-29 (1970-2029)
-		// Valid week range: 01-53
-		if (year >= "70" && year <= "99") || (year >= "00" && year <= "29") {
-			if week >= "01" && week <= "53" {
-				info.DateCode = code
-			}
-		}
+	// Any 4 consecutive digits is treated as a date code (YYWW format)
+	if matches := dateCode4Pattern.FindStringSubmatch(text); len(matches) > 0 {
+		info.DateCode = matches[1]
 	}
 
 	// Look for manufacturing locations (check longer patterns first to avoid partial matches)

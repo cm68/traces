@@ -2124,6 +2124,25 @@ type ComponentsPanel struct {
 	ocrTextEntry       *widget.Entry
 	correctedTextEntry *widget.Entry
 	ocrOrientation     *widget.RadioGroup
+	ocrTrainingLabel   *widget.Label
+}
+
+// updateOCRTrainingLabel updates the training status label with sample counts.
+func (cp *ComponentsPanel) updateOCRTrainingLabel() {
+	if cp.ocrTrainingLabel == nil {
+		return
+	}
+	if cp.state.GlobalOCRTraining == nil || len(cp.state.GlobalOCRTraining.Samples) == 0 {
+		cp.ocrTrainingLabel.SetText("No training data")
+		return
+	}
+	db := cp.state.GlobalOCRTraining
+	orientCounts := make(map[string]int)
+	for _, s := range db.Samples {
+		orientCounts[s.Orientation]++
+	}
+	cp.ocrTrainingLabel.SetText(fmt.Sprintf("Trained: %d samples (N:%d S:%d E:%d W:%d)",
+		len(db.Samples), orientCounts["N"], orientCounts["S"], orientCounts["E"], orientCounts["W"]))
 }
 
 // rebuildSortedIndices rebuilds the sorted indices using natural numeric sorting by component ID.
@@ -2489,6 +2508,9 @@ func NewComponentsPanel(state *app.State, canv *canvas.ImageCanvas) *ComponentsP
 		widget.NewLabel("Speed:"), cp.speedGradeEntry,
 	)
 
+	cp.ocrTrainingLabel = widget.NewLabel("")
+	cp.updateOCRTrainingLabel()
+
 	ocrControls := container.NewHBox(
 		ocrBtn, trainBtn,
 		widget.NewLabel("Dir:"), cp.ocrOrientation,
@@ -2508,6 +2530,7 @@ func NewComponentsPanel(state *app.State, canv *canvas.ImageCanvas) *ComponentsP
 		cp.descriptionEntry,
 		widget.NewSeparator(),
 		ocrControls,
+		cp.ocrTrainingLabel,
 		widget.NewLabel("Corrected:"),
 		cp.correctedTextEntry,
 		widget.NewLabel("OCR Result:"),
@@ -2843,8 +2866,13 @@ func (cp *ComponentsPanel) runOCR() {
 		params = cp.state.OCRLearnedParams.BestParams
 		paramsSource = fmt.Sprintf("project (%.0f%% avg)", cp.state.OCRLearnedParams.AvgScore*100)
 	} else if cp.state.GlobalOCRTraining != nil && len(cp.state.GlobalOCRTraining.Samples) >= 5 {
-		params = cp.state.GlobalOCRTraining.GetRecommendedParams()
-		paramsSource = fmt.Sprintf("global (%d samples)", len(cp.state.GlobalOCRTraining.Samples))
+		if orientParams, ok := cp.state.GlobalOCRTraining.GetParamsForOrientation(orientation); ok {
+			params = orientParams
+			paramsSource = fmt.Sprintf("global/%s (%d samples)", orientation, len(cp.state.GlobalOCRTraining.Samples))
+		} else {
+			params = cp.state.GlobalOCRTraining.GetRecommendedParams()
+			paramsSource = fmt.Sprintf("global (%d samples)", len(cp.state.GlobalOCRTraining.Samples))
+		}
 	} else {
 		params = ocr.DefaultOCRParams()
 	}
@@ -3054,6 +3082,7 @@ func (cp *ComponentsPanel) runOCRTraining() {
 	if bestScore >= 0.7 {
 		cp.state.AddOCRTrainingSample(groundTruth, bestText, bestScore, orientation, bestParams)
 		fmt.Printf("[OCR Train] Added to global training database\n")
+		cp.updateOCRTrainingLabel()
 	}
 
 	// Parse ground truth into form fields and component properties

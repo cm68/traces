@@ -943,6 +943,12 @@ func (db *GlobalTrainingDB) GetRecommendedParams() OCRParams {
 		params.AdaptiveC = 10
 	}
 
+	// Always apply CLAHE from training data - critical for all threshold methods
+	if params.CLAHEClipLimit == 0 && db.ParamStats.BestCLAHEClip > 0 {
+		params.CLAHEClipLimit = db.ParamStats.BestCLAHEClip
+		params.CLAHETileSize = db.ParamStats.BestCLAHETile
+	}
+
 	// Set scale
 	params.MinScaleDim = db.ParamStats.BestMinScale
 	if params.MinScaleDim == 0 {

@@ -172,6 +172,9 @@ func NewState() *State {
 		fmt.Printf("Warning: could not load global OCR training: %v\n", err)
 		globalOCR = ocr.NewGlobalTrainingDB()
 	}
+	if len(globalOCR.Samples) > 0 {
+		fmt.Print(globalOCR.Summary())
+	}
 
 	return &State{
 		BoardSpec:         board.S100Spec(),

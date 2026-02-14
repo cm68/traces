@@ -2690,6 +2690,28 @@ func (cp *ComponentsPanel) saveEditingComponent() {
 	// Update sticky orientation
 	cp.state.LastOCROrientation = cp.ocrOrientation.Selected
 
+	// Add corrected text as training sample if we have both OCR and corrected text
+	corrected := cp.correctedTextEntry.Text
+	ocrText := cp.ocrTextEntry.Text
+	orientation := cp.ocrOrientation.Selected
+	if strings.TrimSpace(corrected) != "" && strings.TrimSpace(ocrText) != "" {
+		score := ocr.TextSimilarity(ocrText, corrected)
+		// Use orientation-specific params if available, otherwise recommended
+		var params ocr.OCRParams
+		if cp.state.GlobalOCRTraining != nil {
+			if p, ok := cp.state.GlobalOCRTraining.GetParamsForOrientation(orientation); ok {
+				params = p
+			} else {
+				params = cp.state.GlobalOCRTraining.GetRecommendedParams()
+			}
+		} else {
+			params = ocr.DefaultOCRParams()
+		}
+		cp.state.AddOCRTrainingSample(corrected, ocrText, score, orientation, params)
+		cp.updateOCRTrainingLabel()
+		fmt.Printf("[Save] Added training sample: score=%.1f%% orientation=%s\n", score*100, orientation)
+	}
+
 	cp.state.SetModified(true)
 	cp.rebuildSortedIndices()
 	cp.list.Refresh()

@@ -2319,9 +2319,10 @@ func (r *focusableContainerRenderer) Objects() []fyne.CanvasObject {
 
 func (r *focusableContainerRenderer) Destroy() {}
 
-// tappableListItem is a label that supports right-click for deletion.
+// tappableListItem is a label that supports left-click selection and right-click for deletion.
 type tappableListItem struct {
 	widget.Label
+	onTapped     func()
 	onRightClick func()
 	onMouseIn    func()
 	onMouseOut   func()
@@ -2332,6 +2333,13 @@ func newTappableListItem(onRightClick func()) *tappableListItem {
 	item := &tappableListItem{onRightClick: onRightClick}
 	item.ExtendBaseWidget(item)
 	return item
+}
+
+// Tapped implements fyne.Tappable for left-click selection.
+func (t *tappableListItem) Tapped(_ *fyne.PointEvent) {
+	if t.onTapped != nil {
+		t.onTapped()
+	}
 }
 
 // TappedSecondary implements fyne.SecondaryTappable for right-click.
@@ -2405,8 +2413,12 @@ func NewComponentsPanel(state *app.State, canv *canvas.ImageCanvas) *ComponentsP
 						detail = comp.Package
 					}
 					item.SetText(fmt.Sprintf("%s%s %s", prefix, comp.ID, detail))
-					// Set up right-click edit handler for this item (use actual component index)
+					// Set up click handlers for this item (use actual component index)
 					actualIdx := compIdx
+					item.onTapped = func() {
+						cp.list.Select(id)
+						cp.showEditDialog(actualIdx)
+					}
 					item.onRightClick = func() {
 						cp.showEditDialog(actualIdx)
 					}

@@ -318,25 +318,28 @@ func (e *Engine) AnnealOCRParams(img gocv.Mat, groundTruth string, maxIterations
 	brightestPcts := []float64{3, 5, 7, 10, 15, 20, 25, 30, 40, 50}
 	minThresholds := []int{50, 80, 100, 120, 140, 160}
 
-	// ========== PHASE 1: Fixed thresholds (most direct for IC text) ==========
+	// ========== PHASE 1: Fixed thresholds with CLAHE (critical for IC text) ==========
 	// IC text is typically light markings on dark plastic
-	// Try many fixed threshold values
-	fmt.Println("  Phase 1: Fixed thresholds...")
+	// CLAHE is ESSENTIAL for enhancing subtle contrast before thresholding
+	fmt.Println("  Phase 1: CLAHE + Fixed thresholds...")
 
 	for _, thresh := range fixedThresholds {
 		for _, invert := range []bool{true, false} {
-			for _, scale := range scales {
-				for _, psm := range psmModes {
-					params := OCRParams{
-						UseOtsu:          false,
-						FixedThreshold:   thresh,
-						InvertPolarity:   invert,
-						MinScaleDim:      scale,
-						PSMMode:          psm,
-						CLAHEClipLimit:   0, // No CLAHE
-					}
-					if tryParams(params, fmt.Sprintf("fixed=%d inv=%v scale=%d psm=%d", thresh, invert, scale, psm)) {
-						goto done
+			for _, clip := range []float64{2.0, 3.0, 4.0} { // CLAHE clip limits
+				for _, scale := range scales {
+					for _, psm := range psmModes {
+						params := OCRParams{
+							UseOtsu:        false,
+							FixedThreshold: thresh,
+							InvertPolarity: invert,
+							MinScaleDim:    scale,
+							PSMMode:        psm,
+							CLAHEClipLimit: clip,
+							CLAHETileSize:  8,
+						}
+						if tryParams(params, fmt.Sprintf("fixed=%d clahe=%.1f inv=%v scale=%d psm=%d", thresh, clip, invert, scale, psm)) {
+							goto done
+						}
 					}
 				}
 			}

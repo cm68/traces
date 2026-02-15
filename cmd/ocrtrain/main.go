@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"image/png"
 	"os"
 	"path/filepath"
 	"sort"
@@ -201,16 +200,14 @@ func loadProject(path string) (*ProjectFile, error) {
 }
 
 func runTraining(components []*component.Component, frontImg, backImg image.Image, logoLib *logo.LogoLibrary, frontCrop, backCrop *CropBounds) []ComponentResult {
-	var results []ComponentResult
-	var mu sync.Mutex
+	results := make([]ComponentResult, len(components))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, *flagParallel)
+	var completed int64
+	var completedMu sync.Mutex
 
-	// Process each component
 	for i, comp := range components {
-		fmt.Printf("\n[%d/%d] Training component %s\n", i+1, len(components), comp.ID)
-		fmt.Printf("  Ground truth: %q\n", comp.CorrectedText)
-		fmt.Printf("  Stored orientation: %s\n", comp.OCROrientation)
-
-		// Select image and crop offset based on layer
+		// Prepare work item before spawning goroutine
 		img := frontImg
 		crop := frontCrop
 		if comp.Layer == pcbimage.SideBack {
@@ -218,11 +215,11 @@ func runTraining(components []*component.Component, frontImg, backImg image.Imag
 			crop = backCrop
 		}
 		if img == nil {
-			fmt.Printf("  ERROR: No image available for layer %v\n", comp.Layer)
+			fmt.Printf("[%d/%d] %s: ERROR no image for layer %v\n", i+1, len(components), comp.ID, comp.Layer)
+			results[i] = ComponentResult{Component: comp, GroundTruth: comp.CorrectedText}
 			continue
 		}
 
-		// Apply crop offset to bounds (component bounds are relative to cropped image)
 		bounds := comp.Bounds
 		if crop != nil {
 			bounds = geometry.Rect{
@@ -231,108 +228,86 @@ func runTraining(components []*component.Component, frontImg, backImg image.Imag
 				Width:  comp.Bounds.Width,
 				Height: comp.Bounds.Height,
 			}
-			if *flagVerbose {
-				fmt.Printf("  Bounds: (%.0f,%.0f) + crop(%.0f,%.0f) = (%.0f,%.0f) %.0fx%.0f\n",
-					comp.Bounds.X, comp.Bounds.Y, crop.X, crop.Y,
-					bounds.X, bounds.Y, bounds.Width, bounds.Height)
-			}
 		}
 
-		// Extract component region
 		cropped := extractRegion(img, bounds)
 		if cropped == nil {
-			fmt.Printf("  ERROR: Could not extract region\n")
+			fmt.Printf("[%d/%d] %s: ERROR could not extract region\n", i+1, len(components), comp.ID)
+			results[i] = ComponentResult{Component: comp, GroundTruth: comp.CorrectedText}
 			continue
 		}
 
-		// Save raw cropped region if debug enabled
-		if *flagDebugImg != "" {
-			rawPath := fmt.Sprintf("%s_%s_raw.png", *flagDebugImg, comp.ID)
-			if f, err := os.Create(rawPath); err == nil {
-				png.Encode(f, cropped)
-				f.Close()
-				fmt.Printf("  Saved raw crop: %s (%dx%d)\n", rawPath, cropped.Bounds().Dx(), cropped.Bounds().Dy())
-			}
-		}
+		wg.Add(1)
+		go func(idx int, comp *component.Component, cropped *image.RGBA) {
+			defer wg.Done()
+			sem <- struct{}{}        // acquire worker slot
+			defer func() { <-sem }() // release worker slot
 
-		compResult := ComponentResult{
-			Component:   comp,
-			GroundTruth: comp.CorrectedText,
-		}
+			fmt.Printf("[%d/%d] Training component %s (truth: %q)\n", idx+1, len(components), comp.ID, comp.CorrectedText)
 
-		// Test all orientations (or single if specified)
-		orientations := []string{"N", "S", "E", "W"}
-		if *flagOrientation != "" {
-			orientations = []string{*flagOrientation}
-		}
-
-		for _, orient := range orientations {
-			fmt.Printf("  Testing orientation %s...\n", orient)
-
-			// Test with and without logo masking
-			maskOptions := []bool{false}
-			if logoLib != nil && len(logoLib.Logos) > 0 {
-				maskOptions = []bool{false, true}
+			compResult := ComponentResult{
+				Component:   comp,
+				GroundTruth: comp.CorrectedText,
 			}
 
-			for _, maskLogos := range maskOptions {
-				// Logo detection must happen BEFORE rotation (like the UI does)
-				// Detect logos on unrotated image with orientation-based rotation
-				srcImg := cropped
-				if maskLogos {
-					srcImg = maskLogosInImage(cropped, logoLib, orient)
+			orientations := []string{"N", "S", "E", "W"}
+			if *flagOrientation != "" {
+				orientations = []string{*flagOrientation}
+			}
+
+			for _, orient := range orientations {
+				maskOptions := []bool{false}
+				if logoLib != nil && len(logoLib.Logos) > 0 {
+					maskOptions = []bool{false, true}
 				}
 
-				// Now rotate for OCR
-				rotated := rotateForOCR(srcImg, orient)
-				testImg := rotated
-
-				// Save debug image if requested
-				if *flagDebugImg != "" && !maskLogos {
-					debugPath := fmt.Sprintf("%s_%s_%s.png", *flagDebugImg, comp.ID, orient)
-					if f, err := os.Create(debugPath); err == nil {
-						png.Encode(f, testImg)
-						f.Close()
-						fmt.Printf("  Saved debug image: %s (%dx%d)\n", debugPath, testImg.Bounds().Dx(), testImg.Bounds().Dy())
+				for _, maskLogos := range maskOptions {
+					srcImg := cropped
+					if maskLogos {
+						srcImg = maskLogosInImage(cropped, logoLib, orient)
 					}
+
+					rotated := rotateForOCR(srcImg, orient)
+					mat := imageToMat(rotated)
+					if mat.Empty() {
+						continue
+					}
+
+					searchResults := runExhaustiveSearch(comp.ID, comp.CorrectedText, mat, orient, maskLogos)
+					compResult.Results = append(compResult.Results, searchResults...)
+					mat.Close()
 				}
+			}
 
-				// Convert to OpenCV format
-				mat := imageToMat(testImg)
-				if mat.Empty() {
-					continue
+			// Find best result
+			for j := range compResult.Results {
+				r := &compResult.Results[j]
+				if compResult.BestResult == nil || r.Score > compResult.BestResult.Score {
+					compResult.BestResult = r
 				}
-
-				// Run exhaustive parameter search
-				results := runExhaustiveSearch(comp.ID, comp.CorrectedText, mat, orient, maskLogos)
-
-				mu.Lock()
-				compResult.Results = append(compResult.Results, results...)
-				mu.Unlock()
-
-				mat.Close()
 			}
-		}
 
-		// Find best result
-		for i := range compResult.Results {
-			r := &compResult.Results[i]
-			if compResult.BestResult == nil || r.Score > compResult.BestResult.Score {
-				compResult.BestResult = r
+			results[idx] = compResult
+
+			completedMu.Lock()
+			completed++
+			done := completed
+			completedMu.Unlock()
+
+			if compResult.BestResult != nil {
+				fmt.Printf("[%d/%d done] %s: BEST score=%.1f%% orient=%s mask=%v -> %q\n",
+					done, len(components), comp.ID,
+					compResult.BestResult.Score*100,
+					compResult.BestResult.Strategy.Orientation,
+					compResult.BestResult.Strategy.MaskLogos,
+					compResult.BestResult.DetectedText)
+			} else {
+				fmt.Printf("[%d/%d done] %s: no results\n", done, len(components), comp.ID)
 			}
-		}
-
-		if compResult.BestResult != nil {
-			fmt.Printf("  BEST: score=%.1f%% orient=%s mask=%v -> %q\n",
-				compResult.BestResult.Score*100,
-				compResult.BestResult.Strategy.Orientation,
-				compResult.BestResult.Strategy.MaskLogos,
-				compResult.BestResult.DetectedText)
-		}
-
-		results = append(results, compResult)
+		}(i, comp, cropped)
 	}
 
+	wg.Wait()
 	return results
 }
 

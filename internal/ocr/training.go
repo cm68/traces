@@ -69,28 +69,6 @@ func DefaultOCRParams() OCRParams {
 	}
 }
 
-// TrainingSample holds a single OCR training example.
-type TrainingSample struct {
-	GroundTruth string    `json:"truth"`      // User-corrected text
-	Orientation string    `json:"orientation"` // N/S/E/W
-	BestParams  OCRParams `json:"params"`      // Best parameters found
-	BestScore   float64   `json:"score"`       // Best similarity score achieved
-}
-
-// LearnedParams holds accumulated OCR parameters learned from training samples.
-type LearnedParams struct {
-	Samples    []TrainingSample `json:"samples"`
-	BestParams OCRParams        `json:"best_params"`
-	AvgScore   float64          `json:"avg_score"`
-}
-
-// NewLearnedParams creates a new learned params store with defaults.
-func NewLearnedParams() *LearnedParams {
-	return &LearnedParams{
-		BestParams: DefaultOCRParams(),
-	}
-}
-
 // logoMarkerPattern matches <XX> style logo markers
 var logoMarkerPattern = regexp.MustCompile(`<[A-Z]{2,4}>`)
 
@@ -636,25 +614,6 @@ func findHistogramThreshold(gray gocv.Mat, brightestPct float64, minThreshold in
 	return threshold
 }
 
-// UpdateLearnedParams updates the learned parameters with a new training sample.
-func (lp *LearnedParams) UpdateLearnedParams(sample TrainingSample) {
-	lp.Samples = append(lp.Samples, sample)
-
-	// Update best params if this sample scored better than average
-	if len(lp.Samples) == 1 || sample.BestScore > lp.AvgScore {
-		lp.BestParams = sample.BestParams
-	}
-
-	// Recalculate average score
-	totalScore := 0.0
-	for _, s := range lp.Samples {
-		totalScore += s.BestScore
-	}
-	lp.AvgScore = totalScore / float64(len(lp.Samples))
-
-	fmt.Printf("OCR Training: %d samples, avg score=%.3f\n", len(lp.Samples), lp.AvgScore)
-}
-
 // =============================================================================
 // Global Shared Training Database
 // =============================================================================
@@ -738,6 +697,22 @@ func NewGlobalTrainingDB() *GlobalTrainingDB {
 func (db *GlobalTrainingDB) AddSample(sample GlobalTrainingSample) {
 	db.Samples = append(db.Samples, sample)
 	db.updateStats()
+}
+
+// PurgeLowScores removes all samples below the given score threshold and recalculates stats.
+func (db *GlobalTrainingDB) PurgeLowScores(minScore float64) int {
+	kept := db.Samples[:0]
+	for _, s := range db.Samples {
+		if s.Score >= minScore {
+			kept = append(kept, s)
+		}
+	}
+	removed := len(db.Samples) - len(kept)
+	db.Samples = kept
+	if removed > 0 {
+		db.updateStats()
+	}
+	return removed
 }
 
 // updateStats recalculates aggregate statistics from all samples.

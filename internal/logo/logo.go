@@ -553,60 +553,95 @@ func (l *Logo) ToScaledImage(scale int) *image.Gray {
 	return img
 }
 
+// findFirstSet returns the (x, y) position of the first set bit scanning row-major.
+func (l *Logo) findFirstSet() (int, int, bool) {
+	for y := 0; y < l.Height; y++ {
+		for x := 0; x < l.Width; x++ {
+			if l.GetBit(x, y) {
+				return x, y, true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
 // Match compares this logo against another and returns a similarity score (0-1).
+// Aligns on the first set bit in each bitmap so small translations don't kill the score.
 // Uses a weighted combination of pixel matching and edge matching for robustness.
 func (l *Logo) Match(other *Logo) float64 {
 	if l.Width != other.Width || l.Height != other.Height {
-		// Different sizes - would need resampling
 		return 0
 	}
 
-	// Pixel-wise matching
-	matching := 0
-	total := l.Width * l.Height
+	// Align on first set bit in each bitmap
+	lx, ly, lFound := l.findFirstSet()
+	ox, oy, oFound := other.findFirstSet()
 
-	for y := 0; y < l.Height; y++ {
-		for x := 0; x < l.Width; x++ {
-			if l.GetBit(x, y) == other.GetBit(x, y) {
-				matching++
-			}
-		}
+	if !lFound && !oFound {
+		return 1.0 // Both empty
 	}
-	pixelScore := float64(matching) / float64(total)
+	if !lFound || !oFound {
+		return 0
+	}
 
-	// Edge matching - compare horizontal and vertical transitions
-	// This is more robust to threshold variations
+	dx := ox - lx
+	dy := oy - ly
+
+	// Pixel-wise matching over the overlapping region
+	matching := 0
+	total := 0
 	edgeMatching := 0
 	edgeTotal := 0
 
-	// Horizontal edges
 	for y := 0; y < l.Height; y++ {
-		for x := 0; x < l.Width-1; x++ {
-			lEdge := l.GetBit(x, y) != l.GetBit(x+1, y)
-			oEdge := other.GetBit(x, y) != other.GetBit(x+1, y)
-			if lEdge || oEdge {
-				edgeTotal++
-				if lEdge == oEdge {
-					edgeMatching++
-				}
-			}
+		oy2 := y + dy
+		if oy2 < 0 || oy2 >= l.Height {
+			continue
 		}
-	}
-
-	// Vertical edges
-	for y := 0; y < l.Height-1; y++ {
 		for x := 0; x < l.Width; x++ {
-			lEdge := l.GetBit(x, y) != l.GetBit(x, y+1)
-			oEdge := other.GetBit(x, y) != other.GetBit(x, y+1)
-			if lEdge || oEdge {
-				edgeTotal++
-				if lEdge == oEdge {
-					edgeMatching++
+			ox2 := x + dx
+			if ox2 < 0 || ox2 >= l.Width {
+				continue
+			}
+
+			lBit := l.GetBit(x, y)
+			oBit := other.GetBit(ox2, oy2)
+			total++
+			if lBit == oBit {
+				matching++
+			}
+
+			// Horizontal edge
+			if x+1 < l.Width && ox2+1 < l.Width {
+				lEdge := lBit != l.GetBit(x+1, y)
+				oEdge := oBit != other.GetBit(ox2+1, oy2)
+				if lEdge || oEdge {
+					edgeTotal++
+					if lEdge == oEdge {
+						edgeMatching++
+					}
+				}
+			}
+
+			// Vertical edge
+			if y+1 < l.Height && oy2+1 < l.Height {
+				lEdge := lBit != l.GetBit(x, y+1)
+				oEdge := oBit != other.GetBit(ox2, oy2+1)
+				if lEdge || oEdge {
+					edgeTotal++
+					if lEdge == oEdge {
+						edgeMatching++
+					}
 				}
 			}
 		}
 	}
 
+	if total == 0 {
+		return 0
+	}
+
+	pixelScore := float64(matching) / float64(total)
 	edgeScore := 1.0
 	if edgeTotal > 0 {
 		edgeScore = float64(edgeMatching) / float64(edgeTotal)
@@ -815,42 +850,67 @@ func (qi *quantizedImage) getWindow(x, y, w, h int) []byte {
 	return bits
 }
 
-// matchBits compares two packed bitmaps and returns similarity score.
-// Uses popcount for fast XOR comparison.
+// findFirstSetBit finds the (x, y) of the first set bit in a packed bitmap (row-major).
+func findFirstSetBit(bits []byte, width, height int) (int, int, bool) {
+	total := width * height
+	for i := 0; i < total; i++ {
+		if (bits[i/8] & (1 << (7 - i%8))) != 0 {
+			return i % width, i / width, true
+		}
+	}
+	return 0, 0, false
+}
+
+// getBitPacked returns the bit value at (x, y) in a packed bitmap.
+func getBitPacked(bits []byte, x, y, width int) bool {
+	idx := y*width + x
+	return (bits[idx/8] & (1 << (7 - idx%8))) != 0
+}
+
+// matchBits compares two packed bitmaps by aligning on their first set bits.
+// This makes the comparison translation-invariant within the window.
 func matchBits(a, b []byte, width, height int) float64 {
 	if len(a) != len(b) {
 		return 0
 	}
 
-	total := width * height
-	matching := 0
+	ax, ay, aFound := findFirstSetBit(a, width, height)
+	bx, by, bFound := findFirstSetBit(b, width, height)
 
-	// Count matching bits using XOR and popcount
-	for i := 0; i < len(a); i++ {
-		xored := a[i] ^ b[i]
-		// Count zeros (matching bits) = 8 - popcount(xor)
-		matching += 8 - popcount(xored)
+	if !aFound && !bFound {
+		return 1.0
+	}
+	if !aFound || !bFound {
+		return 0
 	}
 
-	// Adjust for padding bits in last byte
-	padding := len(a)*8 - total
-	matching -= padding // Remove padding contribution
+	dx := bx - ax
+	dy := by - ay
+
+	matching := 0
+	total := 0
+
+	for y := 0; y < height; y++ {
+		by2 := y + dy
+		if by2 < 0 || by2 >= height {
+			continue
+		}
+		for x := 0; x < width; x++ {
+			bx2 := x + dx
+			if bx2 < 0 || bx2 >= width {
+				continue
+			}
+			total++
+			if getBitPacked(a, x, y, width) == getBitPacked(b, bx2, by2, width) {
+				matching++
+			}
+		}
+	}
 
 	if total == 0 {
 		return 0
 	}
 	return float64(matching) / float64(total)
-}
-
-// popcount returns the number of set bits in a byte.
-func popcount(b byte) int {
-	// Brian Kernighan's algorithm
-	count := 0
-	for b != 0 {
-		b &= b - 1
-		count++
-	}
-	return count
 }
 
 // DetectLogos searches for logo templates in an image using fast pre-quantized matching.

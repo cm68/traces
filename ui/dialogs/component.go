@@ -45,10 +45,6 @@ type ComponentEditDialog struct {
 	// OCR orientation selector (N/S/E/W - indicates where text bottom is)
 	ocrOrientation *widget.RadioGroup
 
-	// OCR training
-	learnedParams   *ocr.LearnedParams
-	onParamsUpdated func(*ocr.LearnedParams) // Callback when params are updated
-
 	// Default orientation (sticky from last use)
 	defaultOrientation   string
 	onOrientationChanged func(string) // Callback when orientation changes
@@ -71,12 +67,6 @@ func NewComponentEditDialog(comp *component.Component, window fyne.Window, img g
 		onSave:   onSave,
 		onDelete: onDelete,
 	}
-}
-
-// SetOCRTraining sets the OCR training params and callback for parameter updates.
-func (d *ComponentEditDialog) SetOCRTraining(params *ocr.LearnedParams, onUpdate func(*ocr.LearnedParams)) {
-	d.learnedParams = params
-	d.onParamsUpdated = onUpdate
 }
 
 // SetDefaultOrientation sets the default OCR orientation and a callback for when it changes.
@@ -387,15 +377,8 @@ func (d *ComponentEditDialog) runOCR() {
 
 	var text string
 
-	// Use learned params if available and they have good training data
-	if d.learnedParams != nil && len(d.learnedParams.Samples) > 0 && d.learnedParams.AvgScore > 0.5 {
-		fmt.Printf("[OCR] Using learned params (avg score %.2f from %d samples)\n",
-			d.learnedParams.AvgScore, len(d.learnedParams.Samples))
-		text, err = engine.RecognizeWithParams(bgr, d.learnedParams.BestParams)
-	} else {
-		fmt.Println("[OCR] Using default OCR params...")
-		text, err = engine.RecognizeImage(bgr)
-	}
+	fmt.Println("[OCR] Using default OCR params...")
+	text, err = engine.RecognizeImage(bgr)
 	fmt.Printf("[OCR] Initial OCR complete, text length=%d\n", len(text))
 
 	if err != nil {
@@ -617,29 +600,13 @@ func (d *ComponentEditDialog) runOCRTraining() {
 	fmt.Printf("OCR Training: starting annealing for %s (ground truth: %q)\n", d.comp.ID, groundTruth)
 
 	// Run annealing - try up to 500 parameter combinations
-	bestParams, bestScore, bestText := engine.AnnealOCRParams(bgr, groundTruth, 500)
+	_, bestScore, bestText := engine.AnnealOCRParams(bgr, groundTruth, 500)
 
 	fmt.Printf("OCR Training: best score=%.3f text=%q\n", bestScore, bestText)
 
 	// Update the OCR text field with the best result
 	d.ocrTextEntry.SetText(bestText)
 	d.comp.OCRText = bestText
-
-	// Save the training sample to learned params
-	if d.learnedParams != nil {
-		sample := ocr.TrainingSample{
-			GroundTruth: groundTruth,
-			Orientation: orientation,
-			BestParams:  bestParams,
-			BestScore:   bestScore,
-		}
-		d.learnedParams.UpdateLearnedParams(sample)
-
-		// Notify that params were updated
-		if d.onParamsUpdated != nil {
-			d.onParamsUpdated(d.learnedParams)
-		}
-	}
 
 	// Parse the corrected text (ground truth) into form fields
 	info := parseComponentInfo(groundTruth)

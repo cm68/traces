@@ -2719,9 +2719,13 @@ func (cp *ComponentsPanel) saveEditingComponent() {
 		} else {
 			params = ocr.DefaultOCRParams()
 		}
-		cp.state.AddOCRTrainingSample(corrected, ocrText, score, orientation, params)
-		cp.updateOCRTrainingLabel()
-		fmt.Printf("[Save] Added training sample: score=%.1f%% orientation=%s\n", score*100, orientation)
+		if score >= 0.7 {
+			cp.state.AddOCRTrainingSample(corrected, ocrText, score, orientation, params)
+			cp.updateOCRTrainingLabel()
+			fmt.Printf("[Save] Added training sample: score=%.1f%% orientation=%s\n", score*100, orientation)
+		} else {
+			fmt.Printf("[Save] Score too low for training: %.1f%% orientation=%s\n", score*100, orientation)
+		}
 	}
 
 	cp.state.SetModified(true)
@@ -2889,17 +2893,13 @@ func (cp *ComponentsPanel) runOCR() {
 	defer engine.Close()
 
 	// Run OCR - use best available params:
-	// 1. Per-project learned params (if good enough)
-	// 2. Global training database params
-	// 3. Default params
+	// 1. Global training database params (orientation-specific, then generic)
+	// 2. Default params
 	var text string
 	var params ocr.OCRParams
 	paramsSource := "default"
 
-	if cp.state.OCRLearnedParams != nil && len(cp.state.OCRLearnedParams.Samples) > 0 && cp.state.OCRLearnedParams.AvgScore > 0.5 {
-		params = cp.state.OCRLearnedParams.BestParams
-		paramsSource = fmt.Sprintf("project (%.0f%% avg)", cp.state.OCRLearnedParams.AvgScore*100)
-	} else if cp.state.GlobalOCRTraining != nil && len(cp.state.GlobalOCRTraining.Samples) >= 5 {
+	if cp.state.GlobalOCRTraining != nil && len(cp.state.GlobalOCRTraining.Samples) >= 5 {
 		if orientParams, ok := cp.state.GlobalOCRTraining.GetParamsForOrientation(orientation); ok {
 			params = orientParams
 			paramsSource = fmt.Sprintf("global/%s (%d samples)", orientation, len(cp.state.GlobalOCRTraining.Samples))
@@ -3023,6 +3023,7 @@ func (cp *ComponentsPanel) runOCRWithHistogramThreshold(bgr gocv.Mat, engine *oc
 }
 
 // runOCRTraining runs parameter annealing to find the best OCR settings.
+// Runs in a background goroutine so the UI stays responsive.
 func (cp *ComponentsPanel) runOCRTraining() {
 	if cp.editingComp == nil {
 		fmt.Println("[OCR Train] No component selected")
@@ -3073,51 +3074,55 @@ func (cp *ComponentsPanel) runOCRTraining() {
 	logoRotation := orientationToRotation(orientation)
 	cp.trainLogoDetection(cropped, w, h, groundTruth, logoRotation)
 
-	// Rotate for OCR
-	rotated := rotateForOCR(cropped, orientation)
+	// Capture references needed for the goroutine
+	comp := cp.editingComp
+	compID := comp.ID
 
-	// Convert to gocv.Mat
-	rotBounds := rotated.Bounds()
-	mat, err := gocv.NewMatFromBytes(rotBounds.Dy(), rotBounds.Dx(), gocv.MatTypeCV8UC4, rotated.Pix)
-	if err != nil {
-		return
-	}
-	defer mat.Close()
+	fmt.Printf("[OCR Train] Starting background training for %s (orientation %s)...\n", compID, orientation)
 
-	bgr := gocv.NewMat()
-	defer bgr.Close()
-	gocv.CvtColor(mat, &bgr, gocv.ColorRGBAToBGR)
+	go func() {
+		// Rotate for OCR
+		rotated := rotateForOCR(cropped, orientation)
 
-	engine, err := ocr.NewEngine()
-	if err != nil {
-		return
-	}
-	defer engine.Close()
-
-	// Run parameter search
-	bestParams, bestScore, bestText := engine.AnnealOCRParams(bgr, groundTruth, 5000)
-	fmt.Printf("[OCR Train] Best score: %.1f%% text: %s\n", bestScore*100, bestText)
-
-	// Update per-project learned params
-	if cp.state.OCRLearnedParams == nil {
-		cp.state.OCRLearnedParams = &ocr.LearnedParams{}
-	}
-	if bestScore > 0.3 {
-		cp.state.OCRLearnedParams.BestParams = bestParams
-		sample := ocr.TrainingSample{
-			GroundTruth: groundTruth,
-			BestScore:   bestScore,
+		// Convert to gocv.Mat
+		rotBounds := rotated.Bounds()
+		mat, err := gocv.NewMatFromBytes(rotBounds.Dy(), rotBounds.Dx(), gocv.MatTypeCV8UC4, rotated.Pix)
+		if err != nil {
+			fmt.Printf("[OCR Train] %s: failed to convert image: %v\n", compID, err)
+			return
 		}
-		cp.state.OCRLearnedParams.UpdateLearnedParams(sample)
-		cp.state.SetModified(true)
-	}
+		defer mat.Close()
 
-	// Save to global training database if good enough (score >= 0.7)
-	if bestScore >= 0.7 {
-		cp.state.AddOCRTrainingSample(groundTruth, bestText, bestScore, orientation, bestParams)
-		fmt.Printf("[OCR Train] Added to global training database\n")
+		bgr := gocv.NewMat()
+		defer bgr.Close()
+		gocv.CvtColor(mat, &bgr, gocv.ColorRGBAToBGR)
+
+		engine, err := ocr.NewEngine()
+		if err != nil {
+			fmt.Printf("[OCR Train] %s: failed to create engine: %v\n", compID, err)
+			return
+		}
+		defer engine.Close()
+
+		// Run parameter search
+		bestParams, bestScore, bestText := engine.AnnealOCRParams(bgr, groundTruth, 5000)
+		fmt.Printf("[OCR Train] %s: score=%.1f%% text=%s\n", compID, bestScore*100, bestText)
+
+		// Save to global training database if good enough (score >= 0.7)
+		if bestScore >= 0.7 {
+			cp.state.AddOCRTrainingSample(groundTruth, bestText, bestScore, orientation, bestParams)
+			fmt.Printf("[OCR Train] %s: added to global training database\n", compID)
+		}
+
+		// Update UI on main thread — only if we're still editing the same component
 		cp.updateOCRTrainingLabel()
-	}
+		if cp.editingComp == comp {
+			cp.ocrTextEntry.SetText(bestText)
+			comp.OCRText = bestText
+		}
+
+		fmt.Printf("[OCR Train] %s: complete\n", compID)
+	}()
 
 	// Parse ground truth into form fields and component properties
 	info := parseComponentInfo(groundTruth)

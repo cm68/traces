@@ -105,9 +105,6 @@ type State struct {
 	// Via training set for machine learning
 	ViaTrainingSet *via.TrainingSet
 
-	// OCR learned parameters from user corrections (per-project)
-	OCRLearnedParams *ocr.LearnedParams
-
 	// Global OCR training database (shared across all projects)
 	GlobalOCRTraining *ocr.GlobalTrainingDB
 
@@ -173,6 +170,11 @@ func NewState() *State {
 		globalOCR = ocr.NewGlobalTrainingDB()
 	}
 	if len(globalOCR.Samples) > 0 {
+		// Purge any low-quality samples that shouldn't be in the DB
+		if removed := globalOCR.PurgeLowScores(0.7); removed > 0 {
+			fmt.Printf("Purged %d low-score OCR training samples\n", removed)
+			ocr.SaveGlobalTraining(globalOCR)
+		}
 		fmt.Print(globalOCR.Summary())
 	}
 
@@ -180,7 +182,6 @@ func NewState() *State {
 		BoardSpec:         board.S100Spec(),
 		FeaturesLayer:     features.NewDetectedFeaturesLayer(),
 		ViaTrainingSet:    via.NewTrainingSet(),
-		OCRLearnedParams:  ocr.NewLearnedParams(),
 		GlobalOCRTraining: globalOCR,
 		LogoLibrary:       logoLib,
 		BoardDefinition:   connector.S100Definition(),
@@ -457,11 +458,6 @@ func (s *State) LoadProject(path string) error {
 		s.Components = proj.Components
 	}
 
-	// Restore OCR learned parameters
-	if proj.OCRLearnedParams != nil && len(proj.OCRLearnedParams.Samples) > 0 {
-		s.OCRLearnedParams = proj.OCRLearnedParams
-	}
-
 	// Logo library is now loaded from shared preferences, not project file
 	// Legacy project files with logos are ignored - logos are shared across all projects
 	s.mu.Unlock()
@@ -551,11 +547,6 @@ func (s *State) SaveProject(path string) error {
 	// Serialize user-designated components
 	if len(s.Components) > 0 {
 		proj.Components = s.Components
-	}
-
-	// Serialize OCR learned parameters
-	if s.OCRLearnedParams != nil && len(s.OCRLearnedParams.Samples) > 0 {
-		proj.OCRLearnedParams = s.OCRLearnedParams
 	}
 
 	// Logo library is saved to shared preferences, not project file
@@ -1020,9 +1011,6 @@ type ProjectFile struct {
 
 	// User-designated components (v5+)
 	Components []*component.Component `json:"components,omitempty"`
-
-	// OCR learned parameters (v6+)
-	OCRLearnedParams *ocr.LearnedParams `json:"ocr_params,omitempty"`
 
 	// Logo library (v7+) - manufacturer mark templates
 	LogoLibrary *logo.LogoLibrary `json:"logo_library,omitempty"`

@@ -92,13 +92,17 @@ func NewSidePanel(state *app.State, canvas *canvas.ImageCanvas) *SidePanel {
 	// Create container showing import panel by default
 	sp.container = container.NewStack(sp.importPanel.Container())
 
-	// Disable non-alignment panels until normalization is done
-	if !state.HasNormalizedImages() {
-		sp.SetPanelEnabled(PanelComponents, false)
-		sp.SetPanelEnabled(PanelTraces, false)
-		sp.SetPanelEnabled(PanelProperties, false)
-		sp.SetPanelEnabled(PanelLogos, false)
-	}
+	// Start with non-alignment panels disabled
+	sp.SetPanelEnabled(PanelComponents, false)
+	sp.SetPanelEnabled(PanelTraces, false)
+	sp.SetPanelEnabled(PanelProperties, false)
+	sp.SetPanelEnabled(PanelLogos, false)
+
+	// After project load, enable panels if normalized images exist
+	state.On(app.EventProjectLoaded, func(_ interface{}) {
+		sp.updatePanelEnableState()
+		sp.importPanel.updateAlignmentUI()
+	})
 
 	return sp
 }
@@ -231,6 +235,16 @@ func (sp *SidePanel) AutoDetectAndAlign() {
 // SetTracesEnabled enables or disables the traces panel interactive widgets.
 func (sp *SidePanel) SetTracesEnabled(enabled bool) {
 	sp.tracesPanel.SetEnabled(enabled)
+}
+
+// updatePanelEnableState enables or disables panels based on whether
+// normalized images exist. Called after project load and after Save Aligned.
+func (sp *SidePanel) updatePanelEnableState() {
+	enabled := sp.state.HasNormalizedImages()
+	sp.SetPanelEnabled(PanelComponents, enabled)
+	sp.SetPanelEnabled(PanelTraces, enabled)
+	sp.SetPanelEnabled(PanelProperties, enabled)
+	sp.SetPanelEnabled(PanelLogos, enabled)
 }
 
 // SetPanelEnabled enables or disables switching to a specific panel.
@@ -527,6 +541,18 @@ func (ip *ImportPanel) SetWindow(w fyne.Window) {
 }
 
 // RefreshLabels updates all labels from current state.
+// updateAlignmentUI shows Re-align button or alignment controls
+// based on whether normalized images exist.
+func (ip *ImportPanel) updateAlignmentUI() {
+	if ip.state.HasNormalizedImages() {
+		ip.alignControls.Hide()
+		ip.realignBtn.Show()
+	} else {
+		ip.alignControls.Show()
+		ip.realignBtn.Hide()
+	}
+}
+
 func (ip *ImportPanel) RefreshLabels() {
 	ip.updateBoardSpecInfo()
 	ip.updateCropLabel()
@@ -1935,20 +1961,16 @@ func (ip *ImportPanel) onSaveAligned() {
 
 		ip.alignStatus.SetText("Aligned images saved")
 
-		// Hide alignment controls, show Re-align button
-		ip.alignControls.Hide()
-		ip.realignBtn.Show()
-
-		// Enable other panels
+		// Update UI state
+		ip.updateAlignmentUI()
 		if ip.sidePanel != nil {
-			ip.sidePanel.SetPanelEnabled(PanelComponents, true)
-			ip.sidePanel.SetPanelEnabled(PanelTraces, true)
-			ip.sidePanel.SetPanelEnabled(PanelProperties, true)
-			ip.sidePanel.SetPanelEnabled(PanelLogos, true)
+			ip.sidePanel.updatePanelEnableState()
 		}
 
-		// Fire event so mainwindow can enable menu items
+		// Fire events so mainwindow can enable menu items and
+		// component overlay gets refreshed
 		ip.state.Emit(app.EventNormalizationComplete, nil)
+		ip.state.Emit(app.EventComponentsChanged, nil)
 
 		// Refresh canvas with normalized images
 		if ip.sidePanel != nil {
@@ -1980,6 +2002,10 @@ func (ip *ImportPanel) onRealign() {
 			}
 		}
 
+		// Clear normalized state so HasNormalizedImages() returns false
+		ip.state.FrontNormalizedPath = ""
+		ip.state.BackNormalizedPath = ""
+
 		// Restore manual transforms from state onto layers
 		// (LoadFrontImage/LoadBackImage don't set manual transforms, but the state still has them)
 		if ip.state.FrontImage != nil {
@@ -2008,15 +2034,11 @@ func (ip *ImportPanel) onRealign() {
 		}
 
 		// Show alignment controls, hide Re-align button
-		ip.alignControls.Show()
-		ip.realignBtn.Hide()
+		ip.updateAlignmentUI()
 
 		// Disable other panels until re-aligned
 		if ip.sidePanel != nil {
-			ip.sidePanel.SetPanelEnabled(PanelComponents, false)
-			ip.sidePanel.SetPanelEnabled(PanelTraces, false)
-			ip.sidePanel.SetPanelEnabled(PanelProperties, false)
-			ip.sidePanel.SetPanelEnabled(PanelLogos, false)
+			ip.sidePanel.updatePanelEnableState()
 		}
 
 		ip.alignStatus.SetText("Re-alignment mode - adjust and Save Aligned")
@@ -2939,7 +2961,6 @@ func (cp *ComponentsPanel) saveEditingComponent() {
 		}
 	}
 
-	cp.state.SetModified(true)
 	cp.rebuildSortedIndices()
 	cp.list.Refresh()
 	cp.updateComponentOverlay()
@@ -2950,6 +2971,15 @@ func (cp *ComponentsPanel) saveEditingComponent() {
 
 	// Save split offset while we're saving
 	cp.SaveSplitOffset()
+
+	// Persist to disk
+	if cp.state.ProjectPath != "" {
+		if err := cp.state.SaveProject(cp.state.ProjectPath); err != nil {
+			fmt.Printf("Error saving project: %v\n", err)
+		}
+	} else {
+		cp.state.SetModified(true)
+	}
 
 	fmt.Printf("Saved component %s\n", cp.editingComp.ID)
 }
@@ -3063,30 +3093,48 @@ func (cp *ComponentsPanel) runOCR() {
 	orientation := cp.ocrOrientation.Selected
 	logoRotation := orientationToRotation(orientation)
 
-	// Detect logos
+	// Rotate for OCR first (preview shows the rotated view)
+	rotated := rotateForOCR(cropped, orientation)
+
+	// Create a copy for logo masking (keep rotated as the clean original)
+	rotBounds := rotated.Bounds()
+	masked := image.NewRGBA(rotBounds)
+	copy(masked.Pix, rotated.Pix)
+
+	// Detect logos on the masked copy and fill them
 	var detectedLogos []logo.LogoMatch
 	if cp.state.LogoLibrary != nil && len(cp.state.LogoLibrary.Logos) > 0 {
-		searchBounds := geometry.RectInt{X: 0, Y: 0, Width: w, Height: h}
-		detectedLogos = cp.state.LogoLibrary.DetectLogos(cropped, searchBounds, 0.75, logoRotation)
+		mw, mh := rotBounds.Dx(), rotBounds.Dy()
+		searchBounds := geometry.RectInt{X: 0, Y: 0, Width: mw, Height: mh}
+		detectedLogos = cp.state.LogoLibrary.DetectLogos(masked, searchBounds, 0.75, logoRotation)
 		if len(detectedLogos) > 0 {
 			fmt.Printf("[OCR] Detected %d logos\n", len(detectedLogos))
-			// Mask logo regions
-			bgColor := calculateBackgroundColor(cropped)
+			bgColor := calculateBackgroundColor(masked)
+			compArea := mw * mh
 			for _, m := range detectedLogos {
-				maskRegion(cropped, m.Bounds, bgColor)
+				logoArea := m.Bounds.Width * m.Bounds.Height
+				pct := logoArea * 100 / compArea
+				fmt.Printf("[OCR Logo] name=%q score=%.3f rot=%d scale=%.2f bounds=(%d,%d %dx%d) area=%d%% of component\n",
+					m.Logo.Name, m.Score, m.Rotation, m.ScaleFactor,
+					m.Bounds.X, m.Bounds.Y, m.Bounds.Width, m.Bounds.Height, pct)
+				if logoArea > compArea/4 {
+					fmt.Printf("[OCR Logo] SKIP: too large (%d%% > 25%%)\n", pct)
+					continue
+				}
+				fmt.Printf("[OCR Logo] MASK: filling (%d,%d)-(%d,%d) with bg=(%d,%d,%d)\n",
+					m.Bounds.X, m.Bounds.Y,
+					m.Bounds.X+m.Bounds.Width, m.Bounds.Y+m.Bounds.Height,
+					bgColor.R, bgColor.G, bgColor.B)
+				maskRegion(masked, m.Bounds, bgColor)
 			}
 		}
 	}
 
-	// Rotate for OCR
-	rotated := rotateForOCR(cropped, orientation)
+	// Show OCR preview dialog: raw → B&W → logo-masked
+	cp.showOCRPreview(rotated, masked, orientation)
 
-	// Show OCR preview dialog with color and B&W views
-	cp.showOCRPreview(rotated, orientation)
-
-	// Convert to gocv.Mat
-	rotBounds := rotated.Bounds()
-	mat, err := gocv.NewMatFromBytes(rotBounds.Dy(), rotBounds.Dx(), gocv.MatTypeCV8UC4, rotated.Pix)
+	// OCR runs on the masked image (logos removed)
+	mat, err := gocv.NewMatFromBytes(rotBounds.Dy(), rotBounds.Dx(), gocv.MatTypeCV8UC4, masked.Pix)
 	if err != nil {
 		fmt.Printf("[OCR] Mat conversion failed: %v\n", err)
 		return
@@ -3183,105 +3231,139 @@ func (cp *ComponentsPanel) runOCR() {
 	fmt.Printf("[OCR] Complete: %s\n", text)
 }
 
-// showOCRPreview displays a dialog with the rotated component region in color and B&W.
-func (cp *ComponentsPanel) showOCRPreview(rotated *image.RGBA, orientation string) {
-	bounds := rotated.Bounds()
-	w, h := bounds.Dx(), bounds.Dy()
-	fmt.Printf("[OCR Preview] rotated image: %dx%d orientation=%s\n", w, h, orientation)
+// showOCRPreview displays a dialog with three processing phases:
+// 1. Raw color input (rotated), 2. B&W Otsu threshold, 3. Logo-masked.
+func (cp *ComponentsPanel) showOCRPreview(raw, masked *image.RGBA, orientation string) {
+	w, h := raw.Bounds().Dx(), raw.Bounds().Dy()
+	fmt.Printf("[OCR Preview] %dx%d orientation=%s\n", w, h, orientation)
 
-	// Build grayscale + histogram while copying pixels into NRGBA (Fyne's native format)
-	gray := make([]uint8, w*h)
-	var hist [256]int
-	scaled := image.NewNRGBA(image.Rect(0, 0, w*2, h*2))
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			c := rotated.At(x, y)
-			r, g, b, a := c.RGBA()
-			nc := color.NRGBA{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8), uint8(a >> 8)}
-
-			// 2x scale
-			scaled.SetNRGBA(x*2, y*2, nc)
-			scaled.SetNRGBA(x*2+1, y*2, nc)
-			scaled.SetNRGBA(x*2, y*2+1, nc)
-			scaled.SetNRGBA(x*2+1, y*2+1, nc)
-
-			// Grayscale for thresholding
-			gv := uint8((299*uint32(nc.R) + 587*uint32(nc.G) + 114*uint32(nc.B)) / 1000)
-			gray[y*w+x] = gv
-			hist[gv]++
-		}
-	}
-
-	// Otsu threshold
-	total := w * h
-	var sum float64
-	for i := 0; i < 256; i++ {
-		sum += float64(i) * float64(hist[i])
-	}
-	var sumB float64
-	var wB, wF int
-	var maxVar float64
-	threshold := uint8(128)
-	for t := 0; t < 256; t++ {
-		wB += hist[t]
-		if wB == 0 {
-			continue
-		}
-		wF = total - wB
-		if wF == 0 {
-			break
-		}
-		sumB += float64(t) * float64(hist[t])
-		mB := sumB / float64(wB)
-		mF := (sum - sumB) / float64(wF)
-		variance := float64(wB) * float64(wF) * (mB - mF) * (mB - mF)
-		if variance > maxVar {
-			maxVar = variance
-			threshold = uint8(t)
-		}
-	}
-	fmt.Printf("[OCR Preview] Otsu threshold: %d\n", threshold)
-
-	// Create B&W image at 2x scale using NRGBA
-	bw := image.NewNRGBA(image.Rect(0, 0, w*2, h*2))
-	white := color.NRGBA{255, 255, 255, 255}
-	black := color.NRGBA{0, 0, 0, 255}
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			c := white
-			if gray[y*w+x] <= threshold {
-				c = black
+	// Helper: scale an RGBA image to 2x NRGBA for display
+	scale2x := func(src *image.RGBA) *image.NRGBA {
+		sw, sh := src.Bounds().Dx(), src.Bounds().Dy()
+		out := image.NewNRGBA(image.Rect(0, 0, sw*2, sh*2))
+		srcPix := src.Pix
+		srcStride := src.Stride
+		dstPix := out.Pix
+		dstStride := out.Stride
+		for y := 0; y < sh; y++ {
+			for x := 0; x < sw; x++ {
+				si := y*srcStride + x*4
+				r, g, b, a := srcPix[si], srcPix[si+1], srcPix[si+2], srcPix[si+3]
+				for _, dy := range [2]int{0, 1} {
+					for _, dx := range [2]int{0, 1} {
+						di := (y*2+dy)*dstStride + (x*2+dx)*4
+						dstPix[di] = r
+						dstPix[di+1] = g
+						dstPix[di+2] = b
+						dstPix[di+3] = a
+					}
+				}
 			}
-			bw.SetNRGBA(x*2, y*2, c)
-			bw.SetNRGBA(x*2+1, y*2, c)
-			bw.SetNRGBA(x*2, y*2+1, c)
-			bw.SetNRGBA(x*2+1, y*2+1, c)
 		}
+		return out
 	}
 
-	// Create Fyne image widgets using NRGBA (Fyne's native format)
-	colorImg := fynecanvas.NewImageFromImage(scaled)
-	colorImg.FillMode = fynecanvas.ImageFillOriginal
-	colorImg.ScaleMode = fynecanvas.ImageScalePixels
+	// Helper: Otsu threshold an RGBA image to 2x B&W NRGBA
+	otsuBW := func(src *image.RGBA) (*image.NRGBA, uint8) {
+		sw, sh := src.Bounds().Dx(), src.Bounds().Dy()
+		srcPix := src.Pix
+		srcStride := src.Stride
 
-	bwImg := fynecanvas.NewImageFromImage(bw)
-	bwImg.FillMode = fynecanvas.ImageFillOriginal
-	bwImg.ScaleMode = fynecanvas.ImageScalePixels
+		gray := make([]uint8, sw*sh)
+		var hist [256]int
+		for y := 0; y < sh; y++ {
+			for x := 0; x < sw; x++ {
+				si := y*srcStride + x*4
+				gv := uint8((299*uint32(srcPix[si]) + 587*uint32(srcPix[si+1]) + 114*uint32(srcPix[si+2])) / 1000)
+				gray[y*sw+x] = gv
+				hist[gv]++
+			}
+		}
 
-	threshLabel := widget.NewLabel(fmt.Sprintf("Otsu threshold: %d  |  %dx%d", threshold, w, h))
+		total := sw * sh
+		var sum float64
+		for i := 0; i < 256; i++ {
+			sum += float64(i) * float64(hist[i])
+		}
+		var sumB float64
+		var wB, wF int
+		var maxVar float64
+		thresh := uint8(128)
+		for t := 0; t < 256; t++ {
+			wB += hist[t]
+			if wB == 0 {
+				continue
+			}
+			wF = total - wB
+			if wF == 0 {
+				break
+			}
+			sumB += float64(t) * float64(hist[t])
+			mB := sumB / float64(wB)
+			mF := (sum - sumB) / float64(wF)
+			variance := float64(wB) * float64(wF) * (mB - mF) * (mB - mF)
+			if variance > maxVar {
+				maxVar = variance
+				thresh = uint8(t)
+			}
+		}
+
+		out := image.NewNRGBA(image.Rect(0, 0, sw*2, sh*2))
+		outPix := out.Pix
+		outStride := out.Stride
+		for y := 0; y < sh; y++ {
+			for x := 0; x < sw; x++ {
+				var v byte
+				if gray[y*sw+x] > thresh {
+					v = 255
+				}
+				for _, dy := range [2]int{0, 1} {
+					for _, dx := range [2]int{0, 1} {
+						di := (y*2+dy)*outStride + (x*2+dx)*4
+						outPix[di] = v
+						outPix[di+1] = v
+						outPix[di+2] = v
+						outPix[di+3] = 255
+					}
+				}
+			}
+		}
+		return out, thresh
+	}
+
+	// 1. Raw color at 2x
+	rawScaled := scale2x(raw)
+
+	// 2. B&W of raw image
+	rawBW, rawThresh := otsuBW(raw)
+	fmt.Printf("[OCR Preview] Raw Otsu threshold: %d\n", rawThresh)
+
+	// 3. B&W of logo-masked image (what OCR sees)
+	maskedBW, maskedThresh := otsuBW(masked)
+	fmt.Printf("[OCR Preview] Masked Otsu threshold: %d\n", maskedThresh)
+
+	// Build Fyne widgets
+	mkImg := func(img *image.NRGBA) *fynecanvas.Image {
+		fi := fynecanvas.NewImageFromImage(img)
+		fi.FillMode = fynecanvas.ImageFillOriginal
+		fi.ScaleMode = fynecanvas.ImageScalePixels
+		return fi
+	}
 
 	content := container.NewVBox(
 		widget.NewLabel("Color"),
-		colorImg,
-		widget.NewLabel("B&W"),
-		bwImg,
-		threshLabel,
+		mkImg(rawScaled),
+		widget.NewLabel(fmt.Sprintf("B&W (Otsu %d)", rawThresh)),
+		mkImg(rawBW),
+		widget.NewLabel(fmt.Sprintf("Logo Masked B&W (Otsu %d)", maskedThresh)),
+		mkImg(maskedBW),
+		widget.NewLabel(fmt.Sprintf("%dx%d", w, h)),
 	)
 
 	d := dialog.NewCustom(
-		fmt.Sprintf("OCR Preview — %s (orientation %s)", cp.editingComp.ID, orientation),
+		fmt.Sprintf("OCR Preview — %s (%s)", cp.editingComp.ID, orientation),
 		"Close", container.NewScroll(content), cp.window)
-	d.Resize(fyne.NewSize(float32(w*2+60), float32(h*4+200)))
+	d.Resize(fyne.NewSize(float32(w*2+60), float32(h*6+280)))
 	d.Show()
 }
 
@@ -3536,34 +3618,62 @@ func orientationToRotation(orientation string) int {
 }
 
 func rotateForOCR(img *image.RGBA, orientation string) *image.RGBA {
-	bounds := img.Bounds()
-	w, h := bounds.Dx(), bounds.Dy()
+	w, h := img.Bounds().Dx(), img.Bounds().Dy()
+	srcPix := img.Pix
+	srcStride := img.Stride
 
 	switch orientation {
-	case "S": // 180°
-		rotated := image.NewRGBA(image.Rect(0, 0, w, h))
+	case "S": // 180° — reverse all rows and pixels within each row
+		out := image.NewRGBA(image.Rect(0, 0, w, h))
+		dstPix := out.Pix
 		for y := 0; y < h; y++ {
+			srcRow := y * srcStride
+			dstRow := (h - 1 - y) * out.Stride
 			for x := 0; x < w; x++ {
-				rotated.Set(w-1-x, h-1-y, img.At(x, y))
+				si := srcRow + x*4
+				di := dstRow + (w-1-x)*4
+				dstPix[di] = srcPix[si]
+				dstPix[di+1] = srcPix[si+1]
+				dstPix[di+2] = srcPix[si+2]
+				dstPix[di+3] = srcPix[si+3]
 			}
 		}
-		return rotated
-	case "E": // 90° CCW
-		rotated := image.NewRGBA(image.Rect(0, 0, h, w))
+		return out
+
+	case "E": // 90° CCW — transpose then flip vertical
+		out := image.NewRGBA(image.Rect(0, 0, h, w))
+		dstPix := out.Pix
+		dstStride := out.Stride
 		for y := 0; y < h; y++ {
+			srcRow := y * srcStride
 			for x := 0; x < w; x++ {
-				rotated.Set(y, w-1-x, img.At(x, y))
+				si := srcRow + x*4
+				di := (w-1-x)*dstStride + y*4
+				dstPix[di] = srcPix[si]
+				dstPix[di+1] = srcPix[si+1]
+				dstPix[di+2] = srcPix[si+2]
+				dstPix[di+3] = srcPix[si+3]
 			}
 		}
-		return rotated
-	case "W": // 90° CW
-		rotated := image.NewRGBA(image.Rect(0, 0, h, w))
+		return out
+
+	case "W": // 90° CW — transpose then flip horizontal
+		out := image.NewRGBA(image.Rect(0, 0, h, w))
+		dstPix := out.Pix
+		dstStride := out.Stride
 		for y := 0; y < h; y++ {
+			srcRow := y * srcStride
 			for x := 0; x < w; x++ {
-				rotated.Set(h-1-y, x, img.At(x, y))
+				si := srcRow + x*4
+				di := x*dstStride + (h-1-y)*4
+				dstPix[di] = srcPix[si]
+				dstPix[di+1] = srcPix[si+1]
+				dstPix[di+2] = srcPix[si+2]
+				dstPix[di+3] = srcPix[si+3]
 			}
 		}
-		return rotated
+		return out
+
 	default:
 		return img
 	}

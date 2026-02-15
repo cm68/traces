@@ -1009,11 +1009,19 @@ func (lib *LogoLibrary) DetectLogos(img image.Image, searchBounds geometry.RectI
 					score := matchBits(tmpl.Bits, windowBits, tmplW, tmplH)
 
 					if score >= minScore {
-						// Convert quantized coordinates back to source image coordinates
+						// Convert quantized position back to source coordinates
+						scaleYToSource := float64(searchBounds.Height) / float64(qHeight)
 						srcX := int(float64(x)*scaleToSource) + searchBounds.X
-						srcY := int(float64(y)*scaleToSource) + searchBounds.Y
-						srcW := int(float64(tmplW) * scaleToSource)
-						srcH := int(float64(tmplH) * scaleToSource)
+						srcY := int(float64(y)*scaleYToSource) + searchBounds.Y
+
+						// Use template's original pixel dimensions for mask size.
+						// The quantized-to-source conversion inflates bounds when
+						// the search area is much larger than the template.
+						srcW := tmpl.Bounds.Width
+						srcH := tmpl.Bounds.Height
+						if rotation == 90 || rotation == 270 {
+							srcW, srcH = srcH, srcW
+						}
 
 						templateMatches = append(templateMatches, LogoMatch{
 							Logo: tmpl,
@@ -1025,7 +1033,7 @@ func (lib *LogoLibrary) DetectLogos(img image.Image, searchBounds geometry.RectI
 							},
 							Score:       score,
 							Rotation:    rotation,
-							ScaleFactor: 1.0,
+							ScaleFactor: scaleToSource * float64(tmplW) / float64(srcW),
 						})
 					}
 				}

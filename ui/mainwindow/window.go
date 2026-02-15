@@ -69,6 +69,11 @@ func New(fyneApp fyne.App, state *app.State) *MainWindow {
 	mw.setupMenus()
 	mw.setupEventHandlers()
 
+	// Sync menu enabled state with current project (restoreLastProject runs
+	// during setupUI before setupMenus/setupEventHandlers, so the event-based
+	// enable gets overwritten by setupMenus unconditionally disabling items).
+	mw.updateViewMenuEnabled()
+
 	// Save window size and panel preferences on close
 	win.SetCloseIntercept(func() {
 		mw.saveWindowSize()
@@ -228,14 +233,12 @@ func (mw *MainWindow) setupMenus() {
 		mw.updateViewMenuChecks()
 	})
 
-	// Disable alignment-dependent items initially (need normalized images)
-	if !mw.state.HasNormalizedImages() {
-		mw.viewComponentsItem.Disabled = true
-		mw.viewTracesItem.Disabled = true
-		mw.viewPropertiesItem.Disabled = true
-		mw.viewLogosItem.Disabled = true
-		mw.sidePanel.SetTracesEnabled(false)
-	}
+	// Disable non-alignment panels initially (enabled after project load if normalized)
+	mw.viewComponentsItem.Disabled = true
+	mw.viewTracesItem.Disabled = true
+	mw.viewPropertiesItem.Disabled = true
+	mw.viewLogosItem.Disabled = true
+	mw.sidePanel.SetTracesEnabled(false)
 
 	// Mark current panel
 	mw.updateViewMenuChecks()
@@ -274,6 +277,8 @@ func (mw *MainWindow) setupEventHandlers() {
 			mw.SetTitle("PCB Tracer - " + filepath.Base(path))
 			mw.updateStatus("Project loaded: " + path)
 		}
+		// Enable/disable menu items based on normalized state
+		mw.updateViewMenuEnabled()
 	})
 
 	mw.state.On(app.EventImageLoaded, func(data interface{}) {
@@ -300,13 +305,7 @@ func (mw *MainWindow) setupEventHandlers() {
 	mw.state.On(app.EventNormalizationComplete, func(data interface{}) {
 		mw.canvas.Refresh()
 		mw.updateStatus("Aligned images saved")
-
-		// Enable all view menu items
-		mw.viewComponentsItem.Disabled = false
-		mw.viewTracesItem.Disabled = false
-		mw.viewPropertiesItem.Disabled = false
-		mw.viewLogosItem.Disabled = false
-		mw.sidePanel.SetTracesEnabled(true)
+		mw.updateViewMenuEnabled()
 	})
 }
 
@@ -344,6 +343,16 @@ func (mw *MainWindow) updateViewMenuChecks() {
 	} else {
 		mw.viewLogosItem.Label = "  Logos"
 	}
+}
+
+// updateViewMenuEnabled enables/disables view menu items based on normalization state.
+func (mw *MainWindow) updateViewMenuEnabled() {
+	enabled := mw.state.HasNormalizedImages()
+	mw.viewComponentsItem.Disabled = !enabled
+	mw.viewTracesItem.Disabled = !enabled
+	mw.viewPropertiesItem.Disabled = !enabled
+	mw.viewLogosItem.Disabled = !enabled
+	mw.sidePanel.SetTracesEnabled(enabled)
 }
 
 // updateStatus updates the status bar text.

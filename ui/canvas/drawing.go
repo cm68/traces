@@ -81,17 +81,23 @@ func getCharPattern(ch rune) [5]uint8 {
 func (ic *ImageCanvas) drawOverlay(output *image.RGBA, overlay *Overlay) {
 	col := overlay.Color
 
-	// Get layer offset if overlay is associated with a layer
+	// Get layer offset if overlay is associated with a non-normalized layer.
+	// Normalized layers have all transforms baked in, so overlay coordinates
+	// are already in the correct image space — no offset adjustment needed.
 	var offsetX, offsetY float64
 	if overlay.Layer != LayerNone {
 		for _, layer := range ic.layers {
 			if overlay.Layer == LayerFront && layer.Side == pcbimage.SideFront {
-				offsetX = float64(layer.ManualOffsetX)
-				offsetY = float64(layer.ManualOffsetY)
+				if !layer.IsNormalized {
+					offsetX = float64(layer.ManualOffsetX)
+					offsetY = float64(layer.ManualOffsetY)
+				}
 				break
 			} else if overlay.Layer == LayerBack && layer.Side == pcbimage.SideBack {
-				offsetX = float64(layer.ManualOffsetX)
-				offsetY = float64(layer.ManualOffsetY)
+				if !layer.IsNormalized {
+					offsetX = float64(layer.ManualOffsetX)
+					offsetY = float64(layer.ManualOffsetY)
+				}
 				break
 			}
 		}

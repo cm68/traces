@@ -466,8 +466,16 @@ func (e *Engine) recognizeWithParams(img gocv.Mat, params OCRParams) string {
 		return ""
 	}
 
-	text = strings.TrimSpace(text)
-	text = strings.Join(strings.Fields(text), " ")
+	// Preserve line breaks but collapse whitespace within each line
+	var lines []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			line = strings.Join(strings.Fields(line), " ")
+			lines = append(lines, line)
+		}
+	}
+	text = strings.Join(lines, "\n")
 	if e.electronicsMode {
 		text = strings.ToUpper(text)
 	}

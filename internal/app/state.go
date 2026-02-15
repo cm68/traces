@@ -940,7 +940,7 @@ func (s *State) NormalizeFrontImage(projectDir string) error {
 	s.FrontImage.ShearLeftY = s.FrontShearLeftY
 	s.FrontImage.ShearRightY = s.FrontShearRightY
 
-	normalized, forwardTransform := s.FrontImage.Normalize()
+	normalized, _ := s.FrontImage.Normalize()
 	s.mu.Unlock()
 
 	// Save PNG
@@ -973,18 +973,9 @@ func (s *State) NormalizeFrontImage(projectDir string) error {
 	// Store relative path for project file
 	s.FrontNormalizedPath = "front_normalized.png"
 
-	// Remap component bounds for front-side components
-	for _, comp := range s.Components {
-		if comp.Layer == image.SideBack {
-			continue
-		}
-		newX, newY := forwardTransform(comp.Bounds.X, comp.Bounds.Y)
-		newX2, newY2 := forwardTransform(comp.Bounds.X+comp.Bounds.Width, comp.Bounds.Y+comp.Bounds.Height)
-		comp.Bounds.X = newX
-		comp.Bounds.Y = newY
-		comp.Bounds.Width = newX2 - newX
-		comp.Bounds.Height = newY2 - newY
-	}
+	// Component bounds are NOT remapped. All component coordinates exist
+	// exclusively in normalized image space. Components created before
+	// normalization will be invalid and should be re-created.
 	s.mu.Unlock()
 
 	s.SetModified(true)
@@ -1011,7 +1002,7 @@ func (s *State) NormalizeBackImage(projectDir string) error {
 	s.BackImage.ShearLeftY = s.BackShearLeftY
 	s.BackImage.ShearRightY = s.BackShearRightY
 
-	normalized, forwardTransform := s.BackImage.Normalize()
+	normalized, _ := s.BackImage.Normalize()
 	s.mu.Unlock()
 
 	// Save PNG
@@ -1043,18 +1034,7 @@ func (s *State) NormalizeBackImage(projectDir string) error {
 
 	s.BackNormalizedPath = "back_normalized.png"
 
-	// Remap component bounds for back-side components
-	for _, comp := range s.Components {
-		if comp.Layer != image.SideBack {
-			continue
-		}
-		newX, newY := forwardTransform(comp.Bounds.X, comp.Bounds.Y)
-		newX2, newY2 := forwardTransform(comp.Bounds.X+comp.Bounds.Width, comp.Bounds.Y+comp.Bounds.Height)
-		comp.Bounds.X = newX
-		comp.Bounds.Y = newY
-		comp.Bounds.Width = newX2 - newX
-		comp.Bounds.Height = newY2 - newY
-	}
+	// Component bounds are NOT remapped (same as front).
 	s.mu.Unlock()
 
 	s.SetModified(true)

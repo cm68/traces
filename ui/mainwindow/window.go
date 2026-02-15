@@ -228,10 +228,12 @@ func (mw *MainWindow) setupMenus() {
 		mw.updateViewMenuChecks()
 	})
 
-	// Disable alignment-dependent items initially
-	if !mw.state.Aligned {
+	// Disable alignment-dependent items initially (need normalized images)
+	if !mw.state.HasNormalizedImages() {
 		mw.viewComponentsItem.Disabled = true
 		mw.viewTracesItem.Disabled = true
+		mw.viewPropertiesItem.Disabled = true
+		mw.viewLogosItem.Disabled = true
 		mw.sidePanel.SetTracesEnabled(false)
 	}
 
@@ -293,10 +295,17 @@ func (mw *MainWindow) setupEventHandlers() {
 	mw.state.On(app.EventAlignmentComplete, func(data interface{}) {
 		mw.canvas.Refresh()
 		mw.updateStatus("Alignment complete")
+	})
 
-		// Enable alignment-dependent menu items
+	mw.state.On(app.EventNormalizationComplete, func(data interface{}) {
+		mw.canvas.Refresh()
+		mw.updateStatus("Aligned images saved")
+
+		// Enable all view menu items
 		mw.viewComponentsItem.Disabled = false
 		mw.viewTracesItem.Disabled = false
+		mw.viewPropertiesItem.Disabled = false
+		mw.viewLogosItem.Disabled = false
 		mw.sidePanel.SetTracesEnabled(true)
 	})
 }

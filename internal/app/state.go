@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	goimage "image"
+	"image/png"
 	"math"
 	"os"
 	"path/filepath"
@@ -111,6 +112,10 @@ type State struct {
 	// Last used OCR orientation (N/S/E/W) - sticky across dialogs
 	LastOCROrientation string
 
+	// Normalized image paths (all transforms baked in)
+	FrontNormalizedPath string
+	BackNormalizedPath  string
+
 	// Logo library for manufacturer marks
 	LogoLibrary *logo.LogoLibrary
 
@@ -149,6 +154,7 @@ const (
 	EventBoardDefinitionLoaded
 	EventNetlistCreated
 	EventNetlistModified
+	EventNormalizationComplete // Fired after Save Aligned normalizes images
 )
 
 // EventListener is called when an event occurs.
@@ -323,24 +329,79 @@ func (s *State) LoadProject(path string) error {
 	s.BackCropBounds = proj.BackCropBounds
 	s.mu.Unlock()
 
-	// Load images
+	// Restore normalized image paths
+	s.mu.Lock()
+	s.FrontNormalizedPath = proj.FrontNormalizedPath
+	s.BackNormalizedPath = proj.BackNormalizedPath
+	s.mu.Unlock()
+
+	// Load images - prefer normalized PNGs if they exist
 	projectDir := filepath.Dir(path)
-	if proj.FrontImagePath != "" {
+
+	frontLoaded := false
+	if proj.FrontNormalizedPath != "" {
+		normPath := filepath.Join(projectDir, proj.FrontNormalizedPath)
+		if _, err := os.Stat(normPath); err == nil {
+			layer := image.NewLayer()
+			layer.Path = ""
+			if proj.FrontImagePath != "" {
+				layer.Path = filepath.Join(projectDir, proj.FrontImagePath)
+			}
+			layer.Side = image.SideFront
+			layer.Visible = true
+			if err := s.LoadNormalizedImage(layer, normPath); err != nil {
+				fmt.Printf("Failed to load normalized front image, falling back: %v\n", err)
+			} else {
+				s.mu.Lock()
+				s.FrontImage = layer
+				if s.DPI == 0 && proj.DPI > 0 {
+					s.DPI = proj.DPI
+				}
+				s.mu.Unlock()
+				s.Emit(EventImageLoaded, layer)
+				frontLoaded = true
+			}
+		}
+	}
+	if !frontLoaded && proj.FrontImagePath != "" {
 		frontPath := filepath.Join(projectDir, proj.FrontImagePath)
 		if err := s.LoadFrontImage(frontPath); err != nil {
 			return err
 		}
 	}
-	if proj.BackImagePath != "" {
+
+	backLoaded := false
+	if proj.BackNormalizedPath != "" {
+		normPath := filepath.Join(projectDir, proj.BackNormalizedPath)
+		if _, err := os.Stat(normPath); err == nil {
+			layer := image.NewLayer()
+			layer.Path = ""
+			if proj.BackImagePath != "" {
+				layer.Path = filepath.Join(projectDir, proj.BackImagePath)
+			}
+			layer.Side = image.SideBack
+			layer.Visible = true
+			if err := s.LoadNormalizedImage(layer, normPath); err != nil {
+				fmt.Printf("Failed to load normalized back image, falling back: %v\n", err)
+			} else {
+				s.mu.Lock()
+				s.BackImage = layer
+				s.mu.Unlock()
+				s.Emit(EventImageLoaded, layer)
+				backLoaded = true
+			}
+		}
+	}
+	if !backLoaded && proj.BackImagePath != "" {
 		backPath := filepath.Join(projectDir, proj.BackImagePath)
 		if err := s.LoadBackImage(backPath); err != nil {
 			return err
 		}
 	}
 
-	// Apply all alignment parameters to loaded layers
+	// Apply all alignment parameters to loaded layers (skip for normalized images)
 	s.mu.Lock()
-	if s.FrontImage != nil {
+	if s.FrontImage != nil && !s.FrontImage.IsNormalized {
 		// Manual adjustments
 		s.FrontImage.ManualOffsetX = s.FrontManualOffset.X
 		s.FrontImage.ManualOffsetY = s.FrontManualOffset.Y
@@ -376,7 +437,7 @@ func (s *State) LoadProject(path string) error {
 			s.FrontImage.AutoScaleY = 1.0
 		}
 	}
-	if s.BackImage != nil {
+	if s.BackImage != nil && !s.BackImage.IsNormalized {
 		// Manual adjustments
 		s.BackImage.ManualOffsetX = s.BackManualOffset.X
 		s.BackImage.ManualOffsetY = s.BackManualOffset.Y
@@ -514,6 +575,9 @@ func (s *State) SaveProject(path string) error {
 		// Crop bounds
 		FrontCropBounds: s.FrontCropBounds,
 		BackCropBounds:  s.BackCropBounds,
+		// Normalized image paths
+		FrontNormalizedPath: s.FrontNormalizedPath,
+		BackNormalizedPath:  s.BackNormalizedPath,
 	}
 
 	// Serialize contacts from detection results
@@ -857,6 +921,194 @@ func (s *State) LoadRawBackImage(path string) error {
 	return nil
 }
 
+// NormalizeFrontImage bakes all transforms into a flat PNG and saves it.
+func (s *State) NormalizeFrontImage(projectDir string) error {
+	s.mu.Lock()
+	if s.FrontImage == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("no front image loaded")
+	}
+
+	// Copy transform params from state to layer
+	s.FrontImage.ManualOffsetX = s.FrontManualOffset.X
+	s.FrontImage.ManualOffsetY = s.FrontManualOffset.Y
+	s.FrontImage.ManualRotation = s.FrontManualRotation
+	s.FrontImage.RotationCenterX = s.FrontRotationCenter.X
+	s.FrontImage.RotationCenterY = s.FrontRotationCenter.Y
+	s.FrontImage.ShearTopX = s.FrontShearTopX
+	s.FrontImage.ShearBottomX = s.FrontShearBottomX
+	s.FrontImage.ShearLeftY = s.FrontShearLeftY
+	s.FrontImage.ShearRightY = s.FrontShearRightY
+
+	normalized, forwardTransform := s.FrontImage.Normalize()
+	s.mu.Unlock()
+
+	// Save PNG
+	normPath := filepath.Join(projectDir, "front_normalized.png")
+	if err := saveNormalizedPNG(normalized, normPath); err != nil {
+		return fmt.Errorf("failed to save normalized front image: %w", err)
+	}
+
+	s.mu.Lock()
+	// Replace layer image
+	s.FrontImage.Image = normalized
+	s.FrontImage.IsNormalized = true
+	s.FrontImage.NormalizedPath = normPath
+
+	// Reset manual transforms (they're baked in now)
+	s.FrontManualOffset = geometry.PointInt{}
+	s.FrontManualRotation = 0
+	s.FrontShearTopX = 1.0
+	s.FrontShearBottomX = 1.0
+	s.FrontShearLeftY = 1.0
+	s.FrontShearRightY = 1.0
+	s.FrontImage.ManualOffsetX = 0
+	s.FrontImage.ManualOffsetY = 0
+	s.FrontImage.ManualRotation = 0
+	s.FrontImage.ShearTopX = 1.0
+	s.FrontImage.ShearBottomX = 1.0
+	s.FrontImage.ShearLeftY = 1.0
+	s.FrontImage.ShearRightY = 1.0
+
+	// Store relative path for project file
+	s.FrontNormalizedPath = "front_normalized.png"
+
+	// Remap component bounds for front-side components
+	for _, comp := range s.Components {
+		if comp.Layer == image.SideBack {
+			continue
+		}
+		newX, newY := forwardTransform(comp.Bounds.X, comp.Bounds.Y)
+		newX2, newY2 := forwardTransform(comp.Bounds.X+comp.Bounds.Width, comp.Bounds.Y+comp.Bounds.Height)
+		comp.Bounds.X = newX
+		comp.Bounds.Y = newY
+		comp.Bounds.Width = newX2 - newX
+		comp.Bounds.Height = newY2 - newY
+	}
+	s.mu.Unlock()
+
+	s.SetModified(true)
+	fmt.Printf("Front image normalized and saved to %s\n", normPath)
+	return nil
+}
+
+// NormalizeBackImage bakes all transforms into a flat PNG and saves it.
+func (s *State) NormalizeBackImage(projectDir string) error {
+	s.mu.Lock()
+	if s.BackImage == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("no back image loaded")
+	}
+
+	// Copy transform params from state to layer
+	s.BackImage.ManualOffsetX = s.BackManualOffset.X
+	s.BackImage.ManualOffsetY = s.BackManualOffset.Y
+	s.BackImage.ManualRotation = s.BackManualRotation
+	s.BackImage.RotationCenterX = s.BackRotationCenter.X
+	s.BackImage.RotationCenterY = s.BackRotationCenter.Y
+	s.BackImage.ShearTopX = s.BackShearTopX
+	s.BackImage.ShearBottomX = s.BackShearBottomX
+	s.BackImage.ShearLeftY = s.BackShearLeftY
+	s.BackImage.ShearRightY = s.BackShearRightY
+
+	normalized, forwardTransform := s.BackImage.Normalize()
+	s.mu.Unlock()
+
+	// Save PNG
+	normPath := filepath.Join(projectDir, "back_normalized.png")
+	if err := saveNormalizedPNG(normalized, normPath); err != nil {
+		return fmt.Errorf("failed to save normalized back image: %w", err)
+	}
+
+	s.mu.Lock()
+	// Replace layer image
+	s.BackImage.Image = normalized
+	s.BackImage.IsNormalized = true
+	s.BackImage.NormalizedPath = normPath
+
+	// Reset manual transforms
+	s.BackManualOffset = geometry.PointInt{}
+	s.BackManualRotation = 0
+	s.BackShearTopX = 1.0
+	s.BackShearBottomX = 1.0
+	s.BackShearLeftY = 1.0
+	s.BackShearRightY = 1.0
+	s.BackImage.ManualOffsetX = 0
+	s.BackImage.ManualOffsetY = 0
+	s.BackImage.ManualRotation = 0
+	s.BackImage.ShearTopX = 1.0
+	s.BackImage.ShearBottomX = 1.0
+	s.BackImage.ShearLeftY = 1.0
+	s.BackImage.ShearRightY = 1.0
+
+	s.BackNormalizedPath = "back_normalized.png"
+
+	// Remap component bounds for back-side components
+	for _, comp := range s.Components {
+		if comp.Layer != image.SideBack {
+			continue
+		}
+		newX, newY := forwardTransform(comp.Bounds.X, comp.Bounds.Y)
+		newX2, newY2 := forwardTransform(comp.Bounds.X+comp.Bounds.Width, comp.Bounds.Y+comp.Bounds.Height)
+		comp.Bounds.X = newX
+		comp.Bounds.Y = newY
+		comp.Bounds.Width = newX2 - newX
+		comp.Bounds.Height = newY2 - newY
+	}
+	s.mu.Unlock()
+
+	s.SetModified(true)
+	fmt.Printf("Back image normalized and saved to %s\n", normPath)
+	return nil
+}
+
+// saveNormalizedPNG writes an image to a PNG file with best compression.
+func saveNormalizedPNG(img goimage.Image, path string) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	encoder := &png.Encoder{CompressionLevel: png.BestCompression}
+	return encoder.Encode(f, img)
+}
+
+// LoadNormalizedImage loads a pre-normalized PNG into a layer.
+func (s *State) LoadNormalizedImage(layer *image.Layer, path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	img, _, err := goimage.Decode(f)
+	if err != nil {
+		return fmt.Errorf("failed to decode normalized image: %w", err)
+	}
+
+	layer.Image = img
+	layer.IsNormalized = true
+	layer.NormalizedPath = path
+
+	// All transforms are identity for normalized images
+	layer.ManualOffsetX = 0
+	layer.ManualOffsetY = 0
+	layer.ManualRotation = 0
+	layer.ShearTopX = 1.0
+	layer.ShearBottomX = 1.0
+	layer.ShearLeftY = 1.0
+	layer.ShearRightY = 1.0
+
+	fmt.Printf("Loaded normalized image: %s (%dx%d)\n", path, img.Bounds().Dx(), img.Bounds().Dy())
+	return nil
+}
+
+// HasNormalizedImages returns true if at least one layer has been normalized.
+func (s *State) HasNormalizedImages() bool {
+	return s.FrontNormalizedPath != "" || s.BackNormalizedPath != ""
+}
+
 // autoRotateAndCrop detects board bounds, rotates based on contacts, and crops.
 // Returns the cropped image and the crop bounds that were detected.
 func autoRotateAndCrop(img goimage.Image) (goimage.Image, geometry.RectInt) {
@@ -1011,6 +1263,10 @@ type ProjectFile struct {
 
 	// User-designated components (v5+)
 	Components []*component.Component `json:"components,omitempty"`
+
+	// Normalized image paths (v8+) - all transforms baked in
+	FrontNormalizedPath string `json:"front_normalized,omitempty"`
+	BackNormalizedPath  string `json:"back_normalized,omitempty"`
 
 	// Logo library (v7+) - manufacturer mark templates
 	LogoLibrary *logo.LogoLibrary `json:"logo_library,omitempty"`

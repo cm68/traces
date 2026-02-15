@@ -843,6 +843,12 @@ func (ic *ImageCanvas) compositeLayer(output *image.RGBA, layer *pcbimage.Layer,
 	srcBounds := src.Bounds()
 	opacity := layer.Opacity
 
+	// Fast path for normalized layers: all transforms are baked in, just zoom + copy
+	if layer.IsNormalized {
+		ic.compositeLayerNormalized(output, layer, w, h)
+		return
+	}
+
 	// Manual transform parameters
 	offsetX := float64(layer.ManualOffsetX)
 	offsetY := float64(layer.ManualOffsetY)
@@ -997,6 +1003,58 @@ func (ic *ImageCanvas) compositeLayer(output *image.RGBA, layer *pcbimage.Layer,
 				output.Set(x, y, color.RGBA{r, g, b, 255})
 			}
 			// effectiveAlpha near 0: keep background (black)
+		}
+	}
+}
+
+// compositeLayerNormalized is the fast path for layers where all transforms are baked in.
+// Only zoom and opacity need to be applied — no rotation, shear, or offset math.
+func (ic *ImageCanvas) compositeLayerNormalized(output *image.RGBA, layer *pcbimage.Layer, w, h int) {
+	src := layer.Image
+	srcBounds := src.Bounds()
+	opacity := layer.Opacity
+
+	// Checkerboard viz
+	vizEnabled := ic.stepEdgeViz.Enabled
+	vizBandWidth := ic.stepEdgeViz.BandWidth
+	isFront := layer.Side == pcbimage.SideFront
+
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			// Canvas pixel → source pixel via zoom only
+			srcX := int(float64(x)/ic.zoom) + srcBounds.Min.X
+			srcY := int(float64(y)/ic.zoom) + srcBounds.Min.Y
+
+			if srcX < srcBounds.Min.X || srcX >= srcBounds.Max.X ||
+				srcY < srcBounds.Min.Y || srcY >= srcBounds.Max.Y {
+				continue
+			}
+
+			srcColor := src.At(srcX, srcY)
+			sr, sg, sb, sa := srcColor.RGBA()
+			effectiveAlpha := float64(sa) / 0xffff * opacity
+
+			if vizEnabled && vizBandWidth > 0 {
+				canvasImgX := float64(x) / ic.zoom
+				canvasImgY := float64(y) / ic.zoom
+				bandX := int(canvasImgX / vizBandWidth)
+				bandY := int(canvasImgY / vizBandWidth)
+				isEvenCell := (bandX+bandY)%2 == 0
+				if (isFront && !isEvenCell) || (!isFront && isEvenCell) {
+					effectiveAlpha = 0
+				}
+			}
+
+			if effectiveAlpha >= 0.999 {
+				output.Set(x, y, srcColor)
+			} else if effectiveAlpha > 0.001 {
+				dr, dg, db, _ := output.At(x, y).RGBA()
+				invAlpha := 1 - effectiveAlpha
+				r := uint8((float64(sr>>8)*effectiveAlpha + float64(dr>>8)*invAlpha))
+				g := uint8((float64(sg>>8)*effectiveAlpha + float64(dg>>8)*invAlpha))
+				b := uint8((float64(sb>>8)*effectiveAlpha + float64(db>>8)*invAlpha))
+				output.Set(x, y, color.RGBA{r, g, b, 255})
+			}
 		}
 	}
 }

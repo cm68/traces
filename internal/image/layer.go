@@ -8,6 +8,7 @@ import (
 	"image/color"
 	_ "image/jpeg"
 	_ "image/png"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,6 +80,10 @@ type Layer struct {
 	CropY      int // Y offset of crop region
 	CropWidth  int // Width of crop region (0 = full width)
 	CropHeight int // Height of crop region (0 = full height)
+
+	// Normalization state
+	NormalizedPath string // Path to normalized PNG (empty = not yet normalized)
+	IsNormalized   bool   // Whether Layer.Image is the normalized (all transforms baked) version
 }
 
 // NewLayer creates a new Layer with default settings.
@@ -176,6 +181,172 @@ func (l *Layer) PixelAt(x, y int) color.Color {
 		return color.Black
 	}
 	return l.Image.At(x, y)
+}
+
+// Normalize rasterizes all manual transforms (offset, rotation, shear) into a flat
+// image with no remaining transforms. Returns the normalized image and a forward-transform
+// function that maps old image coordinates to new image coordinates (for remapping
+// component bounds, contacts, etc.).
+func (l *Layer) Normalize() (*image.RGBA, func(x, y float64) (float64, float64)) {
+	src := l.Image
+	srcBounds := src.Bounds()
+	srcW := float64(srcBounds.Dx())
+	srcH := float64(srcBounds.Dy())
+
+	// Transform parameters
+	offsetX := float64(l.ManualOffsetX)
+	offsetY := float64(l.ManualOffsetY)
+	rotation := l.ManualRotation * math.Pi / 180.0
+
+	shearTopX := l.ShearTopX
+	shearBottomX := l.ShearBottomX
+	shearLeftY := l.ShearLeftY
+	shearRightY := l.ShearRightY
+	if shearTopX == 0 {
+		shearTopX = 1.0
+	}
+	if shearBottomX == 0 {
+		shearBottomX = 1.0
+	}
+	if shearLeftY == 0 {
+		shearLeftY = 1.0
+	}
+	if shearRightY == 0 {
+		shearRightY = 1.0
+	}
+
+	// Rotation center
+	var srcCx, srcCy float64
+	if l.RotationCenterX != 0 || l.RotationCenterY != 0 {
+		srcCx = l.RotationCenterX
+		srcCy = l.RotationCenterY
+	} else {
+		srcCx = float64(srcBounds.Min.X+srcBounds.Max.X) / 2.0
+		srcCy = float64(srcBounds.Min.Y+srcBounds.Max.Y) / 2.0
+	}
+
+	cosR := math.Cos(-rotation)
+	sinR := math.Sin(-rotation)
+
+	// The output image has the same dimensions as the source.
+	// Manual offset shifts content within this space.
+	outW := srcBounds.Dx()
+	outH := srcBounds.Dy()
+	output := image.NewRGBA(image.Rect(0, 0, outW, outH))
+
+	hasTransform := rotation != 0 || shearTopX != 1.0 || shearBottomX != 1.0 ||
+		shearLeftY != 1.0 || shearRightY != 1.0
+
+	// Rasterize: for each output pixel, inverse-map to source
+	for y := 0; y < outH; y++ {
+		for x := 0; x < outW; x++ {
+			// Output pixel (x, y) corresponds to image coordinate (x - offsetX, y - offsetY)
+			imgX := float64(x) - offsetX
+			imgY := float64(y) - offsetY
+
+			var srcX, srcY int
+
+			if hasTransform {
+				srcPosX := imgX + float64(srcBounds.Min.X)
+				srcPosY := imgY + float64(srcBounds.Min.Y)
+
+				relX := srcPosX - srcCx
+				relY := srcPosY - srcCy
+
+				rotX := relX*cosR - relY*sinR
+				rotY := relX*sinR + relY*cosR
+
+				normY := (rotY + srcH/2) / srcH
+				normX := (rotX + srcW/2) / srcW
+				if normY < 0 {
+					normY = 0
+				} else if normY > 1 {
+					normY = 1
+				}
+				if normX < 0 {
+					normX = 0
+				} else if normX > 1 {
+					normX = 1
+				}
+
+				scaleX := shearTopX + (shearBottomX-shearTopX)*normY
+				scaleY := shearLeftY + (shearRightY-shearLeftY)*normX
+
+				scaledX := rotX / scaleX
+				scaledY := rotY / scaleY
+
+				srcX = int(scaledX + srcCx)
+				srcY = int(scaledY + srcCy)
+			} else {
+				srcX = int(imgX) + srcBounds.Min.X
+				srcY = int(imgY) + srcBounds.Min.Y
+			}
+
+			if srcX < srcBounds.Min.X || srcX >= srcBounds.Max.X ||
+				srcY < srcBounds.Min.Y || srcY >= srcBounds.Max.Y {
+				continue
+			}
+
+			r, g, b, a := src.At(srcX, srcY).RGBA()
+			output.SetRGBA(x, y, color.RGBA{
+				R: uint8(r >> 8), G: uint8(g >> 8),
+				B: uint8(b >> 8), A: uint8(a >> 8),
+			})
+		}
+	}
+
+	// Forward transform: maps old image coords to new (normalized) coords.
+	// Old image coords had offset applied at render time; in normalized space,
+	// the offset is baked in, so new_coord = old_coord + offset.
+	// Rotation and shear are also baked in via the forward transform.
+	cosF := math.Cos(rotation)
+	sinF := math.Sin(rotation)
+
+	forwardTransform := func(ox, oy float64) (float64, float64) {
+		if !hasTransform {
+			return ox + offsetX, oy + offsetY
+		}
+
+		// Forward: source coord → apply shear → rotate → translate by offset
+		relX := ox + float64(srcBounds.Min.X) - srcCx
+		relY := oy + float64(srcBounds.Min.Y) - srcCy
+
+		// Forward shear (position-dependent scale)
+		normY := (relY + srcH/2) / srcH
+		normX := (relX + srcW/2) / srcW
+		if normY < 0 {
+			normY = 0
+		} else if normY > 1 {
+			normY = 1
+		}
+		if normX < 0 {
+			normX = 0
+		} else if normX > 1 {
+			normX = 1
+		}
+
+		scaleX := shearTopX + (shearBottomX-shearTopX)*normY
+		scaleY := shearLeftY + (shearRightY-shearLeftY)*normX
+
+		sX := relX * scaleX
+		sY := relY * scaleY
+
+		// Forward rotate
+		rX := sX*cosF - sY*sinF
+		rY := sX*sinF + sY*cosF
+
+		// Translate back and apply offset
+		newX := rX + srcCx - float64(srcBounds.Min.X) + offsetX
+		newY := rY + srcCy - float64(srcBounds.Min.Y) + offsetY
+
+		return newX, newY
+	}
+
+	fmt.Printf("Normalized layer: %dx%d, offset=(%d,%d), rotation=%.2f°, shear=(%.3f,%.3f,%.3f,%.3f)\n",
+		outW, outH, l.ManualOffsetX, l.ManualOffsetY, l.ManualRotation,
+		shearTopX, shearBottomX, shearLeftY, shearRightY)
+
+	return output, forwardTransform
 }
 
 // guessSideFromFilename attempts to determine the board side from the filename.

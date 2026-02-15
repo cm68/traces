@@ -29,7 +29,9 @@ import (
 	"pcb-tracer/ui/dialogs"
 
 	"fyne.io/fyne/v2"
+	fynecanvas "fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
@@ -60,14 +62,18 @@ type SidePanel struct {
 
 	// Currently visible panel name
 	currentPanel string
+
+	// Panel enable/disable (panels disabled until normalization complete)
+	disabledPanels map[string]bool
 }
 
 // NewSidePanel creates a new side panel.
 func NewSidePanel(state *app.State, canvas *canvas.ImageCanvas) *SidePanel {
 	sp := &SidePanel{
-		state:        state,
-		canvas:       canvas,
-		currentPanel: PanelImport,
+		state:          state,
+		canvas:         canvas,
+		currentPanel:   PanelImport,
+		disabledPanels: make(map[string]bool),
 	}
 
 	// Create individual panels
@@ -80,8 +86,19 @@ func NewSidePanel(state *app.State, canvas *canvas.ImageCanvas) *SidePanel {
 	})
 	sp.logosPanel = NewLogosPanel(state, canvas)
 
+	// Give import panel a reference to the side panel for enabling/disabling
+	sp.importPanel.sidePanel = sp
+
 	// Create container showing import panel by default
 	sp.container = container.NewStack(sp.importPanel.Container())
+
+	// Disable non-alignment panels until normalization is done
+	if !state.HasNormalizedImages() {
+		sp.SetPanelEnabled(PanelComponents, false)
+		sp.SetPanelEnabled(PanelTraces, false)
+		sp.SetPanelEnabled(PanelProperties, false)
+		sp.SetPanelEnabled(PanelLogos, false)
+	}
 
 	return sp
 }
@@ -94,6 +111,10 @@ func (sp *SidePanel) Container() fyne.CanvasObject {
 // ShowPanel switches to the specified panel.
 func (sp *SidePanel) ShowPanel(name string) {
 	if name == sp.currentPanel {
+		return
+	}
+	if sp.disabledPanels[name] {
+		fmt.Printf("Panel %q is disabled (save aligned images first)\n", name)
 		return
 	}
 
@@ -212,12 +233,27 @@ func (sp *SidePanel) SetTracesEnabled(enabled bool) {
 	sp.tracesPanel.SetEnabled(enabled)
 }
 
+// SetPanelEnabled enables or disables switching to a specific panel.
+func (sp *SidePanel) SetPanelEnabled(name string, enabled bool) {
+	if enabled {
+		delete(sp.disabledPanels, name)
+	} else {
+		sp.disabledPanels[name] = true
+	}
+}
+
+// IsPanelEnabled returns whether a panel is enabled.
+func (sp *SidePanel) IsPanelEnabled(name string) bool {
+	return !sp.disabledPanels[name]
+}
+
 // ImportPanel handles image import and board selection.
 type ImportPanel struct {
 	state     *app.State
 	canvas    *canvas.ImageCanvas
 	window    fyne.Window
 	container fyne.CanvasObject
+	sidePanel *SidePanel // Back-reference for panel enable/disable
 
 	boardSelect    *widget.Select
 	boardSpecLabel *widget.Label
@@ -240,6 +276,11 @@ type ImportPanel struct {
 
 	// Auto align button
 	autoAlignButton *widget.Button
+
+	// Save aligned / Re-align buttons
+	saveAlignedBtn *widget.Button
+	realignBtn     *widget.Button
+	alignControls  *fyne.Container // Manual controls container (hidden after save)
 
 	// Crop editing
 	cropLabel *widget.Label
@@ -378,6 +419,17 @@ func NewImportPanel(state *app.State, cvs *canvas.ImageCanvas) *ImportPanel {
 	)
 	reImportButton := widget.NewButton("Re-import with Crop", func() { ip.onReImportWithCrop() })
 
+	// Save Aligned button - bakes all transforms into normalized PNGs
+	ip.saveAlignedBtn = widget.NewButton("Save Aligned", func() {
+		ip.onSaveAligned()
+	})
+	ip.saveAlignedBtn.Importance = widget.HighImportance
+
+	// Re-align button - reloads raw images for re-editing alignment
+	ip.realignBtn = widget.NewButton("Re-align", func() {
+		ip.onRealign()
+	})
+
 	// Layout
 	// Background mode radio group
 	bgRadio := widget.NewRadioGroup([]string{"Checkerboard", "Solid Black"}, func(selected string) {
@@ -385,6 +437,46 @@ func NewImportPanel(state *app.State, cvs *canvas.ImageCanvas) *ImportPanel {
 	})
 	bgRadio.Horizontal = true
 	bgRadio.SetSelected("Checkerboard")
+
+	// Wrap manual alignment controls so they can be hidden after normalization
+	ip.alignControls = container.NewVBox(
+		ip.autoAlignButton,
+		ip.alignButton,
+		ip.alignStatus,
+		widget.NewSeparator(),
+		widget.NewLabel("Background:"),
+		bgRadio,
+		widget.NewSeparator(),
+		widget.NewLabel("Manual Adjust (use Layer above):"),
+		compassRose,
+		ip.offsetLabel,
+		widget.NewSeparator(),
+		rotationButtons,
+		ip.rotationLabel,
+		widget.NewSeparator(),
+		shearTopButtons,
+		shearBottomButtons,
+		shearLeftButtons,
+		shearRightButtons,
+		ip.shearLabel,
+		widget.NewSeparator(),
+		widget.NewLabel("Crop Bounds:"),
+		cropPosButtons,
+		cropSizeButtons,
+		ip.cropLabel,
+		reImportButton,
+		widget.NewSeparator(),
+		ip.saveAlignedBtn,
+	)
+
+	// If already normalized, show Re-align button; hide alignment controls
+	// If not normalized, hide Re-align button; show alignment controls
+	if state.HasNormalizedImages() {
+		ip.alignControls.Hide()
+		ip.realignBtn.Show()
+	} else {
+		ip.realignBtn.Hide()
+	}
 
 	ip.container = container.NewVBox(
 		widget.NewCard("Board Type", "", container.NewVBox(
@@ -406,31 +498,8 @@ func NewImportPanel(state *app.State, cvs *canvas.ImageCanvas) *ImportPanel {
 			container.NewHBox(ip.detectButton, ip.sampleButton),
 		)),
 		widget.NewCard("Alignment", "", container.NewVBox(
-			ip.autoAlignButton,
-			ip.alignButton,
-			ip.alignStatus,
-			widget.NewSeparator(),
-			widget.NewLabel("Background:"),
-			bgRadio,
-			widget.NewSeparator(),
-			widget.NewLabel("Manual Adjust (use Layer above):"),
-			compassRose,
-			ip.offsetLabel,
-			widget.NewSeparator(),
-			rotationButtons,
-			ip.rotationLabel,
-			widget.NewSeparator(),
-			shearTopButtons,
-			shearBottomButtons,
-			shearLeftButtons,
-			shearRightButtons,
-			ip.shearLabel,
-			widget.NewSeparator(),
-			widget.NewLabel("Crop Bounds:"),
-			cropPosButtons,
-			cropSizeButtons,
-			ip.cropLabel,
-			reImportButton,
+			ip.realignBtn,
+			ip.alignControls,
 		)),
 	)
 
@@ -1819,6 +1888,148 @@ func maxFloat(a, b float64) float64 {
 }
 
 // Container returns the panel container.
+// onSaveAligned normalizes both images, saves them as PNGs, and enables other panels.
+func (ip *ImportPanel) onSaveAligned() {
+	if ip.state.ProjectPath == "" {
+		dialog.ShowInformation("Save Project First",
+			"Please save the project before saving aligned images.", ip.window)
+		return
+	}
+
+	if ip.state.FrontImage == nil && ip.state.BackImage == nil {
+		dialog.ShowInformation("No Images",
+			"Load at least one image before saving alignment.", ip.window)
+		return
+	}
+
+	projectDir := filepath.Dir(ip.state.ProjectPath)
+
+	ip.saveAlignedBtn.Disable()
+	ip.alignStatus.SetText("Normalizing images...")
+
+	go func() {
+		var errs []string
+
+		if ip.state.FrontImage != nil {
+			if err := ip.state.NormalizeFrontImage(projectDir); err != nil {
+				errs = append(errs, "Front: "+err.Error())
+			}
+		}
+		if ip.state.BackImage != nil {
+			if err := ip.state.NormalizeBackImage(projectDir); err != nil {
+				errs = append(errs, "Back: "+err.Error())
+			}
+		}
+
+		// Save project to persist normalized paths
+		if err := ip.state.SaveProject(ip.state.ProjectPath); err != nil {
+			errs = append(errs, "Save: "+err.Error())
+		}
+
+		// Update UI on main thread
+		ip.saveAlignedBtn.Enable()
+		if len(errs) > 0 {
+			ip.alignStatus.SetText("Errors: " + strings.Join(errs, "; "))
+			return
+		}
+
+		ip.alignStatus.SetText("Aligned images saved")
+
+		// Hide alignment controls, show Re-align button
+		ip.alignControls.Hide()
+		ip.realignBtn.Show()
+
+		// Enable other panels
+		if ip.sidePanel != nil {
+			ip.sidePanel.SetPanelEnabled(PanelComponents, true)
+			ip.sidePanel.SetPanelEnabled(PanelTraces, true)
+			ip.sidePanel.SetPanelEnabled(PanelProperties, true)
+			ip.sidePanel.SetPanelEnabled(PanelLogos, true)
+		}
+
+		// Fire event so mainwindow can enable menu items
+		ip.state.Emit(app.EventNormalizationComplete, nil)
+
+		// Refresh canvas with normalized images
+		if ip.sidePanel != nil {
+			ip.sidePanel.SyncLayers()
+		}
+		ip.canvas.Refresh()
+		ip.RefreshLabels()
+	}()
+}
+
+// onRealign reloads raw images with saved transforms for re-editing alignment.
+func (ip *ImportPanel) onRealign() {
+	if ip.state.FrontImage == nil && ip.state.BackImage == nil {
+		return
+	}
+
+	ip.alignStatus.SetText("Reloading raw images...")
+
+	go func() {
+		// Reload raw images (this applies crop + auto-rotation but NOT manual transforms)
+		if ip.state.FrontImage != nil && ip.state.FrontImage.Path != "" {
+			if err := ip.state.LoadFrontImage(ip.state.FrontImage.Path); err != nil {
+				fmt.Printf("Error reloading front image: %v\n", err)
+			}
+		}
+		if ip.state.BackImage != nil && ip.state.BackImage.Path != "" {
+			if err := ip.state.LoadBackImage(ip.state.BackImage.Path); err != nil {
+				fmt.Printf("Error reloading back image: %v\n", err)
+			}
+		}
+
+		// Restore manual transforms from state onto layers
+		// (LoadFrontImage/LoadBackImage don't set manual transforms, but the state still has them)
+		if ip.state.FrontImage != nil {
+			ip.state.FrontImage.ManualOffsetX = ip.state.FrontManualOffset.X
+			ip.state.FrontImage.ManualOffsetY = ip.state.FrontManualOffset.Y
+			ip.state.FrontImage.ManualRotation = ip.state.FrontManualRotation
+			ip.state.FrontImage.RotationCenterX = ip.state.FrontRotationCenter.X
+			ip.state.FrontImage.RotationCenterY = ip.state.FrontRotationCenter.Y
+			ip.state.FrontImage.ShearTopX = ip.state.FrontShearTopX
+			ip.state.FrontImage.ShearBottomX = ip.state.FrontShearBottomX
+			ip.state.FrontImage.ShearLeftY = ip.state.FrontShearLeftY
+			ip.state.FrontImage.ShearRightY = ip.state.FrontShearRightY
+			ip.state.FrontImage.IsNormalized = false
+		}
+		if ip.state.BackImage != nil {
+			ip.state.BackImage.ManualOffsetX = ip.state.BackManualOffset.X
+			ip.state.BackImage.ManualOffsetY = ip.state.BackManualOffset.Y
+			ip.state.BackImage.ManualRotation = ip.state.BackManualRotation
+			ip.state.BackImage.RotationCenterX = ip.state.BackRotationCenter.X
+			ip.state.BackImage.RotationCenterY = ip.state.BackRotationCenter.Y
+			ip.state.BackImage.ShearTopX = ip.state.BackShearTopX
+			ip.state.BackImage.ShearBottomX = ip.state.BackShearBottomX
+			ip.state.BackImage.ShearLeftY = ip.state.BackShearLeftY
+			ip.state.BackImage.ShearRightY = ip.state.BackShearRightY
+			ip.state.BackImage.IsNormalized = false
+		}
+
+		// Show alignment controls, hide Re-align button
+		ip.alignControls.Show()
+		ip.realignBtn.Hide()
+
+		// Disable other panels until re-aligned
+		if ip.sidePanel != nil {
+			ip.sidePanel.SetPanelEnabled(PanelComponents, false)
+			ip.sidePanel.SetPanelEnabled(PanelTraces, false)
+			ip.sidePanel.SetPanelEnabled(PanelProperties, false)
+			ip.sidePanel.SetPanelEnabled(PanelLogos, false)
+		}
+
+		ip.alignStatus.SetText("Re-alignment mode - adjust and Save Aligned")
+
+		// Refresh
+		if ip.sidePanel != nil {
+			ip.sidePanel.SyncLayers()
+		}
+		ip.canvas.Refresh()
+		ip.RefreshLabels()
+	}()
+}
+
 func (ip *ImportPanel) Container() fyne.CanvasObject {
 	return ip.container
 }
@@ -2870,6 +3081,9 @@ func (cp *ComponentsPanel) runOCR() {
 	// Rotate for OCR
 	rotated := rotateForOCR(cropped, orientation)
 
+	// Show OCR preview dialog with color and B&W views
+	cp.showOCRPreview(rotated, orientation)
+
 	// Convert to gocv.Mat
 	rotBounds := rotated.Bounds()
 	mat, err := gocv.NewMatFromBytes(rotBounds.Dy(), rotBounds.Dx(), gocv.MatTypeCV8UC4, rotated.Pix)
@@ -2967,6 +3181,108 @@ func (cp *ComponentsPanel) runOCR() {
 	cp.state.LastOCROrientation = orientation
 
 	fmt.Printf("[OCR] Complete: %s\n", text)
+}
+
+// showOCRPreview displays a dialog with the rotated component region in color and B&W.
+func (cp *ComponentsPanel) showOCRPreview(rotated *image.RGBA, orientation string) {
+	bounds := rotated.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+	fmt.Printf("[OCR Preview] rotated image: %dx%d orientation=%s\n", w, h, orientation)
+
+	// Build grayscale + histogram while copying pixels into NRGBA (Fyne's native format)
+	gray := make([]uint8, w*h)
+	var hist [256]int
+	scaled := image.NewNRGBA(image.Rect(0, 0, w*2, h*2))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			c := rotated.At(x, y)
+			r, g, b, a := c.RGBA()
+			nc := color.NRGBA{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8), uint8(a >> 8)}
+
+			// 2x scale
+			scaled.SetNRGBA(x*2, y*2, nc)
+			scaled.SetNRGBA(x*2+1, y*2, nc)
+			scaled.SetNRGBA(x*2, y*2+1, nc)
+			scaled.SetNRGBA(x*2+1, y*2+1, nc)
+
+			// Grayscale for thresholding
+			gv := uint8((299*uint32(nc.R) + 587*uint32(nc.G) + 114*uint32(nc.B)) / 1000)
+			gray[y*w+x] = gv
+			hist[gv]++
+		}
+	}
+
+	// Otsu threshold
+	total := w * h
+	var sum float64
+	for i := 0; i < 256; i++ {
+		sum += float64(i) * float64(hist[i])
+	}
+	var sumB float64
+	var wB, wF int
+	var maxVar float64
+	threshold := uint8(128)
+	for t := 0; t < 256; t++ {
+		wB += hist[t]
+		if wB == 0 {
+			continue
+		}
+		wF = total - wB
+		if wF == 0 {
+			break
+		}
+		sumB += float64(t) * float64(hist[t])
+		mB := sumB / float64(wB)
+		mF := (sum - sumB) / float64(wF)
+		variance := float64(wB) * float64(wF) * (mB - mF) * (mB - mF)
+		if variance > maxVar {
+			maxVar = variance
+			threshold = uint8(t)
+		}
+	}
+	fmt.Printf("[OCR Preview] Otsu threshold: %d\n", threshold)
+
+	// Create B&W image at 2x scale using NRGBA
+	bw := image.NewNRGBA(image.Rect(0, 0, w*2, h*2))
+	white := color.NRGBA{255, 255, 255, 255}
+	black := color.NRGBA{0, 0, 0, 255}
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			c := white
+			if gray[y*w+x] <= threshold {
+				c = black
+			}
+			bw.SetNRGBA(x*2, y*2, c)
+			bw.SetNRGBA(x*2+1, y*2, c)
+			bw.SetNRGBA(x*2, y*2+1, c)
+			bw.SetNRGBA(x*2+1, y*2+1, c)
+		}
+	}
+
+	// Create Fyne image widgets using NRGBA (Fyne's native format)
+	colorImg := fynecanvas.NewImageFromImage(scaled)
+	colorImg.FillMode = fynecanvas.ImageFillOriginal
+	colorImg.ScaleMode = fynecanvas.ImageScalePixels
+
+	bwImg := fynecanvas.NewImageFromImage(bw)
+	bwImg.FillMode = fynecanvas.ImageFillOriginal
+	bwImg.ScaleMode = fynecanvas.ImageScalePixels
+
+	threshLabel := widget.NewLabel(fmt.Sprintf("Otsu threshold: %d  |  %dx%d", threshold, w, h))
+
+	content := container.NewVBox(
+		widget.NewLabel("Color"),
+		colorImg,
+		widget.NewLabel("B&W"),
+		bwImg,
+		threshLabel,
+	)
+
+	d := dialog.NewCustom(
+		fmt.Sprintf("OCR Preview — %s (orientation %s)", cp.editingComp.ID, orientation),
+		"Close", container.NewScroll(content), cp.window)
+	d.Resize(fyne.NewSize(float32(w*2+60), float32(h*4+200)))
+	d.Show()
 }
 
 // runOCRWithHistogramThreshold uses histogram analysis for better OCR.

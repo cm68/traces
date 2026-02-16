@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"pcb-tracer/internal/logo"
 	"pcb-tracer/internal/netlist"
 	"pcb-tracer/internal/ocr"
+	pcbtrace "pcb-tracer/internal/trace"
 	"pcb-tracer/internal/via"
 	"pcb-tracer/pkg/colorutil"
 	"pcb-tracer/pkg/geometry"
@@ -148,8 +150,6 @@ func (sp *SidePanel) ShowPanel(name string) {
 		sp.canvas.OnMiddleClick(sp.logosPanel.OnMiddleClick)
 	case PanelComponents:
 		sp.canvas.OnMiddleClick(sp.componentsPanel.OnMiddleClickFloodFill)
-	case PanelTraces:
-		sp.canvas.OnMiddleClick(sp.tracesPanel.OnMiddleClick)
 	default:
 		// No middle-click handler for other panels
 		sp.canvas.OnMiddleClick(nil)
@@ -4910,6 +4910,7 @@ type TracesPanel struct {
 	traceMode     bool               // Currently drawing a polyline
 	traceStartVia *via.ConfirmedVia  // Source confirmed via
 	tracePoints   []geometry.Point2D // Committed polyline points (image coords)
+	traceLayer    pcbtrace.TraceLayer // Layer side when trace was started
 
 	// Selected via for arrow-key nudging
 	selectedVia *via.ConfirmedVia
@@ -4970,7 +4971,7 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas) *TracesPanel {
 		tp.canvas.Refresh()
 	})
 
-	tp.traceStatusLabel = widget.NewLabel("Middle-click a confirmed via to start")
+	tp.traceStatusLabel = widget.NewLabel("Click a via twice to start trace")
 
 	// Set up click handlers
 	cvs.OnLeftClick(func(x, y float64) {
@@ -5290,10 +5291,43 @@ func (tp *TracesPanel) updateTrainingLabel() {
 	tp.trainingLabel.SetText(fmt.Sprintf("Training: %d pos, %d neg", pos, neg))
 }
 
-// onLeftClick handles left-click to select a confirmed via for arrow-key nudging.
+// onLeftClick handles left-click for polyline trace drawing and via selection.
 func (tp *TracesPanel) onLeftClick(x, y float64) {
+	if tp.traceMode {
+		// In trace mode — check if click lands on a confirmed via (that isn't the start)
+		cv := tp.state.FeaturesLayer.HitTestConfirmedVia(x, y)
+		if cv != nil && cv.ID != tp.traceStartVia.ID {
+			// Terminate at this via
+			tp.tracePoints = append(tp.tracePoints, cv.Center)
+			tp.finishTrace(cv)
+			return
+		}
+		// Otherwise, add a waypoint
+		tp.tracePoints = append(tp.tracePoints, geometry.Point2D{X: x, Y: y})
+		tp.updateTraceOverlay()
+		tp.traceStatusLabel.SetText(fmt.Sprintf("Trace from %s — %d segments — click waypoints, end on a via",
+			tp.traceStartVia.ID, len(tp.tracePoints)-1))
+		return
+	}
+
+	// Not in trace mode — check if clicking on a confirmed via to start a trace
 	cv := tp.state.FeaturesLayer.HitTestConfirmedVia(x, y)
 	if cv != nil {
+		if tp.selectedVia != nil && tp.selectedVia.ID == cv.ID {
+			// Already selected — start trace from this via
+			tp.traceMode = true
+			tp.traceStartVia = cv
+			tp.tracePoints = []geometry.Point2D{cv.Center}
+			if tp.viaLayerSelect.Selected == "Front" {
+				tp.traceLayer = pcbtrace.LayerFront
+			} else {
+				tp.traceLayer = pcbtrace.LayerBack
+			}
+			tp.setupTraceRubberBand()
+			tp.traceStatusLabel.SetText(fmt.Sprintf("Trace from %s — click waypoints, end on a via", cv.ID))
+			return
+		}
+		// First click — select the via
 		tp.selectVia(cv)
 	} else {
 		tp.deselectVia()
@@ -5421,9 +5455,18 @@ func (tp *TracesPanel) showConfirmedViaMenu(cv *via.ConfirmedVia, pos fyne.Posit
 		netLabel = fmt.Sprintf("Netlist: %s", net.Name)
 	}
 
+	// Build pin label
+	pinLabel := "Name Pin..."
+	if cv.ComponentID != "" && cv.PinNumber != "" {
+		pinLabel = fmt.Sprintf("Pin: %s-%s", cv.ComponentID, cv.PinNumber)
+	}
+
 	items := []*fyne.MenuItem{
 		fyne.NewMenuItem(netLabel, func() {
 			tp.nameNetlist(cv)
+		}),
+		fyne.NewMenuItem(pinLabel, func() {
+			tp.namePin(cv)
 		}),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Delete Via", func() {
@@ -5466,12 +5509,12 @@ func (tp *TracesPanel) showGeneralViaMenu(imgX, imgY float64, pos fyne.Position)
 	}
 
 	// Check if click is near a trace segment
-	if segIdx := tp.hitTestTraceSegment(imgX, imgY); segIdx >= 0 {
-		idx := segIdx // capture for closure
+	if hit := tp.hitTestTraceSegment(imgX, imgY); hit != nil {
+		h := hit // capture for closure
 		items = append(items,
 			fyne.NewMenuItemSeparator(),
 			fyne.NewMenuItem("Delete Segment", func() {
-				tp.deleteTraceSegment(idx)
+				tp.deleteTraceSegment(h)
 			}),
 		)
 	}
@@ -5480,32 +5523,39 @@ func (tp *TracesPanel) showGeneralViaMenu(imgX, imgY float64, pos fyne.Position)
 	popup.ShowAtPosition(pos)
 }
 
-// hitTestTraceSegment returns the index of the trace segment closest to (x, y),
-// or -1 if no segment is within tolerance.
-func (tp *TracesPanel) hitTestTraceSegment(x, y float64) int {
-	if len(tp.tracePoints) < 2 {
-		return -1
-	}
+// traceHit identifies a hit on a trace segment.
+type traceHit struct {
+	traceID  string // ID of the trace in features layer
+	segIndex int    // Segment index within the trace
+}
 
-	// Tolerance in image pixels
+// hitTestTraceSegment returns the trace and segment closest to (x, y),
+// or nil if no segment is within tolerance. Searches all persisted traces.
+func (tp *TracesPanel) hitTestTraceSegment(x, y float64) *traceHit {
 	tolerance := 10.0
 	if tp.state.DPI > 0 {
 		tolerance = 0.015 * tp.state.DPI // ~15 mil
 	}
 
-	bestIdx := -1
+	var bestHit *traceHit
 	bestDist := tolerance
 
-	for i := 1; i < len(tp.tracePoints); i++ {
-		d := pointToSegmentDist(x, y,
-			tp.tracePoints[i-1].X, tp.tracePoints[i-1].Y,
-			tp.tracePoints[i].X, tp.tracePoints[i].Y)
-		if d < bestDist {
-			bestDist = d
-			bestIdx = i - 1 // segment index
+	for _, tid := range tp.state.FeaturesLayer.GetTraces() {
+		tf := tp.state.FeaturesLayer.GetTraceFeature(tid)
+		if tf == nil || len(tf.Points) < 2 {
+			continue
+		}
+		for i := 1; i < len(tf.Points); i++ {
+			d := pointToSegmentDist(x, y,
+				tf.Points[i-1].X, tf.Points[i-1].Y,
+				tf.Points[i].X, tf.Points[i].Y)
+			if d < bestDist {
+				bestDist = d
+				bestHit = &traceHit{traceID: tid, segIndex: i - 1}
+			}
 		}
 	}
-	return bestIdx
+	return bestHit
 }
 
 // pointToSegmentDist returns the distance from point (px, py) to the line segment (x1,y1)-(x2,y2).
@@ -5533,29 +5583,50 @@ func pointToSegmentDist(px, py, x1, y1, x2, y2 float64) float64 {
 	return math.Sqrt(ddx*ddx + ddy*ddy)
 }
 
-// deleteTraceSegment removes a segment from the current trace polyline by index.
-func (tp *TracesPanel) deleteTraceSegment(segIdx int) {
-	if segIdx < 0 || segIdx >= len(tp.tracePoints)-1 {
+// deleteTraceSegment removes a trace segment. If the trace has only one segment,
+// the entire trace is deleted. Otherwise, the waypoint is removed to collapse segments.
+func (tp *TracesPanel) deleteTraceSegment(hit *traceHit) {
+	if hit == nil {
 		return
 	}
-	fmt.Printf("Delete trace segment %d\n", segIdx)
-
-	// Remove the endpoint of this segment (point at segIdx+1),
-	// which collapses the two adjacent segments into one.
-	// Special cases: first or last segment removes the corresponding endpoint.
-	removeIdx := segIdx + 1
-	if removeIdx >= len(tp.tracePoints)-1 {
-		// Last segment — remove the last point
-		removeIdx = len(tp.tracePoints) - 1
+	tf := tp.state.FeaturesLayer.GetTraceFeature(hit.traceID)
+	if tf == nil {
+		return
 	}
-	tp.tracePoints = append(tp.tracePoints[:removeIdx], tp.tracePoints[removeIdx+1:]...)
 
-	tp.updateTraceOverlay()
-	if len(tp.tracePoints) < 2 {
-		tp.canvas.ClearOverlay("trace_segments")
-		tp.traceStatusLabel.SetText("Trace cleared")
+	nSegs := len(tf.Points) - 1
+	if nSegs <= 1 {
+		// Only one segment — delete the whole trace
+		tp.state.FeaturesLayer.RemoveTrace(hit.traceID)
+		tp.canvas.ClearOverlay(hit.traceID)
+		tp.traceStatusLabel.SetText(fmt.Sprintf("Deleted %s", hit.traceID))
 	} else {
-		tp.traceStatusLabel.SetText(fmt.Sprintf("Trace: %d segments", len(tp.tracePoints)-1))
+		// Remove the waypoint to collapse two segments into one
+		removeIdx := hit.segIndex + 1
+		if removeIdx >= len(tf.Points)-1 {
+			removeIdx = len(tf.Points) - 1
+		}
+		newPoints := make([]geometry.Point2D, 0, len(tf.Points)-1)
+		newPoints = append(newPoints, tf.Points[:removeIdx]...)
+		newPoints = append(newPoints, tf.Points[removeIdx+1:]...)
+
+		// Re-add with updated points, preserving the layer
+		layerRef := canvas.LayerFront
+		if tf.Layer == pcbtrace.LayerBack {
+			layerRef = canvas.LayerBack
+		}
+		tp.state.FeaturesLayer.RemoveTrace(hit.traceID)
+		et := pcbtrace.ExtendedTrace{
+			Trace: pcbtrace.Trace{
+				ID:     hit.traceID,
+				Layer:  tf.Layer,
+				Points: newPoints,
+			},
+			Source: pcbtrace.SourceManual,
+		}
+		tp.state.FeaturesLayer.AddTrace(et)
+		tp.renderTraceOverlay(hit.traceID, newPoints, layerRef)
+		tp.traceStatusLabel.SetText(fmt.Sprintf("%s: %d segments", hit.traceID, len(newPoints)-1))
 	}
 	tp.canvas.Refresh()
 }
@@ -5682,9 +5753,25 @@ func (tp *TracesPanel) deleteConfirmedViaSide(cv *via.ConfirmedVia, side pcbimag
 
 // deleteConnectedTrace removes the trace overlay connected to a confirmed via.
 func (tp *TracesPanel) deleteConnectedTrace(cv *via.ConfirmedVia) {
-	// For now, clear the trace segments overlay (single trace at a time)
-	tp.canvas.ClearOverlay("trace_segments")
-	tp.traceStatusLabel.SetText(fmt.Sprintf("Cleared trace from %s", cv.ID))
+	// Find and remove all traces that start or end at this via
+	tolerance := 5.0
+	removed := 0
+	for _, tid := range tp.state.FeaturesLayer.GetTraces() {
+		tf := tp.state.FeaturesLayer.GetTraceFeature(tid)
+		if tf == nil || len(tf.Points) < 2 {
+			continue
+		}
+		start := tf.Points[0]
+		end := tf.Points[len(tf.Points)-1]
+		startDist := math.Sqrt((start.X-cv.Center.X)*(start.X-cv.Center.X) + (start.Y-cv.Center.Y)*(start.Y-cv.Center.Y))
+		endDist := math.Sqrt((end.X-cv.Center.X)*(end.X-cv.Center.X) + (end.Y-cv.Center.Y)*(end.Y-cv.Center.Y))
+		if startDist <= tolerance || endDist <= tolerance {
+			tp.state.FeaturesLayer.RemoveTrace(tid)
+			tp.canvas.ClearOverlay(tid)
+			removed++
+		}
+	}
+	tp.traceStatusLabel.SetText(fmt.Sprintf("Deleted %d trace(s) from %s", removed, cv.ID))
 	tp.canvas.Refresh()
 }
 
@@ -5755,6 +5842,373 @@ func (tp *TracesPanel) nameNetlist(cv *via.ConfirmedVia) {
 	}, tp.window)
 	dlg.Resize(fyne.NewSize(300, 150))
 	dlg.Show()
+}
+
+// namePin shows a dialog to associate a confirmed via with a component pin.
+func (tp *TracesPanel) namePin(cv *via.ConfirmedVia) {
+	if tp.window == nil {
+		return
+	}
+
+	// Find the closest component to pre-populate
+	closestID := ""
+	if len(tp.state.Components) > 0 {
+		bestDist := math.MaxFloat64
+		for _, comp := range tp.state.Components {
+			center := comp.Center()
+			dx := center.X - cv.Center.X
+			dy := center.Y - cv.Center.Y
+			dist := math.Sqrt(dx*dx + dy*dy)
+			if dist < bestDist {
+				bestDist = dist
+				closestID = comp.ID
+			}
+		}
+	}
+
+	compEntry := widget.NewEntry()
+	if cv.ComponentID != "" {
+		compEntry.SetText(cv.ComponentID)
+	} else if closestID != "" {
+		compEntry.SetText(closestID)
+	}
+	compEntry.SetPlaceHolder("e.g. B13, U1")
+
+	pinEntry := widget.NewEntry()
+	if cv.PinNumber != "" {
+		pinEntry.SetText(cv.PinNumber)
+	}
+	pinEntry.SetPlaceHolder("e.g. 1, 14, VCC")
+
+	items := []*widget.FormItem{
+		widget.NewFormItem("Component", compEntry),
+		widget.NewFormItem("Pin", pinEntry),
+	}
+
+	dlg := dialog.NewForm("Name Pin", "OK", "Cancel", items, func(ok bool) {
+		if !ok {
+			return
+		}
+		cv.ComponentID = compEntry.Text
+		cv.PinNumber = pinEntry.Text
+
+		label := ""
+		if cv.ComponentID != "" && cv.PinNumber != "" {
+			label = fmt.Sprintf("%s-%s", cv.ComponentID, cv.PinNumber)
+		} else if cv.ComponentID != "" {
+			label = cv.ComponentID
+		}
+
+		if label != "" {
+			tp.viaStatusLabel.SetText(fmt.Sprintf("%s → pin %s", cv.ID, label))
+			fmt.Printf("Via %s associated with pin %s\n", cv.ID, label)
+		}
+
+		// Try auto-numbering remaining pins on this component
+		if cv.ComponentID != "" {
+			numbered := tp.autoNumberPins(cv.ComponentID)
+			if numbered > 0 {
+				tp.viaStatusLabel.SetText(fmt.Sprintf("%s → pin %s (auto-numbered %d more)", cv.ID, label, numbered))
+			}
+		}
+		tp.state.Emit(app.EventConfirmedViasChanged, nil)
+	}, tp.window)
+	dlg.Resize(fyne.NewSize(300, 200))
+	dlg.Show()
+}
+
+// autoNumberPins automatically assigns pin numbers to unnamed vias on a DIP component.
+// Requires at least 2 named anchor pins on the same component. Uses PCA to find the
+// row axis, clusters vias into 2 rows, and assigns DIP-style numbering (pins go down
+// one side, then back up the other). Returns the number of pins auto-numbered.
+func (tp *TracesPanel) autoNumberPins(componentID string) int {
+	if tp.state.DPI <= 0 {
+		return 0
+	}
+	pitch := 0.1 * tp.state.DPI // 0.1 inch in pixels
+
+	// Collect all vias for this component
+	var cvias []*via.ConfirmedVia
+	for _, cv := range tp.state.FeaturesLayer.GetConfirmedVias() {
+		if cv.ComponentID == componentID {
+			cvias = append(cvias, cv)
+		}
+	}
+	if len(cvias) < 3 {
+		return 0
+	}
+
+	// Find named anchors
+	type anchor struct {
+		cv  *via.ConfirmedVia
+		num int
+	}
+	var anchors []anchor
+	for _, cv := range cvias {
+		if cv.PinNumber != "" {
+			n, err := strconv.Atoi(cv.PinNumber)
+			if err == nil && n > 0 {
+				anchors = append(anchors, anchor{cv, n})
+			}
+		}
+	}
+	if len(anchors) < 2 {
+		return 0
+	}
+	sort.Slice(anchors, func(i, j int) bool { return anchors[i].num < anchors[j].num })
+
+	// Total pins (must be even for DIP)
+	totalPins := len(cvias)
+	if totalPins%2 != 0 {
+		totalPins++
+	}
+	halfPins := totalPins / 2
+
+	// Compute principal axis via PCA on via positions
+	var cx, cy float64
+	for _, cv := range cvias {
+		cx += cv.Center.X
+		cy += cv.Center.Y
+	}
+	cx /= float64(len(cvias))
+	cy /= float64(len(cvias))
+
+	var cxx, cxy, cyy float64
+	for _, cv := range cvias {
+		dx := cv.Center.X - cx
+		dy := cv.Center.Y - cy
+		cxx += dx * dx
+		cxy += dx * dy
+		cyy += dy * dy
+	}
+
+	// Principal eigenvector for the row direction
+	diff := (cxx - cyy) / 2
+	disc := math.Sqrt(diff*diff + cxy*cxy)
+	var axisX, axisY float64
+	if disc > 0 {
+		axisX, axisY = cxy, disc-diff
+	} else {
+		axisX, axisY = 1, 0
+	}
+	axisLen := math.Sqrt(axisX*axisX + axisY*axisY)
+	if axisLen > 0 {
+		axisX /= axisLen
+		axisY /= axisLen
+	}
+	perpX, perpY := -axisY, axisX
+
+	// Project all vias onto principal and perpendicular axes
+	projs := make([]viaProj, len(cvias))
+	for i, cv := range cvias {
+		dx := cv.Center.X - cx
+		dy := cv.Center.Y - cy
+		projs[i] = viaProj{
+			cv:   cv,
+			proj: dx*axisX + dy*axisY,
+			perp: dx*perpX + dy*perpY,
+		}
+	}
+
+	// Split into 2 rows by largest gap in perpendicular positions
+	sorted := make([]viaProj, len(projs))
+	copy(sorted, projs)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].perp < sorted[j].perp })
+
+	bestGap := 0.0
+	bestSplit := len(sorted) / 2
+	for i := 1; i < len(sorted); i++ {
+		gap := sorted[i].perp - sorted[i-1].perp
+		if gap > bestGap {
+			bestGap = gap
+			bestSplit = i
+		}
+	}
+
+	// Require a minimum gap between rows (at least half the pitch)
+	if bestGap < pitch*0.3 {
+		fmt.Printf("autoNumberPins: rows too close (gap=%.1f, pitch=%.1f)\n", bestGap, pitch)
+		return 0
+	}
+
+	row1 := make([]viaProj, bestSplit)
+	row2 := make([]viaProj, len(sorted)-bestSplit)
+	copy(row1, sorted[:bestSplit])
+	copy(row2, sorted[bestSplit:])
+
+	// Sort each row by projection along principal axis
+	sort.Slice(row1, func(i, j int) bool { return row1[i].proj < row1[j].proj })
+	sort.Slice(row2, func(i, j int) bool { return row2[i].proj < row2[j].proj })
+
+	// Find which row and index each anchor is in
+	findRowIdx := func(cv *via.ConfirmedVia) (row int, idx int) {
+		for i, p := range row1 {
+			if p.cv == cv {
+				return 1, i
+			}
+		}
+		for i, p := range row2 {
+			if p.cv == cv {
+				return 2, i
+			}
+		}
+		return 0, -1
+	}
+
+	// Try to find two anchors on the same row
+	var sameRowA, sameRowB *anchor
+	var sameRow int
+	var idxA, idxB int
+	for i := 0; i < len(anchors); i++ {
+		ri, ii := findRowIdx(anchors[i].cv)
+		for j := i + 1; j < len(anchors); j++ {
+			rj, ij := findRowIdx(anchors[j].cv)
+			if ri == rj && ri > 0 && ii != ij {
+				sameRowA = &anchors[i]
+				sameRowB = &anchors[j]
+				sameRow = ri
+				idxA = ii
+				idxB = ij
+				break
+			}
+		}
+		if sameRowA != nil {
+			break
+		}
+	}
+
+	if sameRowA == nil {
+		// No two anchors on the same row — use cross-row anchors
+		a, b := anchors[0], anchors[1]
+		rA, iA := findRowIdx(a.cv)
+		rB, iB := findRowIdx(b.cv)
+		if rA == 0 || rB == 0 || rA == rB {
+			return 0
+		}
+
+		// Pin across from K in DIP-N is N+1-K
+		// So if a is in row rA at index iA, and b is in row rB at index iB,
+		// the pin at row rA index iB would be totalPins+1-b.num
+		// Direction: (totalPins+1-b.num - a.num) / (iB - iA)
+		if iA == iB {
+			// Directly across — can't determine direction, default forward
+			// Assign row with lower pin number as row 1, pins increasing with index
+			r1 := row1
+			r2 := row2
+			startPin := a.num
+			startIdx := iA
+			if rA == 2 {
+				r1 = row2
+				r2 = row1
+			}
+			if a.num > halfPins {
+				// Anchor is on the "second" row, swap
+				r1, r2 = r2, r1
+				startPin = totalPins + 1 - a.num
+				startIdx = iA
+			}
+			return tp.applyPinNumbers(r1, r2, startPin, startIdx, true, totalPins)
+		}
+
+		// Cross-row with different indices — compute direction
+		crossPin := totalPins + 1 - b.num // what pin a's row would have at b's index
+		numDiff := crossPin - a.num
+		idxDiff := iB - iA
+		if idxDiff == 0 {
+			return 0
+		}
+		forward := (numDiff > 0) == (idxDiff > 0)
+		startPin := a.num
+		r1 := row1
+		r2 := row2
+		if rA == 2 {
+			r1 = row2
+			r2 = row1
+		}
+		return tp.applyPinNumbers(r1, r2, startPin, iA, forward, totalPins)
+	}
+
+	// Two anchors on the same row — determine direction
+	forward := (sameRowB.num-sameRowA.num > 0) == (idxB-idxA > 0)
+	startPin := sameRowA.num
+	r1 := row1
+	r2 := row2
+	startIdx := idxA
+	if sameRow == 2 {
+		r1 = row2
+		r2 = row1
+	}
+
+	// Check if this row is the "first" half (pins 1..N/2) or "second" half (N/2+1..N)
+	// The first half has consecutively increasing pins matching indices
+	// The second half has pins going the other direction
+	if sameRowA.num > halfPins {
+		// This row is the second half — swap rows so r1 is always first half
+		r1, r2 = r2, r1
+		// Compute equivalent first-half pin: totalPins+1-pin
+		startPin = totalPins + 1 - sameRowA.num
+		// Direction flips for the other row
+		forward = !forward
+		// Index is in the swapped row — find it
+		_, startIdx = findRowIdx(sameRowA.cv)
+	}
+
+	return tp.applyPinNumbers(r1, r2, startPin, startIdx, forward, totalPins)
+}
+
+// applyPinNumbers assigns DIP pin numbers to two rows of vias.
+// r1 is the "first" row (pins 1..N/2), r2 is the "second" row (pins N/2+1..N).
+// startPin is the pin number at startIdx in r1. forward=true means pins increase with index.
+// Returns the number of pins auto-numbered.
+func (tp *TracesPanel) applyPinNumbers(r1, r2 []viaProj, startPin, startIdx int, forward bool, totalPins int) int {
+	numbered := 0
+
+	// Assign pin numbers to row 1
+	for i := range r1 {
+		if r1[i].cv.PinNumber != "" {
+			continue
+		}
+		var pinNum int
+		if forward {
+			pinNum = startPin + (i - startIdx)
+		} else {
+			pinNum = startPin - (i - startIdx)
+		}
+		if pinNum >= 1 && pinNum <= totalPins {
+			r1[i].cv.PinNumber = strconv.Itoa(pinNum)
+			fmt.Printf("  auto-pin %s → %d\n", r1[i].cv.ID, pinNum)
+			numbered++
+		}
+	}
+
+	// Row 2: pin across from pin K is totalPins+1-K, and the row goes in reverse
+	for i := range r2 {
+		if r2[i].cv.PinNumber != "" {
+			continue
+		}
+		// The via at row2[i] is across from row1[i]
+		var r1Pin int
+		if forward {
+			r1Pin = startPin + (i - startIdx)
+		} else {
+			r1Pin = startPin - (i - startIdx)
+		}
+		pinNum := totalPins + 1 - r1Pin
+		if pinNum >= 1 && pinNum <= totalPins {
+			r2[i].cv.PinNumber = strconv.Itoa(pinNum)
+			fmt.Printf("  auto-pin %s → %d\n", r2[i].cv.ID, pinNum)
+			numbered++
+		}
+	}
+
+	return numbered
+}
+
+// viaProj is used internally by autoNumberPins for projecting vias onto axes.
+type viaProj struct {
+	cv   *via.ConfirmedVia
+	proj float64
+	perp float64
 }
 
 // getOrCreateNetForVia returns the net a via belongs to, or creates a new unnamed one.
@@ -6102,6 +6556,7 @@ func (tp *TracesPanel) setupTraceRubberBand() {
 // finishTrace is called when the polyline terminates at a confirmed via.
 func (tp *TracesPanel) finishTrace(endVia *via.ConfirmedVia) {
 	tp.canvas.ClearOverlay("trace_rubber_band")
+	tp.canvas.ClearOverlay("trace_segments") // Clear in-progress overlay
 	tp.canvas.OnMouseMove(nil)
 	tp.traceMode = false
 
@@ -6109,8 +6564,26 @@ func (tp *TracesPanel) finishTrace(endVia *via.ConfirmedVia) {
 	fmt.Printf("Trace complete: %s -> %s (%d segments, %d points)\n",
 		tp.traceStartVia.ID, endVia.ID, nSegs, len(tp.tracePoints))
 
-	// Keep the committed segments overlay visible
-	tp.updateTraceOverlay()
+	// Persist the trace to features layer
+	traceID := fmt.Sprintf("trace-%03d", tp.state.FeaturesLayer.TraceCount()+1)
+	points := make([]geometry.Point2D, len(tp.tracePoints))
+	copy(points, tp.tracePoints)
+	et := pcbtrace.ExtendedTrace{
+		Trace: pcbtrace.Trace{
+			ID:     traceID,
+			Layer:  tp.traceLayer,
+			Points: points,
+		},
+		Source: pcbtrace.SourceManual,
+	}
+	tp.state.FeaturesLayer.AddTrace(et)
+
+	// Render as a persistent overlay keyed by trace ID
+	layerRef := canvas.LayerFront
+	if tp.traceLayer == pcbtrace.LayerBack {
+		layerRef = canvas.LayerBack
+	}
+	tp.renderTraceOverlay(traceID, points, layerRef)
 
 	// Associate both vias with the same netlist
 	tp.associateTraceVias(tp.traceStartVia, endVia)
@@ -6126,46 +6599,24 @@ func (tp *TracesPanel) finishTrace(endVia *via.ConfirmedVia) {
 	tp.traceStartVia = nil
 }
 
-// OnMiddleClick handles middle-click for polyline trace drawing.
-// Coordinates are in canvas space (divide by zoom for image coords).
-func (tp *TracesPanel) OnMiddleClick(canvasX, canvasY float64) {
-	imgX, imgY := tp.canvas.CanvasToImage(canvasX, canvasY)
-	clickPt := geometry.Point2D{X: imgX, Y: imgY}
-
-	if !tp.traceMode {
-		// Not in trace mode — must click on a confirmed via to start
-		cv := tp.state.FeaturesLayer.HitTestConfirmedVia(imgX, imgY)
-		if cv == nil {
-			tp.traceStatusLabel.SetText("Click on a confirmed via to start")
-			return
-		}
-
-		tp.traceMode = true
-		tp.traceStartVia = cv
-		tp.tracePoints = []geometry.Point2D{cv.Center}
-
-		// Clear any previous trace overlay
-		tp.canvas.ClearOverlay("trace_segments")
-
-		tp.setupTraceRubberBand()
-		tp.traceStatusLabel.SetText(fmt.Sprintf("Trace from %s — click waypoints, end on a via", cv.ID))
+// renderTraceOverlay draws a completed trace as a persistent overlay on a specific layer.
+func (tp *TracesPanel) renderTraceOverlay(id string, points []geometry.Point2D, layer canvas.LayerRef) {
+	if len(points) < 2 {
 		return
 	}
-
-	// In trace mode — check if click lands on a confirmed via (that isn't the start)
-	cv := tp.state.FeaturesLayer.HitTestConfirmedVia(imgX, imgY)
-	if cv != nil && cv.ID != tp.traceStartVia.ID {
-		// Terminate at this via
-		tp.tracePoints = append(tp.tracePoints, cv.Center)
-		tp.finishTrace(cv)
-		return
+	lines := make([]canvas.OverlayLine, 0, len(points)-1)
+	for i := 1; i < len(points); i++ {
+		lines = append(lines, canvas.OverlayLine{
+			X1: points[i-1].X, Y1: points[i-1].Y,
+			X2: points[i].X, Y2: points[i].Y,
+			Thickness: 2,
+		})
 	}
-
-	// Otherwise, add a waypoint
-	tp.tracePoints = append(tp.tracePoints, clickPt)
-	tp.updateTraceOverlay()
-	tp.traceStatusLabel.SetText(fmt.Sprintf("Trace from %s — %d segments — click waypoints, end on a via",
-		tp.traceStartVia.ID, len(tp.tracePoints)-1))
+	tp.canvas.SetOverlay(id, &canvas.Overlay{
+		Lines: lines,
+		Color: color.RGBA{R: 0, G: 255, B: 0, A: 255},
+		Layer: layer,
+	})
 }
 
 // printContactStats prints contact statistics to stdout.

@@ -18,6 +18,8 @@ type ConfirmedVia struct {
 	Radius               float64            `json:"radius"`                // Average radius
 	IntersectionBoundary []geometry.Point2D `json:"intersection_boundary"` // Computed polygon intersection
 	Confidence           float64            `json:"confidence"`            // Combined confidence score (boosted)
+	ComponentID          string             `json:"component_id,omitempty"` // Associated component (e.g., "B13")
+	PinNumber            string             `json:"pin_number,omitempty"`   // Pin on that component (e.g., "1")
 }
 
 // NewConfirmedVia creates a new confirmed via from matched front and back vias.

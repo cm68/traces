@@ -12,7 +12,6 @@ import (
 
 	"fyne.io/fyne/v2"
 	fynecanvas "fyne.io/fyne/v2/canvas"
-	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/widget"
 )
@@ -110,23 +109,24 @@ type ImageCanvas struct {
 	onTypedKey     func(ev *fyne.KeyEvent)      // Key press callback
 }
 
-// zoomScroll is a widget that wraps a scroll container but intercepts wheel for zoom.
+// zoomScroll is a viewport widget that clips the content and handles zoom via scroll wheel.
+// Panning is done via drag on the content. No auto-scrolling — offset only changes
+// through explicit pan operations, zoom, or ScrollToRegion calls.
 type zoomScroll struct {
 	widget.BaseWidget
-	scroll *container.Scroll
-	canvas *ImageCanvas
+	content fyne.CanvasObject
+	canvas  *ImageCanvas
+	offset  fyne.Position // Manual pan offset (always non-negative)
+	size    fyne.Size     // Viewport size
 }
 
 func newZoomScroll(content fyne.CanvasObject, canvas *ImageCanvas) *zoomScroll {
-	scroll := container.NewScroll(content)
-	scroll.Direction = container.ScrollBoth
-	zs := &zoomScroll{scroll: scroll, canvas: canvas}
+	zs := &zoomScroll{content: content, canvas: canvas}
 	zs.ExtendBaseWidget(zs)
 	return zs
 }
 
 func (zs *zoomScroll) Scrolled(ev *fyne.ScrollEvent) {
-	// Use wheel for zoom, not scroll
 	if ev.Scrolled.DY > 0 {
 		zs.canvas.ZoomIn()
 	} else if ev.Scrolled.DY < 0 {
@@ -135,36 +135,96 @@ func (zs *zoomScroll) Scrolled(ev *fyne.ScrollEvent) {
 }
 
 func (zs *zoomScroll) CreateRenderer() fyne.WidgetRenderer {
-	return widget.NewSimpleRenderer(zs.scroll)
+	return &viewportRenderer{viewport: zs}
 }
 
-// Offset returns the scroll container's current offset.
+// Offset returns the current pan offset.
 func (zs *zoomScroll) Offset() fyne.Position {
-	return zs.scroll.Offset
+	return zs.offset
 }
 
-// Size returns the scroll container's size.
+// SetOffset sets the pan offset, clamping to valid range.
+func (zs *zoomScroll) SetOffset(offset fyne.Position) {
+	contentSize := zs.content.MinSize()
+	maxX := contentSize.Width - zs.size.Width
+	maxY := contentSize.Height - zs.size.Height
+	if maxX < 0 {
+		maxX = 0
+	}
+	if maxY < 0 {
+		maxY = 0
+	}
+	if offset.X < 0 {
+		offset.X = 0
+	}
+	if offset.Y < 0 {
+		offset.Y = 0
+	}
+	if offset.X > maxX {
+		offset.X = maxX
+	}
+	if offset.Y > maxY {
+		offset.Y = maxY
+	}
+	zs.offset = offset
+	zs.content.Move(fyne.NewPos(-zs.offset.X, -zs.offset.Y))
+}
+
+// Pan adjusts the offset by a delta.
+func (zs *zoomScroll) Pan(dx, dy float32) {
+	zs.SetOffset(fyne.NewPos(zs.offset.X+dx, zs.offset.Y+dy))
+}
+
+// Size returns the viewport size.
 func (zs *zoomScroll) Size() fyne.Size {
-	return zs.scroll.Size()
+	return zs.size
 }
 
-// Refresh refreshes the scroll container.
+// Refresh refreshes the viewport.
 func (zs *zoomScroll) Refresh() {
-	zs.scroll.Refresh()
+	zs.SetOffset(zs.offset) // Re-clamp after content size change
 	zs.BaseWidget.Refresh()
 }
 
-// Resize sets the size of the scroll container.
+// Resize sets the viewport size.
 func (zs *zoomScroll) Resize(size fyne.Size) {
-	zs.scroll.Resize(size)
+	zs.size = size
 	zs.BaseWidget.Resize(size)
+	zs.SetOffset(zs.offset) // Re-clamp
 }
+
+// viewportRenderer clips the content to the viewport bounds.
+type viewportRenderer struct {
+	viewport *zoomScroll
+}
+
+func (r *viewportRenderer) Layout(size fyne.Size) {
+	r.viewport.size = size
+	contentSize := r.viewport.content.MinSize()
+	r.viewport.content.Resize(contentSize)
+	r.viewport.SetOffset(r.viewport.offset)
+}
+
+func (r *viewportRenderer) MinSize() fyne.Size {
+	return fyne.NewSize(100, 100)
+}
+
+func (r *viewportRenderer) Refresh() {
+	r.viewport.content.Refresh()
+}
+
+func (r *viewportRenderer) Objects() []fyne.CanvasObject {
+	return []fyne.CanvasObject{r.viewport.content}
+}
+
+func (r *viewportRenderer) Destroy() {}
 
 // draggableContent wraps the raster to handle mouse events.
 type draggableContent struct {
 	widget.BaseWidget
-	canvas *ImageCanvas
-	raster *fynecanvas.Raster
+	canvas     *ImageCanvas
+	raster     *fynecanvas.Raster
+	middleDown bool // Middle mouse button is held (for pan)
 }
 
 func newDraggableContent(ic *ImageCanvas, raster *fynecanvas.Raster) *draggableContent {
@@ -185,12 +245,20 @@ func (dc *draggableContent) MinSize() fyne.Size {
 }
 
 func (dc *draggableContent) Dragged(ev *fyne.DragEvent) {
+	if dc.middleDown {
+		// Middle-button drag pans the viewport
+		if dc.canvas.scroll != nil {
+			dc.canvas.scroll.Pan(-ev.Dragged.DX, -ev.Dragged.DY)
+			dc.canvas.Refresh()
+		}
+		return
+	}
+
 	if !dc.canvas.selectMode {
 		return
 	}
 
 	// ev.Position is relative to the draggableContent widget (content coordinates)
-	// Fyne handles scroll offset internally, so no adjustment needed
 	pos := ev.Position
 
 	if !dc.canvas.selecting {
@@ -306,34 +374,29 @@ func (dc *draggableContent) TappedSecondary(ev *fyne.PointEvent) {
 	dc.canvas.onRightClick(imgX, imgY)
 }
 
-// MouseDown implements desktop.Mouseable for middle-click support.
+// MouseDown implements desktop.Mouseable for middle-click and pan tracking.
 func (dc *draggableContent) MouseDown(ev *desktop.MouseEvent) {
-	// Only handle middle button
-	if ev.Button != desktop.MouseButtonTertiary {
-		return
+	if ev.Button == desktop.MouseButtonTertiary {
+		dc.middleDown = true
+
+		if dc.canvas.onMiddleClick != nil {
+			size := dc.Size()
+			if ev.Position.X >= 0 && ev.Position.Y >= 0 &&
+				ev.Position.X <= size.Width && ev.Position.Y <= size.Height {
+				canvasX := float64(ev.Position.X)
+				canvasY := float64(ev.Position.Y)
+				dc.canvas.onMiddleClick(canvasX, canvasY)
+			}
+		}
 	}
-
-	if dc.canvas.onMiddleClick == nil {
-		return
-	}
-
-	// Workaround for Fyne bug: reject clicks outside widget bounds
-	size := dc.Size()
-	if ev.Position.X < 0 || ev.Position.Y < 0 ||
-		ev.Position.X > size.Width || ev.Position.Y > size.Height {
-		return
-	}
-
-	// desktop.MouseEvent.Position is relative to the widget (content), not the viewport.
-	// No need to add scroll offset - Fyne already delivers positions in content coordinates.
-	canvasX := float64(ev.Position.X)
-	canvasY := float64(ev.Position.Y)
-
-	dc.canvas.onMiddleClick(canvasX, canvasY)
 }
 
-// MouseUp implements desktop.Mouseable (required but unused).
-func (dc *draggableContent) MouseUp(ev *desktop.MouseEvent) {}
+// MouseUp implements desktop.Mouseable.
+func (dc *draggableContent) MouseUp(ev *desktop.MouseEvent) {
+	if ev.Button == desktop.MouseButtonTertiary {
+		dc.middleDown = false
+	}
+}
 
 // MouseIn implements desktop.Hoverable.
 func (dc *draggableContent) MouseIn(ev *desktop.MouseEvent) {}
@@ -645,53 +708,31 @@ func (ic *ImageCanvas) CheckResize(size fyne.Size) {
 	}
 }
 
-// ScrollToRegion scrolls the canvas so that the given image coordinates are visible.
+// ScrollToRegion pans the canvas so that the given image coordinates are centered.
 // x, y are in source image coordinates (not canvas/zoomed).
 func (ic *ImageCanvas) ScrollToRegion(x, y, width, height int) {
-	if ic.scroll == nil || ic.scroll.scroll == nil {
+	if ic.scroll == nil {
 		return
 	}
 
-	// Convert image coordinates to canvas coordinates
 	canvasX := float64(x) * ic.zoom
 	canvasY := float64(y) * ic.zoom
 	canvasW := float64(width) * ic.zoom
 	canvasH := float64(height) * ic.zoom
 
-	// Get viewport size
-	viewSize := ic.scroll.scroll.Size()
+	viewSize := ic.scroll.Size()
 	if viewSize.Width <= 0 || viewSize.Height <= 0 {
 		return
 	}
 
-	// Calculate center of the region in canvas coordinates
 	centerX := canvasX + canvasW/2
 	centerY := canvasY + canvasH/2
 
-	// Calculate scroll offset to center the region in the viewport
 	offsetX := centerX - float64(viewSize.Width)/2
 	offsetY := centerY - float64(viewSize.Height)/2
 
-	// Clamp to valid scroll range
-	if offsetX < 0 {
-		offsetX = 0
-	}
-	if offsetY < 0 {
-		offsetY = 0
-	}
-
-	maxX := float64(ic.imgSize.Width) - float64(viewSize.Width)
-	maxY := float64(ic.imgSize.Height) - float64(viewSize.Height)
-	if offsetX > maxX {
-		offsetX = maxX
-	}
-	if offsetY > maxY {
-		offsetY = maxY
-	}
-
-	// Set the scroll offset
-	ic.scroll.scroll.Offset = fyne.NewPos(float32(offsetX), float32(offsetY))
-	ic.scroll.scroll.Refresh()
+	ic.scroll.SetOffset(fyne.NewPos(float32(offsetX), float32(offsetY)))
+	ic.scroll.Refresh()
 }
 
 // SetTool sets the current interaction tool.
@@ -757,6 +798,7 @@ func (ic *ImageCanvas) ScrollOffset() fyne.Position {
 	}
 	return fyne.NewPos(0, 0)
 }
+
 
 // Refresh refreshes the canvas display.
 func (ic *ImageCanvas) Refresh() {
@@ -835,9 +877,25 @@ func (ic *ImageCanvas) draw(w, h int) image.Image {
 	ic.lastOutput = image.NewRGBA(output.Bounds())
 	draw.Draw(ic.lastOutput, ic.lastOutput.Bounds(), output, image.Point{}, draw.Src)
 
-	// Draw overlays
+	// Determine which layer is on top for overlay filtering
+	topLayerRef := LayerNone
+	if len(ic.layers) > 0 {
+		topLayer := ic.layers[len(ic.layers)-1]
+		if topLayer != nil {
+			if topLayer.Side == pcbimage.SideFront {
+				topLayerRef = LayerFront
+			} else if topLayer.Side == pcbimage.SideBack {
+				topLayerRef = LayerBack
+			}
+		}
+	}
+
+	// Draw overlays, skipping layer-specific overlays not on the top layer
 	for _, overlay := range ic.overlays {
 		if overlay != nil {
+			if overlay.Layer != LayerNone && overlay.Layer != topLayerRef {
+				continue
+			}
 			ic.drawOverlay(output, overlay)
 		}
 	}

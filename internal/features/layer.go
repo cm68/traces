@@ -119,6 +119,48 @@ func (l *DetectedFeaturesLayer) ClearVias() {
 	l.vias = l.vias[:0]
 }
 
+// RemoveTrace removes a single trace by ID.
+func (l *DetectedFeaturesLayer) RemoveTrace(id string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if _, ok := l.features[id]; !ok {
+		return false
+	}
+	delete(l.features, id)
+	delete(l.selected, id)
+	for i, tid := range l.traces {
+		if tid == id {
+			l.traces = append(l.traces[:i], l.traces[i+1:]...)
+			break
+		}
+	}
+	return true
+}
+
+// GetTraces returns all trace IDs.
+func (l *DetectedFeaturesLayer) GetTraces() []string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	result := make([]string, len(l.traces))
+	copy(result, l.traces)
+	return result
+}
+
+// GetTraceFeature returns the trace feature for the given ID, or nil.
+func (l *DetectedFeaturesLayer) GetTraceFeature(id string) *trace.ExtendedTrace {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	ref, ok := l.features[id]
+	if !ok {
+		return nil
+	}
+	if tf, ok := ref.Feature.(TraceFeature); ok {
+		return &tf.ExtendedTrace
+	}
+	return nil
+}
+
 // ClearTraces removes all traces from the layer.
 func (l *DetectedFeaturesLayer) ClearTraces() {
 	l.mu.Lock()

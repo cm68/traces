@@ -22,6 +22,7 @@ import (
 	"pcb-tracer/internal/datecode"
 	pcbimage "pcb-tracer/internal/image"
 	"pcb-tracer/internal/logo"
+	"pcb-tracer/internal/netlist"
 	"pcb-tracer/internal/ocr"
 	"pcb-tracer/internal/via"
 	"pcb-tracer/pkg/colorutil"
@@ -147,6 +148,8 @@ func (sp *SidePanel) ShowPanel(name string) {
 		sp.canvas.OnMiddleClick(sp.logosPanel.OnMiddleClick)
 	case PanelComponents:
 		sp.canvas.OnMiddleClick(sp.componentsPanel.OnMiddleClickFloodFill)
+	case PanelTraces:
+		sp.canvas.OnMiddleClick(sp.tracesPanel.OnMiddleClick)
 	default:
 		// No middle-click handler for other panels
 		sp.canvas.OnMiddleClick(nil)
@@ -225,6 +228,7 @@ func (sp *SidePanel) SetWindow(w fyne.Window) {
 	sp.propertiesPanel.SetWindow(w)
 	sp.componentsPanel.SetWindow(w)
 	sp.logosPanel.SetWindow(w)
+	sp.tracesPanel.SetWindow(w)
 }
 
 // AutoDetectAndAlign runs automatic contact detection on both images and aligns them.
@@ -2313,7 +2317,9 @@ func (ip *ImportPanel) updateImageStatus() {
 		ip.backLabel.SetText("No back image loaded")
 	}
 
-	// Check DPI consistency
+	// Check DPI consistency — only update state.DPI when layers provide positive values.
+	// Don't zero out state.DPI when layers lack DPI info (e.g. normalized PNGs),
+	// since the project file may have already set it.
 	if frontDPI > 0 && backDPI > 0 && frontDPI != backDPI {
 		ip.dpiLabel.SetText(fmt.Sprintf("DPI MISMATCH: %.0f vs %.0f", frontDPI, backDPI))
 		ip.state.DPI = 0
@@ -2323,8 +2329,10 @@ func (ip *ImportPanel) updateImageStatus() {
 	} else if backDPI > 0 {
 		ip.state.DPI = backDPI
 		ip.dpiLabel.SetText(fmt.Sprintf("DPI: %.0f", backDPI))
+	} else if ip.state.DPI > 0 {
+		// Layers don't have DPI but state already has it (from project file)
+		ip.dpiLabel.SetText(fmt.Sprintf("DPI: %.0f", ip.state.DPI))
 	} else {
-		ip.state.DPI = 0
 		ip.dpiLabel.SetText("DPI: Unknown")
 	}
 }
@@ -4881,6 +4889,7 @@ const (
 type TracesPanel struct {
 	state     *app.State
 	canvas    *canvas.ImageCanvas
+	window    fyne.Window
 	container fyne.CanvasObject
 
 	// Via detection UI
@@ -4893,13 +4902,17 @@ type TracesPanel struct {
 	confirmedCountLabel *widget.Label
 	trainingLabel       *widget.Label
 
-	// Via edit mode (when enabled, clicks add/remove vias)
-	viaEditMode      bool
-	viaEditModeCheck *widget.Check
-
 	// Trace detection UI
 	detectTracesBtn  *widget.Button
 	traceStatusLabel *widget.Label
+
+	// Trace drawing state (polyline mode)
+	traceMode     bool               // Currently drawing a polyline
+	traceStartVia *via.ConfirmedVia  // Source confirmed via
+	tracePoints   []geometry.Point2D // Committed polyline points (image coords)
+
+	// Selected via for arrow-key nudging
+	selectedVia *via.ConfirmedVia
 
 	// Default via radius for manual addition (pixels at current DPI)
 	defaultViaRadius float64
@@ -4945,20 +4958,31 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas) *TracesPanel {
 
 	tp.trainingLabel = widget.NewLabel("Training: 0 pos, 0 neg")
 
-	// Trace detection UI (stub for now)
-	tp.detectTracesBtn = widget.NewButton("Detect Traces", func() {
-		tp.traceStatusLabel.SetText("Trace detection not yet implemented")
+	// Trace detection UI
+	tp.detectTracesBtn = widget.NewButton("Clear Traces", func() {
+		tp.canvas.ClearOverlay("trace_segments")
+		tp.canvas.ClearOverlay("trace_rubber_band")
+		tp.traceMode = false
+		tp.traceStartVia = nil
+		tp.tracePoints = nil
+		tp.canvas.OnMouseMove(nil)
+		tp.traceStatusLabel.SetText("Cleared")
+		tp.canvas.Refresh()
 	})
-	tp.detectTracesBtn.Disable() // Disable until implemented
 
-	tp.traceStatusLabel = widget.NewLabel("")
+	tp.traceStatusLabel = widget.NewLabel("Middle-click a confirmed via to start")
 
-	// Set up click handlers for manual via annotation
+	// Set up click handlers
 	cvs.OnLeftClick(func(x, y float64) {
-		tp.onLeftClickVia(x, y)
+		tp.onLeftClick(x, y)
 	})
 	cvs.OnRightClick(func(x, y float64) {
 		tp.onRightClickVia(x, y)
+	})
+
+	// Set up key handler for arrow-key via nudging
+	cvs.OnTypedKey(func(ev *fyne.KeyEvent) {
+		tp.onTypedKey(ev)
 	})
 
 	// Load training set from default location
@@ -4967,28 +4991,15 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas) *TracesPanel {
 
 	// Auto-match vias and create connectors when alignment completes
 	state.On(app.EventAlignmentComplete, func(data interface{}) {
-		// Create connectors from detected contacts (but don't show overlay)
 		tp.state.CreateConnectorsFromAlignment()
 		connCount := tp.state.FeaturesLayer.ConnectorCount()
 		fmt.Printf("Created %d connectors from alignment contacts\n", connCount)
-		// Don't create connector overlay - user doesn't want contacts outlined
 
-		// Auto-match vias if both sides have vias
 		frontVias := tp.state.FeaturesLayer.GetViasBySide(pcbimage.SideFront)
 		backVias := tp.state.FeaturesLayer.GetViasBySide(pcbimage.SideBack)
 		if len(frontVias) > 0 && len(backVias) > 0 {
 			fmt.Printf("Auto-matching vias after alignment complete...\n")
 			tp.tryMatchVias()
-		}
-	})
-
-	// Via edit mode checkbox
-	tp.viaEditModeCheck = widget.NewCheck("Enable via edit mode", func(checked bool) {
-		tp.viaEditMode = checked
-		if checked {
-			tp.viaStatusLabel.SetText("Edit mode: click to add, right-click to remove")
-		} else {
-			tp.viaStatusLabel.SetText("")
 		}
 	})
 
@@ -5002,18 +5013,31 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas) *TracesPanel {
 			tp.viaStatusLabel,
 			tp.viaCountLabel,
 			tp.confirmedCountLabel,
-		)),
-		widget.NewCard("Manual Via Editing", "", container.NewVBox(
-			tp.viaEditModeCheck,
-			widget.NewLabel("Left-click: add via"),
-			widget.NewLabel("Right-click: remove via"),
 			tp.trainingLabel,
+			widget.NewSeparator(),
+			widget.NewLabel("Cyan=front  Magenta=back  Blue=both"),
+			widget.NewLabel("Left-click: select via  Right-click: menu"),
+			widget.NewLabel("Arrow keys: nudge selected via"),
+			widget.NewLabel("Middle-click: draw trace between vias"),
 		)),
 		widget.NewCard("Trace Detection", "", container.NewVBox(
 			tp.detectTracesBtn,
 			tp.traceStatusLabel,
 		)),
 	)
+
+	// Restore via overlays on project load
+	state.On(app.EventProjectLoaded, func(_ interface{}) {
+		tp.refreshAllViaOverlays()
+		front, back := tp.state.FeaturesLayer.ViaCountBySide()
+		if front+back > 0 {
+			tp.viaCountLabel.SetText(fmt.Sprintf("Vias: %d front, %d back", front, back))
+		}
+		confirmed := tp.state.FeaturesLayer.GetConfirmedVias()
+		if len(confirmed) > 0 {
+			tp.confirmedCountLabel.SetText(fmt.Sprintf("Confirmed: %d", len(confirmed)))
+		}
+	})
 
 	return tp
 }
@@ -5218,6 +5242,11 @@ func (tp *TracesPanel) Container() fyne.CanvasObject {
 	return tp.container
 }
 
+// SetWindow sets the parent window for context menus.
+func (tp *TracesPanel) SetWindow(w fyne.Window) {
+	tp.window = w
+}
+
 // SetEnabled enables or disables the panel's interactive widgets.
 func (tp *TracesPanel) SetEnabled(enabled bool) {
 	if enabled {
@@ -5261,229 +5290,331 @@ func (tp *TracesPanel) updateTrainingLabel() {
 	tp.trainingLabel.SetText(fmt.Sprintf("Training: %d pos, %d neg", pos, neg))
 }
 
-// onLeftClickVia handles left-click to add a via at the clicked location.
-// If the click is near an existing via, the new boundary is merged with it.
-// If the click is inside a confirmed via, the underlying via on the selected side is expanded.
-func (tp *TracesPanel) onLeftClickVia(x, y float64) {
-	// Only process clicks when via edit mode is enabled
-	if !tp.viaEditMode {
-		return
-	}
-	fmt.Printf("\n=== LEFT CLICK VIA at (%.1f, %.1f) ===\n", x, y)
-
-	// Determine which side based on current layer selection
-	isFront := tp.viaLayerSelect.Selected == "Front"
-	var side pcbimage.Side
-	var img *pcbimage.Layer
-	if isFront {
-		side = pcbimage.SideFront
-		img = tp.state.FrontImage
-		fmt.Printf("  Side: FRONT\n")
+// onLeftClick handles left-click to select a confirmed via for arrow-key nudging.
+func (tp *TracesPanel) onLeftClick(x, y float64) {
+	cv := tp.state.FeaturesLayer.HitTestConfirmedVia(x, y)
+	if cv != nil {
+		tp.selectVia(cv)
 	} else {
-		side = pcbimage.SideBack
-		img = tp.state.BackImage
-		fmt.Printf("  Side: BACK\n")
+		tp.deselectVia()
 	}
-
-	if img == nil {
-		fmt.Printf("  ERROR: No image loaded for this side\n")
-		tp.viaStatusLabel.SetText("No image loaded for this side")
-		return
-	}
-
-	// Calculate max search radius based on DPI (typical via is ~0.050" max diameter)
-	maxRadius := tp.defaultViaRadius
-	if tp.state.DPI > 0 {
-		maxRadius = 0.030 * tp.state.DPI // 30 mil search radius
-	}
-	fmt.Printf("  Max search radius: %.1f px (DPI=%.0f)\n", maxRadius, tp.state.DPI)
-
-	// First, check if click is inside a confirmed via
-	confirmedVia := tp.state.FeaturesLayer.HitTestConfirmedVia(x, y)
-	if confirmedVia != nil {
-		fmt.Printf("  HIT CONFIRMED VIA: %s\n", confirmedVia.ID)
-		tp.expandConfirmedVia(confirmedVia, x, y, side, img, maxRadius)
-		return
-	}
-
-	// Detect metal boundary around the clicked point
-	fmt.Printf("  Calling DetectMetalBoundary...\n")
-	boundary := via.DetectMetalBoundary(img.Image, x, y, maxRadius)
-	fmt.Printf("  Boundary result: center=(%.1f,%.1f) radius=%.1f isCircle=%v boundaryPts=%d\n",
-		boundary.Center.X, boundary.Center.Y, boundary.Radius, boundary.IsCircle, len(boundary.Boundary))
-
-	// Check if click is near an existing via - if so, merge boundaries
-	// Use 1mm tolerance (1mm = ~0.03937 inches)
-	mergeTolerance := 15.0 // Default 15 pixels
-	if tp.state.DPI > 0 {
-		mergeTolerance = 0.03937 * tp.state.DPI // 1mm in pixels
-	}
-	fmt.Printf("  Checking for nearby vias (tolerance=%.1f px)...\n", mergeTolerance)
-	vias := tp.state.FeaturesLayer.GetViasBySide(side)
-	fmt.Printf("  Existing vias on this side: %d\n", len(vias))
-	var nearestVia *via.Via
-	nearestDist := mergeTolerance * mergeTolerance
-
-	for i := range vias {
-		v := &vias[i]
-		dx := v.Center.X - x
-		dy := v.Center.Y - y
-		dist := dx*dx + dy*dy
-		if dist < nearestDist {
-			nearestDist = dist
-			nearestVia = v
-		}
-	}
-
-	if nearestVia != nil {
-		fmt.Printf("  MERGE: Found nearby via %s at dist=%.1f\n", nearestVia.ID, math.Sqrt(nearestDist))
-		// Merge with existing via
-		existingBoundary := via.BoundaryResult{
-			Center:   nearestVia.Center,
-			Radius:   nearestVia.Radius,
-			Boundary: nearestVia.PadBoundary,
-			IsCircle: len(nearestVia.PadBoundary) == 0,
-		}
-		fmt.Printf("  Existing boundary: pts=%d radius=%.1f\n", len(existingBoundary.Boundary), existingBoundary.Radius)
-
-		fmt.Printf("  Calling MergeBoundaries...\n")
-		merged := via.MergeBoundaries(existingBoundary, boundary)
-		fmt.Printf("  Merged result: center=(%.1f,%.1f) radius=%.1f pts=%d\n",
-			merged.Center.X, merged.Center.Y, merged.Radius, len(merged.Boundary))
-
-		// Filter out any green points from the merged boundary
-		merged.Boundary = via.FilterGreenPoints(img.Image, merged.Boundary)
-		fmt.Printf("  After green filter: %d pts\n", len(merged.Boundary))
-
-		// Debug: dump pixel colors and PNG for merged boundary
-		if false {
-			via.DumpBoundaryPixels(img.Image, merged.Boundary, nearestVia.ID+"-merged")
-			via.DumpBoundaryPNG(img.Image, merged.Boundary, nearestVia.ID+"-merged")
-		}
-
-		// Update the existing via with merged boundary
-		tp.state.FeaturesLayer.RemoveVia(nearestVia.ID)
-		updatedVia := via.Via{
-			ID:          nearestVia.ID,
-			Center:      merged.Center,
-			Radius:      merged.Radius,
-			Side:        side,
-			Confidence:  1.0,
-			Method:      via.MethodManual,
-			Circularity: 1.0,
-			PadBoundary: merged.Boundary,
-		}
-		tp.state.FeaturesLayer.AddVia(updatedVia)
-		fmt.Printf("  Updated via %s with %d boundary points\n", updatedVia.ID, len(updatedVia.PadBoundary))
-
-		fmt.Printf("  Calling refreshViaOverlay...\n")
-		tp.refreshViaOverlay(side)
-		front, back := tp.state.FeaturesLayer.ViaCountBySide()
-		tp.viaCountLabel.SetText(fmt.Sprintf("Vias: %d front, %d back", front, back))
-		tp.viaStatusLabel.SetText(fmt.Sprintf("Expanded %s (r=%.0f)", nearestVia.ID, merged.Radius))
-		tp.state.Emit(app.EventFeaturesChanged, nil)
-		fmt.Printf("  MERGE COMPLETE\n")
-		return
-	}
-
-	// No nearby via - create a new one
-	fmt.Printf("  NEW VIA: No nearby via found, creating new one\n")
-	viaNum := tp.state.FeaturesLayer.NextViaNumber()
-
-	// Create manual via with detected boundary
-	newVia := via.Via{
-		ID:          fmt.Sprintf("via-%03d", viaNum),
-		Center:      boundary.Center,
-		Radius:      boundary.Radius,
-		Side:        side,
-		Confidence:  1.0, // Manual = high confidence
-		Method:      via.MethodManual,
-		Circularity: 1.0,
-		PadBoundary: boundary.Boundary,
-	}
-	fmt.Printf("  Created via %s with %d boundary points\n", newVia.ID, len(newVia.PadBoundary))
-
-	// Debug: dump pixel colors and PNG for manual vias
-	if false {
-		via.DumpBoundaryPixels(img.Image, boundary.Boundary, newVia.ID)
-		via.DumpBoundaryPNG(img.Image, boundary.Boundary, newVia.ID)
-	}
-
-	// Add to features layer
-	tp.state.FeaturesLayer.AddVia(newVia)
-
-	// Quick-match: check if there's a matching via on the opposite side
-	var matchedVia *via.Via
-	var statusMsg string
-	if tp.state.Aligned {
-		matchedVia = tp.tryQuickMatchVia(&newVia)
-		if matchedVia != nil {
-			statusMsg = fmt.Sprintf("Added %s + matched %s → confirmed", newVia.ID, matchedVia.ID)
-		} else {
-			statusMsg = fmt.Sprintf("Added %s (r=%.0f)", newVia.ID, boundary.Radius)
-		}
-	} else {
-		statusMsg = fmt.Sprintf("Added %s (r=%.0f)", newVia.ID, boundary.Radius)
-	}
-
-	// Add positive training sample
-	if tp.state.ViaTrainingSet != nil {
-		tp.state.ViaTrainingSet.AddPositive(boundary.Center, boundary.Radius, side, "manual")
-		if err := tp.state.ViaTrainingSet.Save(); err != nil {
-			fmt.Printf("Warning: failed to save training set: %v\n", err)
-		}
-		tp.updateTrainingLabel()
-	}
-
-	// Update overlay
-	fmt.Printf("  Calling refreshViaOverlay...\n")
-	tp.refreshViaOverlay(side)
-	if matchedVia != nil {
-		// Also refresh the other side and confirmed vias overlay
-		if side == pcbimage.SideFront {
-			tp.refreshViaOverlay(pcbimage.SideBack)
-		} else {
-			tp.refreshViaOverlay(pcbimage.SideFront)
-		}
-		tp.refreshConfirmedViaOverlay()
-	}
-
-	// Update counts
-	front, back := tp.state.FeaturesLayer.ViaCountBySide()
-	tp.viaCountLabel.SetText(fmt.Sprintf("Vias: %d front, %d back", front, back))
-
-	tp.viaStatusLabel.SetText(statusMsg)
-	tp.state.Emit(app.EventFeaturesChanged, nil)
-	if matchedVia != nil {
-		tp.state.Emit(app.EventConfirmedViasChanged, nil)
-	}
-	fmt.Printf("  NEW VIA COMPLETE\n")
 }
 
-// onRightClickVia handles right-click to remove a via at the clicked location.
-func (tp *TracesPanel) onRightClickVia(x, y float64) {
-	// Only process clicks when via edit mode is enabled
-	if !tp.viaEditMode {
+// selectVia makes a confirmed via the selected via for nudging.
+func (tp *TracesPanel) selectVia(cv *via.ConfirmedVia) {
+	tp.selectedVia = cv
+	tp.viaStatusLabel.SetText(fmt.Sprintf("Selected %s — arrow keys to nudge, Shift for 5px", cv.ID))
+
+	// Show selection highlight (white circle overlay)
+	tp.updateSelectedViaOverlay()
+
+	// Request keyboard focus
+	if tp.window != nil {
+		tp.canvas.FocusCanvas(tp.window)
+	}
+}
+
+// deselectVia clears the selected via.
+func (tp *TracesPanel) deselectVia() {
+	if tp.selectedVia == nil {
 		return
 	}
-	// Determine which side based on current layer selection
-	isFront := tp.viaLayerSelect.Selected == "Front"
-	var side pcbimage.Side
-	if isFront {
-		side = pcbimage.SideFront
-	} else {
-		side = pcbimage.SideBack
+	tp.selectedVia = nil
+	tp.canvas.ClearOverlay("selected_via")
+	tp.viaStatusLabel.SetText("")
+	tp.canvas.Refresh()
+}
+
+// updateSelectedViaOverlay draws a highlight ring around the selected via.
+func (tp *TracesPanel) updateSelectedViaOverlay() {
+	if tp.selectedVia == nil {
+		tp.canvas.ClearOverlay("selected_via")
+		return
+	}
+	cv := tp.selectedVia
+	tp.canvas.SetOverlay("selected_via", &canvas.Overlay{
+		Circles: []canvas.OverlayCircle{
+			{X: cv.Center.X, Y: cv.Center.Y, Radius: cv.Radius + 3, Filled: false},
+		},
+		Color: color.RGBA{R: 255, G: 255, B: 255, A: 255}, // White highlight
+	})
+}
+
+// onTypedKey handles keyboard input for arrow-key via nudging.
+func (tp *TracesPanel) onTypedKey(ev *fyne.KeyEvent) {
+	if tp.selectedVia == nil {
+		return
 	}
 
-	// Find tolerance based on DPI (click within ~0.030" of via center)
-	tolerance := 20.0 // Default pixels
+	step := 1.0
+	// Check if shift is held — Fyne delivers shifted arrow keys as the same key,
+	// so we use desktop.CurrentKeyModifiers if available
+	if mod, ok := fyne.CurrentApp().Driver().(desktop.Driver); ok {
+		if mod.CurrentKeyModifiers()&fyne.KeyModifierShift != 0 {
+			step = 5.0
+		}
+	}
+
+	cv := tp.selectedVia
+	switch ev.Name {
+	case fyne.KeyUp:
+		cv.Center.Y -= step
+	case fyne.KeyDown:
+		cv.Center.Y += step
+	case fyne.KeyLeft:
+		cv.Center.X -= step
+	case fyne.KeyRight:
+		cv.Center.X += step
+	case fyne.KeyEscape:
+		tp.deselectVia()
+		return
+	default:
+		return
+	}
+
+	// Regenerate boundary circle at new center
+	cv.IntersectionBoundary = geometry.GenerateCirclePoints(cv.Center.X, cv.Center.Y, cv.Radius, 32)
+
+	tp.refreshConfirmedViaOverlay()
+	tp.updateSelectedViaOverlay()
+	tp.canvas.Refresh()
+	tp.viaStatusLabel.SetText(fmt.Sprintf("%s center: (%.0f, %.0f)", cv.ID, cv.Center.X, cv.Center.Y))
+	tp.state.Emit(app.EventConfirmedViasChanged, nil)
+}
+
+// onRightClickVia handles right-click on the canvas — always shows a context menu.
+func (tp *TracesPanel) onRightClickVia(x, y float64) {
+	if tp.window == nil {
+		return
+	}
+
+	// Compute popup position from image coords
+	canvasObj := tp.canvas.Container()
+	absPos := fyne.CurrentApp().Driver().AbsolutePositionForObject(canvasObj)
+	scrollOffset := tp.canvas.ScrollOffset()
+	popupPos := fyne.NewPos(
+		absPos.X+float32(x*tp.canvas.GetZoom())-scrollOffset.X,
+		absPos.Y+float32(y*tp.canvas.GetZoom())-scrollOffset.Y,
+	)
+
+	cv := tp.state.FeaturesLayer.HitTestConfirmedVia(x, y)
+	if cv != nil {
+		tp.showConfirmedViaMenu(cv, popupPos)
+		return
+	}
+
+	// Not on a confirmed via — show general menu
+	tp.showGeneralViaMenu(x, y, popupPos)
+}
+
+// showConfirmedViaMenu shows the context menu for a confirmed via.
+func (tp *TracesPanel) showConfirmedViaMenu(cv *via.ConfirmedVia, pos fyne.Position) {
+	radiusStep := 2.0
+	if tp.state.DPI > 0 {
+		radiusStep = 0.005 * tp.state.DPI // ~5 mil step
+	}
+
+	// Build netlist label
+	net := tp.state.FeaturesLayer.GetNetForElement(cv.ID)
+	netLabel := "Name Netlist..."
+	if net != nil {
+		netLabel = fmt.Sprintf("Netlist: %s", net.Name)
+	}
+
+	items := []*fyne.MenuItem{
+		fyne.NewMenuItem(netLabel, func() {
+			tp.nameNetlist(cv)
+		}),
+		fyne.NewMenuItemSeparator(),
+		fyne.NewMenuItem("Delete Via", func() {
+			tp.deleteConfirmedVia(cv)
+		}),
+		fyne.NewMenuItem("Delete Front", func() {
+			tp.deleteConfirmedViaSide(cv, pcbimage.SideFront)
+		}),
+		fyne.NewMenuItem("Delete Back", func() {
+			tp.deleteConfirmedViaSide(cv, pcbimage.SideBack)
+		}),
+		fyne.NewMenuItem("Delete Connected Trace", func() {
+			tp.deleteConnectedTrace(cv)
+		}),
+		fyne.NewMenuItemSeparator(),
+		fyne.NewMenuItem("Decrease Radius", func() {
+			tp.adjustConfirmedViaRadius(cv, -radiusStep)
+		}),
+		fyne.NewMenuItem("Increase Radius", func() {
+			tp.adjustConfirmedViaRadius(cv, radiusStep)
+		}),
+	}
+
+	popup := widget.NewPopUpMenu(fyne.NewMenu("", items...), tp.window.Canvas())
+	popup.ShowAtPosition(pos)
+}
+
+// showGeneralViaMenu shows the context menu when not on a confirmed via.
+func (tp *TracesPanel) showGeneralViaMenu(imgX, imgY float64, pos fyne.Position) {
+	items := []*fyne.MenuItem{
+		fyne.NewMenuItem("Add Confirmed Via", func() {
+			tp.addConfirmedViaAt(imgX, imgY)
+		}),
+		fyne.NewMenuItem("Delete Front Via", func() {
+			tp.deleteNearestVia(imgX, imgY, pcbimage.SideFront)
+		}),
+		fyne.NewMenuItem("Delete Back Via", func() {
+			tp.deleteNearestVia(imgX, imgY, pcbimage.SideBack)
+		}),
+	}
+
+	// Check if click is near a trace segment
+	if segIdx := tp.hitTestTraceSegment(imgX, imgY); segIdx >= 0 {
+		idx := segIdx // capture for closure
+		items = append(items,
+			fyne.NewMenuItemSeparator(),
+			fyne.NewMenuItem("Delete Segment", func() {
+				tp.deleteTraceSegment(idx)
+			}),
+		)
+	}
+
+	popup := widget.NewPopUpMenu(fyne.NewMenu("", items...), tp.window.Canvas())
+	popup.ShowAtPosition(pos)
+}
+
+// hitTestTraceSegment returns the index of the trace segment closest to (x, y),
+// or -1 if no segment is within tolerance.
+func (tp *TracesPanel) hitTestTraceSegment(x, y float64) int {
+	if len(tp.tracePoints) < 2 {
+		return -1
+	}
+
+	// Tolerance in image pixels
+	tolerance := 10.0
+	if tp.state.DPI > 0 {
+		tolerance = 0.015 * tp.state.DPI // ~15 mil
+	}
+
+	bestIdx := -1
+	bestDist := tolerance
+
+	for i := 1; i < len(tp.tracePoints); i++ {
+		d := pointToSegmentDist(x, y,
+			tp.tracePoints[i-1].X, tp.tracePoints[i-1].Y,
+			tp.tracePoints[i].X, tp.tracePoints[i].Y)
+		if d < bestDist {
+			bestDist = d
+			bestIdx = i - 1 // segment index
+		}
+	}
+	return bestIdx
+}
+
+// pointToSegmentDist returns the distance from point (px, py) to the line segment (x1,y1)-(x2,y2).
+func pointToSegmentDist(px, py, x1, y1, x2, y2 float64) float64 {
+	dx := x2 - x1
+	dy := y2 - y1
+	lenSq := dx*dx + dy*dy
+	if lenSq == 0 {
+		// Degenerate segment (point)
+		ddx := px - x1
+		ddy := py - y1
+		return math.Sqrt(ddx*ddx + ddy*ddy)
+	}
+	// Project point onto line, clamped to [0, 1]
+	t := ((px-x1)*dx + (py-y1)*dy) / lenSq
+	if t < 0 {
+		t = 0
+	} else if t > 1 {
+		t = 1
+	}
+	projX := x1 + t*dx
+	projY := y1 + t*dy
+	ddx := px - projX
+	ddy := py - projY
+	return math.Sqrt(ddx*ddx + ddy*ddy)
+}
+
+// deleteTraceSegment removes a segment from the current trace polyline by index.
+func (tp *TracesPanel) deleteTraceSegment(segIdx int) {
+	if segIdx < 0 || segIdx >= len(tp.tracePoints)-1 {
+		return
+	}
+	fmt.Printf("Delete trace segment %d\n", segIdx)
+
+	// Remove the endpoint of this segment (point at segIdx+1),
+	// which collapses the two adjacent segments into one.
+	// Special cases: first or last segment removes the corresponding endpoint.
+	removeIdx := segIdx + 1
+	if removeIdx >= len(tp.tracePoints)-1 {
+		// Last segment — remove the last point
+		removeIdx = len(tp.tracePoints) - 1
+	}
+	tp.tracePoints = append(tp.tracePoints[:removeIdx], tp.tracePoints[removeIdx+1:]...)
+
+	tp.updateTraceOverlay()
+	if len(tp.tracePoints) < 2 {
+		tp.canvas.ClearOverlay("trace_segments")
+		tp.traceStatusLabel.SetText("Trace cleared")
+	} else {
+		tp.traceStatusLabel.SetText(fmt.Sprintf("Trace: %d segments", len(tp.tracePoints)-1))
+	}
+	tp.canvas.Refresh()
+}
+
+// addConfirmedViaAt places a perfect circular confirmed via at the exact click point.
+// Creates matching front and back vias with a small default radius.
+func (tp *TracesPanel) addConfirmedViaAt(x, y float64) {
+	// Small starting radius
+	radius := 12.0
+	if tp.state.DPI > 0 {
+		radius = 0.018 * tp.state.DPI // ~18 mil (equivalent to 2 increase steps)
+	}
+
+	center := geometry.Point2D{X: x, Y: y}
+	boundary := geometry.GenerateCirclePoints(x, y, radius, 32)
+
+	// Create front and back vias at the same location
+	viaNum := tp.state.FeaturesLayer.NextViaNumber()
+	frontVia := via.Via{
+		ID: fmt.Sprintf("via-%03d", viaNum), Center: center,
+		Radius: radius, Side: pcbimage.SideFront, Confidence: 1.0,
+		Method: via.MethodManual, Circularity: 1.0, PadBoundary: boundary,
+		BothSidesConfirmed: true,
+	}
+	tp.state.FeaturesLayer.AddVia(frontVia)
+
+	backVia := via.Via{
+		ID: fmt.Sprintf("via-%03d", viaNum+1), Center: center,
+		Radius: radius, Side: pcbimage.SideBack, Confidence: 1.0,
+		Method: via.MethodManual, Circularity: 1.0, PadBoundary: boundary,
+		BothSidesConfirmed: true, MatchedViaID: frontVia.ID,
+	}
+	frontVia.MatchedViaID = backVia.ID
+	tp.state.FeaturesLayer.UpdateVia(frontVia)
+	tp.state.FeaturesLayer.AddVia(backVia)
+
+	// Create confirmed via
+	cvNum := tp.state.FeaturesLayer.NextConfirmedViaNumber()
+	cvID := fmt.Sprintf("cvia-%03d", cvNum)
+	cv := via.NewConfirmedVia(cvID, &frontVia, &backVia)
+	tp.state.FeaturesLayer.AddConfirmedVia(cv)
+
+	fmt.Printf("Added confirmed via %s at (%.0f, %.0f) r=%.0f\n", cvID, x, y, radius)
+
+	tp.refreshAllViaOverlays()
+	tp.updateViaCounts()
+	tp.selectVia(cv)
+
+	tp.state.Emit(app.EventFeaturesChanged, nil)
+	tp.state.Emit(app.EventConfirmedViasChanged, nil)
+}
+
+// deleteNearestVia removes the closest via on the given side near (x, y).
+func (tp *TracesPanel) deleteNearestVia(x, y float64, side pcbimage.Side) {
+	tolerance := 20.0
 	if tp.state.DPI > 0 {
 		tolerance = 0.030 * tp.state.DPI
 	}
 
-	center := geometry.Point2D{X: x, Y: y}
-
-	// Find and remove the closest via within tolerance
 	vias := tp.state.FeaturesLayer.GetViasBySide(side)
 	var closestVia *via.Via
 	closestDist := tolerance * tolerance
@@ -5500,105 +5631,191 @@ func (tp *TracesPanel) onRightClickVia(x, y float64) {
 	}
 
 	if closestVia == nil {
-		tp.viaStatusLabel.SetText(fmt.Sprintf("No via near (%.0f, %.0f)", x, y))
+		tp.viaStatusLabel.SetText(fmt.Sprintf("No %s via near (%.0f, %.0f)", side.String(), x, y))
 		return
 	}
 
-	// Remove from features layer
 	tp.state.FeaturesLayer.RemoveVia(closestVia.ID)
-
-	// Add negative training sample (this location is NOT a via)
-	if tp.state.ViaTrainingSet != nil {
-		tp.state.ViaTrainingSet.AddNegative(center, closestVia.Radius, side, "rejected")
-		if err := tp.state.ViaTrainingSet.Save(); err != nil {
-			fmt.Printf("Warning: failed to save training set: %v\n", err)
-		}
-		tp.updateTrainingLabel()
-	}
-
-	// Update overlay
 	tp.refreshViaOverlay(side)
-
-	// Update counts
-	front, back := tp.state.FeaturesLayer.ViaCountBySide()
-	tp.viaCountLabel.SetText(fmt.Sprintf("Vias: %d front, %d back", front, back))
-
-	tp.viaStatusLabel.SetText(fmt.Sprintf("Removed via %s", closestVia.ID))
+	tp.updateViaCounts()
+	tp.viaStatusLabel.SetText(fmt.Sprintf("Removed %s via %s", side.String(), closestVia.ID))
 	tp.state.Emit(app.EventFeaturesChanged, nil)
 }
 
-// expandConfirmedVia handles expanding a confirmed via when it's clicked.
-// The underlying via on the selected side is expanded, then the intersection is recomputed.
-func (tp *TracesPanel) expandConfirmedVia(cv *via.ConfirmedVia, x, y float64, side pcbimage.Side, img *pcbimage.Layer, maxRadius float64) {
-	fmt.Printf("  expandConfirmedVia: %s on %s side\n", cv.ID, side.String())
+// deleteConfirmedVia removes a confirmed via and its underlying front/back vias.
+func (tp *TracesPanel) deleteConfirmedVia(cv *via.ConfirmedVia) {
+	fmt.Printf("Delete confirmed via %s (front=%s, back=%s)\n", cv.ID, cv.FrontViaID, cv.BackViaID)
 
-	// Detect metal boundary at click point
-	boundary := via.DetectMetalBoundary(img.Image, x, y, maxRadius)
-	fmt.Printf("  Detected boundary: center=(%.1f,%.1f) radius=%.1f pts=%d\n",
-		boundary.Center.X, boundary.Center.Y, boundary.Radius, len(boundary.Boundary))
+	tp.state.FeaturesLayer.RemoveVia(cv.FrontViaID)
+	tp.state.FeaturesLayer.RemoveVia(cv.BackViaID)
+	tp.state.FeaturesLayer.RemoveConfirmedVia(cv.ID)
 
-	// Get the underlying via on the selected side
-	var underlyingViaID string
-	if side == pcbimage.SideFront {
-		underlyingViaID = cv.FrontViaID
-	} else {
-		underlyingViaID = cv.BackViaID
-	}
-
-	underlyingVia := tp.state.FeaturesLayer.GetViaByID(underlyingViaID)
-	if underlyingVia == nil {
-		fmt.Printf("  ERROR: Could not find underlying via %s\n", underlyingViaID)
-		tp.viaStatusLabel.SetText(fmt.Sprintf("Error: via %s not found", underlyingViaID))
-		return
-	}
-	fmt.Printf("  Underlying via: %s center=(%.1f,%.1f) radius=%.1f pts=%d\n",
-		underlyingVia.ID, underlyingVia.Center.X, underlyingVia.Center.Y,
-		underlyingVia.Radius, len(underlyingVia.PadBoundary))
-
-	// Merge the new boundary with the existing via boundary
-	existingBoundary := via.BoundaryResult{
-		Center:   underlyingVia.Center,
-		Radius:   underlyingVia.Radius,
-		Boundary: underlyingVia.PadBoundary,
-		IsCircle: len(underlyingVia.PadBoundary) == 0,
-	}
-	merged := via.MergeBoundaries(existingBoundary, boundary)
-	fmt.Printf("  Merged boundary: center=(%.1f,%.1f) radius=%.1f pts=%d\n",
-		merged.Center.X, merged.Center.Y, merged.Radius, len(merged.Boundary))
-
-	// Filter out any green points from the merged boundary
-	merged.Boundary = via.FilterGreenPoints(img.Image, merged.Boundary)
-	fmt.Printf("  After green filter: %d pts\n", len(merged.Boundary))
-
-	// Debug: dump pixel colors inside the merged boundary
-	if false {
-		via.DumpBoundaryPixels(img.Image, merged.Boundary, underlyingVia.ID+"-expanded")
-	}
-
-	// Update the underlying via
-	updatedVia := *underlyingVia
-	updatedVia.Center = merged.Center
-	updatedVia.Radius = merged.Radius
-	updatedVia.PadBoundary = merged.Boundary
-	tp.state.FeaturesLayer.UpdateVia(updatedVia)
-
-	// Get both front and back vias for intersection update
-	frontVia := tp.state.FeaturesLayer.GetViaByID(cv.FrontViaID)
-	backVia := tp.state.FeaturesLayer.GetViaByID(cv.BackViaID)
-	if frontVia != nil && backVia != nil {
-		// Recompute the intersection
-		cv.UpdateIntersection(frontVia, backVia)
-		fmt.Printf("  Updated intersection: center=(%.1f,%.1f) pts=%d\n",
-			cv.Center.X, cv.Center.Y, len(cv.IntersectionBoundary))
-	}
-
-	// Refresh all overlays to show the updated boundaries
 	tp.refreshAllViaOverlays()
-
-	tp.viaStatusLabel.SetText(fmt.Sprintf("Expanded %s via %s (r=%.0f)", cv.ID, underlyingViaID, merged.Radius))
+	tp.updateViaCounts()
+	tp.viaStatusLabel.SetText(fmt.Sprintf("Deleted %s", cv.ID))
 	tp.state.Emit(app.EventFeaturesChanged, nil)
 	tp.state.Emit(app.EventConfirmedViasChanged, nil)
-	fmt.Printf("  expandConfirmedVia COMPLETE\n")
+}
+
+// deleteConfirmedViaSide removes one side of a confirmed via, demoting it back to unconfirmed.
+func (tp *TracesPanel) deleteConfirmedViaSide(cv *via.ConfirmedVia, side pcbimage.Side) {
+	var removeID string
+	if side == pcbimage.SideFront {
+		removeID = cv.FrontViaID
+		fmt.Printf("Delete front side %s of %s\n", removeID, cv.ID)
+	} else {
+		removeID = cv.BackViaID
+		fmt.Printf("Delete back side %s of %s\n", removeID, cv.ID)
+	}
+
+	// Remove the via on that side
+	tp.state.FeaturesLayer.RemoveVia(removeID)
+	// Remove the confirmed via (no longer confirmed with only one side)
+	tp.state.FeaturesLayer.RemoveConfirmedVia(cv.ID)
+
+	tp.refreshAllViaOverlays()
+	tp.updateViaCounts()
+	tp.viaStatusLabel.SetText(fmt.Sprintf("Deleted %s side of %s", side.String(), cv.ID))
+	tp.state.Emit(app.EventFeaturesChanged, nil)
+	tp.state.Emit(app.EventConfirmedViasChanged, nil)
+}
+
+// deleteConnectedTrace removes the trace overlay connected to a confirmed via.
+func (tp *TracesPanel) deleteConnectedTrace(cv *via.ConfirmedVia) {
+	// For now, clear the trace segments overlay (single trace at a time)
+	tp.canvas.ClearOverlay("trace_segments")
+	tp.traceStatusLabel.SetText(fmt.Sprintf("Cleared trace from %s", cv.ID))
+	tp.canvas.Refresh()
+}
+
+// adjustConfirmedViaRadius changes the radius of a confirmed via and regenerates its boundary.
+func (tp *TracesPanel) adjustConfirmedViaRadius(cv *via.ConfirmedVia, delta float64) {
+	newRadius := cv.Radius + delta
+	if newRadius < 2 {
+		newRadius = 2
+	}
+	fmt.Printf("Adjust %s radius: %.1f -> %.1f\n", cv.ID, cv.Radius, newRadius)
+
+	cv.Radius = newRadius
+	cv.IntersectionBoundary = geometry.GenerateCirclePoints(cv.Center.X, cv.Center.Y, newRadius, 32)
+
+	tp.refreshConfirmedViaOverlay()
+	tp.canvas.Refresh()
+	tp.viaStatusLabel.SetText(fmt.Sprintf("%s radius: %.0f px", cv.ID, newRadius))
+	tp.state.Emit(app.EventConfirmedViasChanged, nil)
+}
+
+// updateViaCounts refreshes the via count labels.
+func (tp *TracesPanel) updateViaCounts() {
+	front, back := tp.state.FeaturesLayer.ViaCountBySide()
+	tp.viaCountLabel.SetText(fmt.Sprintf("Vias: %d front, %d back", front, back))
+	confirmed := tp.state.FeaturesLayer.ConfirmedViaCount()
+	tp.confirmedCountLabel.SetText(fmt.Sprintf("Confirmed: %d", confirmed))
+}
+
+// nameNetlist opens a dialog to name or rename the netlist associated with a via.
+func (tp *TracesPanel) nameNetlist(cv *via.ConfirmedVia) {
+	if tp.window == nil {
+		return
+	}
+
+	net := tp.state.FeaturesLayer.GetNetForElement(cv.ID)
+
+	entry := widget.NewEntry()
+	if net != nil {
+		entry.SetText(net.Name)
+	}
+	entry.SetPlaceHolder("e.g. VCC, GND, D0")
+
+	items := []*widget.FormItem{
+		widget.NewFormItem("Net name", entry),
+	}
+
+	dlg := dialog.NewForm("Name Netlist", "OK", "Cancel", items, func(ok bool) {
+		if !ok || entry.Text == "" {
+			return
+		}
+		name := entry.Text
+
+		if net != nil {
+			// Rename existing net
+			net.Name = name
+			net.ID = "net-" + name
+			fmt.Printf("Renamed net to %q (%d vias)\n", name, len(net.ViaIDs))
+		} else {
+			// Create a new net for this via
+			net = netlist.NewElectricalNetWithName("net-"+name, name)
+			net.AddVia(cv)
+			tp.state.FeaturesLayer.AddNet(net)
+			fmt.Printf("Created net %q for %s\n", name, cv.ID)
+		}
+
+		tp.viaStatusLabel.SetText(fmt.Sprintf("%s → net %q", cv.ID, name))
+		tp.state.Emit(app.EventNetlistModified, nil)
+	}, tp.window)
+	dlg.Resize(fyne.NewSize(300, 150))
+	dlg.Show()
+}
+
+// getOrCreateNetForVia returns the net a via belongs to, or creates a new unnamed one.
+func (tp *TracesPanel) getOrCreateNetForVia(cv *via.ConfirmedVia) *netlist.ElectricalNet {
+	net := tp.state.FeaturesLayer.GetNetForElement(cv.ID)
+	if net != nil {
+		return net
+	}
+	// Create an auto-named net
+	netNum := tp.state.FeaturesLayer.NetCount() + 1
+	id := fmt.Sprintf("net-%03d", netNum)
+	net = netlist.NewElectricalNetWithName(id, id)
+	net.AddVia(cv)
+	tp.state.FeaturesLayer.AddNet(net)
+	return net
+}
+
+// associateTraceVias ensures both vias of a completed trace share the same netlist.
+// If one has a net and the other doesn't, the other joins. If both have different nets,
+// they are merged. If neither has one, a new net is created.
+func (tp *TracesPanel) associateTraceVias(startVia, endVia *via.ConfirmedVia) {
+	startNet := tp.state.FeaturesLayer.GetNetForElement(startVia.ID)
+	endNet := tp.state.FeaturesLayer.GetNetForElement(endVia.ID)
+
+	if startNet != nil && endNet != nil {
+		if startNet.ID == endNet.ID {
+			// Already same net
+			return
+		}
+		// Merge endNet into startNet
+		for _, vid := range endNet.ViaIDs {
+			if !startNet.ContainsVia(vid) {
+				startNet.ViaIDs = append(startNet.ViaIDs, vid)
+				startNet.Elements = append(startNet.Elements, netlist.NetElement{
+					Type: netlist.ElementVia,
+					ID:   vid,
+				})
+			}
+		}
+		tp.state.FeaturesLayer.RemoveNet(endNet.ID)
+		fmt.Printf("Merged net %q into %q\n", endNet.Name, startNet.Name)
+	} else if startNet != nil {
+		// Add endVia to startNet
+		startNet.AddVia(endVia)
+		fmt.Printf("Added %s to net %q\n", endVia.ID, startNet.Name)
+	} else if endNet != nil {
+		// Add startVia to endNet
+		endNet.AddVia(startVia)
+		fmt.Printf("Added %s to net %q\n", startVia.ID, endNet.Name)
+	} else {
+		// Neither has a net — create one
+		netNum := tp.state.FeaturesLayer.NetCount() + 1
+		id := fmt.Sprintf("net-%03d", netNum)
+		net := netlist.NewElectricalNetWithName(id, id)
+		net.AddVia(startVia)
+		net.AddVia(endVia)
+		tp.state.FeaturesLayer.AddNet(net)
+		fmt.Printf("Created net %q for %s and %s\n", id, startVia.ID, endVia.ID)
+	}
+
+	tp.state.Emit(app.EventNetlistModified, nil)
 }
 
 // refreshViaOverlay recreates the via overlay for the specified side.
@@ -5843,6 +6060,112 @@ func (tp *TracesPanel) tryQuickMatchVia(newVia *via.Via) *via.Via {
 	fmt.Printf("  Created confirmed via %s\n", cvID)
 
 	return bestMatch
+}
+
+// updateTraceOverlay rebuilds the "trace_segments" overlay from committed polyline points.
+func (tp *TracesPanel) updateTraceOverlay() {
+	if len(tp.tracePoints) < 2 {
+		tp.canvas.ClearOverlay("trace_segments")
+		return
+	}
+	lines := make([]canvas.OverlayLine, 0, len(tp.tracePoints)-1)
+	for i := 1; i < len(tp.tracePoints); i++ {
+		lines = append(lines, canvas.OverlayLine{
+			X1: tp.tracePoints[i-1].X, Y1: tp.tracePoints[i-1].Y,
+			X2: tp.tracePoints[i].X, Y2: tp.tracePoints[i].Y,
+			Thickness: 2,
+		})
+	}
+	tp.canvas.SetOverlay("trace_segments", &canvas.Overlay{
+		Lines: lines,
+		Color: color.RGBA{R: 0, G: 255, B: 0, A: 255}, // Green for committed segments
+	})
+}
+
+// setupTraceRubberBand installs the mouse-move callback to draw a rubber-band
+// line from the last committed point to the current cursor position.
+func (tp *TracesPanel) setupTraceRubberBand() {
+	tp.canvas.OnMouseMove(func(x, y float64) {
+		if len(tp.tracePoints) == 0 {
+			return
+		}
+		last := tp.tracePoints[len(tp.tracePoints)-1]
+		tp.canvas.SetOverlay("trace_rubber_band", &canvas.Overlay{
+			Lines: []canvas.OverlayLine{
+				{X1: last.X, Y1: last.Y, X2: x, Y2: y, Thickness: 2},
+			},
+			Color: color.RGBA{R: 255, G: 255, B: 0, A: 255}, // Yellow rubber-band
+		})
+	})
+}
+
+// finishTrace is called when the polyline terminates at a confirmed via.
+func (tp *TracesPanel) finishTrace(endVia *via.ConfirmedVia) {
+	tp.canvas.ClearOverlay("trace_rubber_band")
+	tp.canvas.OnMouseMove(nil)
+	tp.traceMode = false
+
+	nSegs := len(tp.tracePoints) - 1
+	fmt.Printf("Trace complete: %s -> %s (%d segments, %d points)\n",
+		tp.traceStartVia.ID, endVia.ID, nSegs, len(tp.tracePoints))
+
+	// Keep the committed segments overlay visible
+	tp.updateTraceOverlay()
+
+	// Associate both vias with the same netlist
+	tp.associateTraceVias(tp.traceStartVia, endVia)
+
+	// Show net name in status if available
+	net := tp.state.FeaturesLayer.GetNetForElement(tp.traceStartVia.ID)
+	netInfo := ""
+	if net != nil {
+		netInfo = fmt.Sprintf(" [%s]", net.Name)
+	}
+	tp.traceStatusLabel.SetText(fmt.Sprintf("Trace: %s -> %s (%d segments)%s",
+		tp.traceStartVia.ID, endVia.ID, nSegs, netInfo))
+	tp.traceStartVia = nil
+}
+
+// OnMiddleClick handles middle-click for polyline trace drawing.
+// Coordinates are in canvas space (divide by zoom for image coords).
+func (tp *TracesPanel) OnMiddleClick(canvasX, canvasY float64) {
+	imgX, imgY := tp.canvas.CanvasToImage(canvasX, canvasY)
+	clickPt := geometry.Point2D{X: imgX, Y: imgY}
+
+	if !tp.traceMode {
+		// Not in trace mode — must click on a confirmed via to start
+		cv := tp.state.FeaturesLayer.HitTestConfirmedVia(imgX, imgY)
+		if cv == nil {
+			tp.traceStatusLabel.SetText("Click on a confirmed via to start")
+			return
+		}
+
+		tp.traceMode = true
+		tp.traceStartVia = cv
+		tp.tracePoints = []geometry.Point2D{cv.Center}
+
+		// Clear any previous trace overlay
+		tp.canvas.ClearOverlay("trace_segments")
+
+		tp.setupTraceRubberBand()
+		tp.traceStatusLabel.SetText(fmt.Sprintf("Trace from %s — click waypoints, end on a via", cv.ID))
+		return
+	}
+
+	// In trace mode — check if click lands on a confirmed via (that isn't the start)
+	cv := tp.state.FeaturesLayer.HitTestConfirmedVia(imgX, imgY)
+	if cv != nil && cv.ID != tp.traceStartVia.ID {
+		// Terminate at this via
+		tp.tracePoints = append(tp.tracePoints, cv.Center)
+		tp.finishTrace(cv)
+		return
+	}
+
+	// Otherwise, add a waypoint
+	tp.tracePoints = append(tp.tracePoints, clickPt)
+	tp.updateTraceOverlay()
+	tp.traceStatusLabel.SetText(fmt.Sprintf("Trace from %s — %d segments — click waypoints, end on a via",
+		tp.traceStartVia.ID, len(tp.tracePoints)-1))
 }
 
 // printContactStats prints contact statistics to stdout.

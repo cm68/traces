@@ -291,6 +291,22 @@ func (l *DetectedFeaturesLayer) AllFeatures() []*FeatureRef {
 	return refs
 }
 
+// GetAllVias returns all vias in the layer.
+func (l *DetectedFeaturesLayer) GetAllVias() []via.Via {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	var result []via.Via
+	for _, id := range l.vias {
+		if ref := l.features[id]; ref != nil {
+			if vf, ok := ref.Feature.(ViaFeature); ok {
+				result = append(result, vf.Via)
+			}
+		}
+	}
+	return result
+}
+
 // ViaCount returns the number of vias.
 func (l *DetectedFeaturesLayer) ViaCount() int {
 	l.mu.RLock()

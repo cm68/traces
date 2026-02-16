@@ -175,6 +175,19 @@ func (ic *ImageCanvas) drawOverlay(output *image.RGBA, overlay *Overlay) {
 	for _, circle := range overlay.Circles {
 		ic.drawCircle(output, circle, col, offsetX, offsetY)
 	}
+
+	// Draw lines
+	for _, line := range overlay.Lines {
+		x1 := int((line.X1 + offsetX) * ic.zoom)
+		y1 := int((line.Y1 + offsetY) * ic.zoom)
+		x2 := int((line.X2 + offsetX) * ic.zoom)
+		y2 := int((line.Y2 + offsetY) * ic.zoom)
+		thickness := line.Thickness
+		if thickness <= 0 {
+			thickness = 2
+		}
+		ic.drawLine(output, x1, y1, x2, y2, col, thickness)
+	}
 }
 
 // drawSelectionRect draws a selection rectangle with a distinctive pattern.

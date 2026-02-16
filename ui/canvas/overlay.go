@@ -21,6 +21,7 @@ type Overlay struct {
 	Rectangles []OverlayRect
 	Polygons   []OverlayPolygon
 	Circles    []OverlayCircle
+	Lines      []OverlayLine
 	Color      color.RGBA
 	Layer      LayerRef // Which layer this overlay is associated with (for offset)
 }
@@ -56,4 +57,10 @@ type OverlayPolygon struct {
 	Points []geometry.Point2D // Polygon vertices in image coordinates
 	Label  string             // Optional label to draw at center
 	Filled bool               // If true, fill the polygon; otherwise just outline
+}
+
+// OverlayLine represents a line segment to draw on the overlay.
+type OverlayLine struct {
+	X1, Y1, X2, Y2 float64 // Endpoints in image coordinates
+	Thickness       int     // Line thickness in pixels (0 = default 2)
 }

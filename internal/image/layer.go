@@ -120,7 +120,7 @@ func Load(path string) (*Layer, error) {
 	// Try to extract DPI from TIFF metadata
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext == ".tiff" || ext == ".tif" {
-		if dpi, err := extractTIFFDPI(path); err == nil {
+		if dpi, err := ExtractTIFFDPI(path); err == nil {
 			layer.DPI = dpi
 		}
 	}
@@ -370,8 +370,8 @@ func guessSideFromFilename(path string) Side {
 	return SideUnknown
 }
 
-// extractTIFFDPI attempts to extract DPI from TIFF metadata.
-func extractTIFFDPI(path string) (float64, error) {
+// ExtractTIFFDPI attempts to extract DPI from TIFF metadata.
+func ExtractTIFFDPI(path string) (float64, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return 0, err

@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"pcb-tracer/internal/alignment"
@@ -519,6 +520,24 @@ func (s *State) LoadProject(path string) error {
 		s.Components = proj.Components
 	}
 
+	// Restore vias from project file
+	if len(proj.Vias) > 0 {
+		if s.FeaturesLayer == nil {
+			s.FeaturesLayer = features.NewDetectedFeaturesLayer()
+		}
+		s.FeaturesLayer.AddVias(proj.Vias)
+		fmt.Printf("[Project] Restored %d vias\n", len(proj.Vias))
+	}
+	if len(proj.ConfirmedVias) > 0 {
+		if s.FeaturesLayer == nil {
+			s.FeaturesLayer = features.NewDetectedFeaturesLayer()
+		}
+		for _, cv := range proj.ConfirmedVias {
+			s.FeaturesLayer.AddConfirmedVia(cv)
+		}
+		fmt.Printf("[Project] Restored %d confirmed vias\n", len(proj.ConfirmedVias))
+	}
+
 	// Logo library is now loaded from shared preferences, not project file
 	// Legacy project files with logos are ignored - logos are shared across all projects
 	s.mu.Unlock()
@@ -611,6 +630,18 @@ func (s *State) SaveProject(path string) error {
 	// Serialize user-designated components
 	if len(s.Components) > 0 {
 		proj.Components = s.Components
+	}
+
+	// Serialize vias from features layer
+	if s.FeaturesLayer != nil {
+		allVias := s.FeaturesLayer.GetAllVias()
+		if len(allVias) > 0 {
+			proj.Vias = allVias
+		}
+		confirmedVias := s.FeaturesLayer.GetConfirmedVias()
+		if len(confirmedVias) > 0 {
+			proj.ConfirmedVias = confirmedVias
+		}
 	}
 
 	// Logo library is saved to shared preferences, not project file
@@ -1080,7 +1111,20 @@ func (s *State) LoadNormalizedImage(layer *image.Layer, path string) error {
 	layer.ShearLeftY = 1.0
 	layer.ShearRightY = 1.0
 
-	fmt.Printf("Loaded normalized image: %s (%dx%d)\n", path, img.Bounds().Dx(), img.Bounds().Dy())
+	// Preserve DPI: try state first, then extract from original TIFF if available
+	if s.DPI > 0 {
+		layer.DPI = s.DPI
+	} else if layer.Path != "" {
+		ext := strings.ToLower(filepath.Ext(layer.Path))
+		if ext == ".tiff" || ext == ".tif" {
+			if dpi, err := image.ExtractTIFFDPI(layer.Path); err == nil && dpi > 0 {
+				layer.DPI = dpi
+				fmt.Printf("Extracted DPI %.0f from original TIFF: %s\n", dpi, layer.Path)
+			}
+		}
+	}
+
+	fmt.Printf("Loaded normalized image: %s (%dx%d, DPI=%.0f)\n", path, img.Bounds().Dx(), img.Bounds().Dy(), layer.DPI)
 	return nil
 }
 
@@ -1247,6 +1291,10 @@ type ProjectFile struct {
 	// Normalized image paths (v8+) - all transforms baked in
 	FrontNormalizedPath string `json:"front_normalized,omitempty"`
 	BackNormalizedPath  string `json:"back_normalized,omitempty"`
+
+	// Detected vias (v9+)
+	Vias          []via.Via            `json:"vias,omitempty"`
+	ConfirmedVias []*via.ConfirmedVia  `json:"confirmed_vias,omitempty"`
 
 	// Logo library (v7+) - manufacturer mark templates
 	LogoLibrary *logo.LogoLibrary `json:"logo_library,omitempty"`

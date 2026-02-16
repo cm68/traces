@@ -33,23 +33,23 @@ func (m DetectionMethod) String() string {
 
 // Via represents a detected or manually placed through-hole via.
 type Via struct {
-	ID          string           // Unique identifier, e.g., "via-001"
-	Center      geometry.Point2D // Center in image coordinates (pixels)
-	Radius      float64          // Radius in pixels (approximate, for circular vias)
-	Side        image.Side       // Which side it was detected on (or placed for manual)
-	Circularity float64          // Shape quality (0-1), 1.0 for manual
-	Confidence  float64          // Detection confidence (0-1), 1.0 for manual
-	Method      DetectionMethod  // How the via was detected/created
+	ID          string           `json:"id"`          // Unique identifier, e.g., "via-001"
+	Center      geometry.Point2D `json:"center"`      // Center in image coordinates (pixels)
+	Radius      float64          `json:"radius"`      // Radius in pixels (approximate, for circular vias)
+	Side        image.Side       `json:"side"`        // Which side it was detected on (or placed for manual)
+	Circularity float64          `json:"circularity"` // Shape quality (0-1), 1.0 for manual
+	Confidence  float64          `json:"confidence"`  // Detection confidence (0-1), 1.0 for manual
+	Method      DetectionMethod  `json:"method"`      // How the via was detected/created
 
 	// Pad boundary - the detected contour of the metallic pad area.
 	// If empty, the via is assumed circular with the given Radius.
 	// Points are in image coordinates (pixels).
-	PadBoundary []geometry.Point2D
+	PadBoundary []geometry.Point2D `json:"pad_boundary,omitempty"`
 
 	// Cross-side matching - vias should appear on both sides of a PCB.
 	// This is the strongest indicator that a detection is a true via.
-	MatchedViaID      string  // ID of matching via on opposite side (empty if unmatched)
-	BothSidesConfirmed bool   // True if via detected on both sides at same location
+	MatchedViaID       string `json:"matched_via_id,omitempty"`   // ID of matching via on opposite side (empty if unmatched)
+	BothSidesConfirmed bool   `json:"both_sides_confirmed,omitempty"` // True if via detected on both sides at same location
 }
 
 // Bounds returns the bounding rectangle for the via.

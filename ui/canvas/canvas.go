@@ -106,6 +106,8 @@ type ImageCanvas struct {
 	onLeftClick    func(x, y float64)           // Left click at image coordinates
 	onRightClick   func(x, y float64)           // Right click at image coordinates
 	onMiddleClick  func(x, y float64)           // Middle click at canvas coordinates (use GetRenderedOutput)
+	onMouseMove    func(x, y float64)           // Mouse move at image coordinates
+	onTypedKey     func(ev *fyne.KeyEvent)      // Key press callback
 }
 
 // zoomScroll is a widget that wraps a scroll container but intercepts wheel for zoom.
@@ -332,6 +334,39 @@ func (dc *draggableContent) MouseDown(ev *desktop.MouseEvent) {
 
 // MouseUp implements desktop.Mouseable (required but unused).
 func (dc *draggableContent) MouseUp(ev *desktop.MouseEvent) {}
+
+// MouseIn implements desktop.Hoverable.
+func (dc *draggableContent) MouseIn(ev *desktop.MouseEvent) {}
+
+// MouseMoved implements desktop.Hoverable for rubber-band feedback.
+func (dc *draggableContent) MouseMoved(ev *desktop.MouseEvent) {
+	if dc.canvas.onMouseMove == nil {
+		return
+	}
+	// Convert canvas coordinates to image coordinates
+	imgX := float64(ev.Position.X) / dc.canvas.zoom
+	imgY := float64(ev.Position.Y) / dc.canvas.zoom
+	dc.canvas.onMouseMove(imgX, imgY)
+}
+
+// MouseOut implements desktop.Hoverable.
+func (dc *draggableContent) MouseOut() {}
+
+// FocusGained implements fyne.Focusable.
+func (dc *draggableContent) FocusGained() {}
+
+// FocusLost implements fyne.Focusable.
+func (dc *draggableContent) FocusLost() {}
+
+// TypedRune implements fyne.Focusable (required but unused).
+func (dc *draggableContent) TypedRune(r rune) {}
+
+// TypedKey implements fyne.Focusable for keyboard input.
+func (dc *draggableContent) TypedKey(ev *fyne.KeyEvent) {
+	if dc.canvas.onTypedKey != nil {
+		dc.canvas.onTypedKey(ev)
+	}
+}
 
 type draggableContentRenderer struct {
 	content *draggableContent
@@ -692,9 +727,35 @@ func (ic *ImageCanvas) OnMiddleClick(callback func(x, y float64)) {
 	ic.onMiddleClick = callback
 }
 
+// OnMouseMove sets a callback for mouse-move events.
+// Coordinates are in image space (not zoomed).
+func (ic *ImageCanvas) OnMouseMove(callback func(x, y float64)) {
+	ic.onMouseMove = callback
+}
+
+// OnTypedKey sets a callback for key press events.
+func (ic *ImageCanvas) OnTypedKey(callback func(ev *fyne.KeyEvent)) {
+	ic.onTypedKey = callback
+}
+
+// FocusCanvas requests keyboard focus on the canvas content widget.
+func (ic *ImageCanvas) FocusCanvas(w fyne.Window) {
+	if ic.content != nil {
+		w.Canvas().Focus(ic.content)
+	}
+}
+
 // GetRenderedOutput returns the last rendered canvas output for sampling.
 func (ic *ImageCanvas) GetRenderedOutput() *image.RGBA {
 	return ic.lastOutput
+}
+
+// ScrollOffset returns the current scroll offset.
+func (ic *ImageCanvas) ScrollOffset() fyne.Position {
+	if ic.scroll != nil {
+		return ic.scroll.Offset()
+	}
+	return fyne.NewPos(0, 0)
 }
 
 // Refresh refreshes the canvas display.

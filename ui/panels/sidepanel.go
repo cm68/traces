@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -3133,18 +3134,35 @@ func (cp *ComponentsPanel) runOCR() {
 	// Show OCR preview dialog: raw → B&W → logo-masked
 	cp.showOCRPreview(rotated, masked, orientation)
 
-	// OCR runs on the masked image (logos removed)
-	mat, err := gocv.NewMatFromBytes(rotBounds.Dy(), rotBounds.Dx(), gocv.MatTypeCV8UC4, masked.Pix)
+	// OCR runs on the masked image (logos removed), binarized and despeckled
+	ocrGray, mw, mh := rgbaToGray(masked)
+	ocrThresh := robustOtsu(ocrGray, mw, mh)
+
+	ocrBW := make([]bool, mw*mh)
+	for i := 0; i < mw*mh; i++ {
+		ocrBW[i] = ocrGray[i] > ocrThresh
+	}
+	despeckleBW(ocrBW, mw, mh)
+
+	// Build grayscale image bytes (0 or 255) for gocv
+	ocrBytes := make([]byte, mw*mh)
+	for i := 0; i < mw*mh; i++ {
+		if ocrBW[i] {
+			ocrBytes[i] = 255
+		}
+	}
+
+	grayMat, err := gocv.NewMatFromBytes(mh, mw, gocv.MatTypeCV8UC1, ocrBytes)
 	if err != nil {
 		fmt.Printf("[OCR] Mat conversion failed: %v\n", err)
 		return
 	}
-	defer mat.Close()
+	defer grayMat.Close()
 
-	// Convert RGBA to BGR
+	// Convert grayscale to BGR for OCR engine
 	bgr := gocv.NewMat()
 	defer bgr.Close()
-	gocv.CvtColor(mat, &bgr, gocv.ColorRGBAToBGR)
+	gocv.CvtColor(grayMat, &bgr, gocv.ColorGrayToBGR)
 
 	// Create OCR engine
 	engine, err := ocr.NewEngine()
@@ -3181,10 +3199,10 @@ func (cp *ComponentsPanel) runOCR() {
 		return
 	}
 
-	// If empty, try histogram enhancement
-	if strings.TrimSpace(text) == "" {
-		text = cp.runOCRWithHistogramThreshold(bgr, engine)
-	}
+	// Image is already binarized+despeckled, no histogram fallback needed
+
+	// Fix common OCR misreads in part numbers (4↔A, 5↔S ambiguity)
+	text = fixOCRPartNumbers(text)
 
 	// Prepend detected logos
 	var detectedManufacturer string
@@ -3225,10 +3243,189 @@ func (cp *ComponentsPanel) runOCR() {
 		cp.placeEntry.SetText(info.Place)
 	}
 
+	// Auto-fill package from part database
+	partNum := cp.partNumberEntry.Text
+	if partNum == "" {
+		partNum = info.PartNumber
+	}
+	if partNum != "" && cp.packageEntry.Text == "" {
+		if pkgInfo := component.LookupPartPackage(partNum); pkgInfo != nil {
+			cp.packageEntry.SetText(pkgInfo.Package)
+			cp.editingComp.Package = pkgInfo.Package
+			fmt.Printf("[OCR] Package lookup: %s → %s (%d pins)\n", partNum, pkgInfo.Package, pkgInfo.PinCount)
+		}
+	}
+
 	// Update sticky orientation
 	cp.state.LastOCROrientation = orientation
 
 	fmt.Printf("[OCR] Complete: %s\n", text)
+}
+
+// robustOtsu computes an Otsu threshold that is resistant to small bright/dark
+// artifacts. It divides the grayscale image into 8 spatial regions (2x4 grid),
+// ranks them by mean brightness, discards the 2 brightest and 2 darkest, and
+// computes Otsu on the combined histogram of the remaining 4 regions.
+func robustOtsu(gray []uint8, w, h int) uint8 {
+	// Divide into 2 columns x 4 rows = 8 regions
+	cols, rows := 2, 4
+	type region struct {
+		mean float64
+		hist [256]int
+		n    int
+	}
+	regions := make([]region, cols*rows)
+
+	for ry := 0; ry < rows; ry++ {
+		y0 := ry * h / rows
+		y1 := (ry + 1) * h / rows
+		for rx := 0; rx < cols; rx++ {
+			x0 := rx * w / cols
+			x1 := (rx + 1) * w / cols
+			r := &regions[ry*cols+rx]
+			var sum int64
+			for y := y0; y < y1; y++ {
+				for x := x0; x < x1; x++ {
+					v := gray[y*w+x]
+					r.hist[v]++
+					sum += int64(v)
+					r.n++
+				}
+			}
+			if r.n > 0 {
+				r.mean = float64(sum) / float64(r.n)
+			}
+		}
+	}
+
+	// Sort by mean brightness
+	sort.Slice(regions, func(i, j int) bool {
+		return regions[i].mean < regions[j].mean
+	})
+
+	// Discard 2 darkest and 2 brightest, keep middle 4
+	var hist [256]int
+	total := 0
+	for _, r := range regions[2:6] {
+		for i := 0; i < 256; i++ {
+			hist[i] += r.hist[i]
+		}
+		total += r.n
+	}
+
+	fmt.Printf("[Otsu] Region means: ")
+	for i, r := range regions {
+		mark := " "
+		if i < 2 || i >= 6 {
+			mark = "x"
+		}
+		fmt.Printf("%.0f%s ", r.mean, mark)
+	}
+	fmt.Println()
+
+	// Standard Otsu on the combined histogram
+	var sum float64
+	for i := 0; i < 256; i++ {
+		sum += float64(i) * float64(hist[i])
+	}
+	var sumB float64
+	var wB, wF int
+	var maxVar float64
+	thresh := uint8(128)
+	for t := 0; t < 256; t++ {
+		wB += hist[t]
+		if wB == 0 {
+			continue
+		}
+		wF = total - wB
+		if wF == 0 {
+			break
+		}
+		sumB += float64(t) * float64(hist[t])
+		mB := sumB / float64(wB)
+		mF := (sum - sumB) / float64(wF)
+		variance := float64(wB) * float64(wF) * (mB - mF) * (mB - mF)
+		if variance > maxVar {
+			maxVar = variance
+			thresh = uint8(t)
+		}
+	}
+
+	// Ensure minimum white pixel ratio using the trimmed histogram.
+	// For faded printing, Otsu may set the threshold too high.
+	// Count from the trimmed histogram (middle 4 regions) so bright/dark
+	// outlier regions don't skew the ratio.
+	minWhiteRatio := 0.10
+	countWhite := func(t uint8) int {
+		n := 0
+		for i := int(t) + 1; i < 256; i++ {
+			n += hist[i]
+		}
+		return n
+	}
+	whiteCount := countWhite(thresh)
+	whiteRatio := float64(whiteCount) / float64(total)
+	fmt.Printf("[Otsu] thresh=%d white=%.1f%%\n", thresh, whiteRatio*100)
+
+	if whiteRatio < minWhiteRatio {
+		// Binary search for a threshold that gives at least minWhiteRatio white
+		lo, hi := uint8(0), thresh
+		for lo < hi {
+			mid := (lo + hi) / 2
+			ratio := float64(countWhite(mid)) / float64(total)
+			if ratio < minWhiteRatio {
+				hi = mid
+			} else {
+				lo = mid + 1
+			}
+		}
+		if lo > 0 {
+			lo--
+		}
+		newRatio := float64(countWhite(lo)) / float64(total)
+		fmt.Printf("[Otsu] Adjusted for faded: %d → %d (white %.1f%% → %.1f%%)\n",
+			thresh, lo, whiteRatio*100, newRatio*100)
+		thresh = lo
+	}
+
+	return thresh
+}
+
+// rgbaToGray converts an RGBA image to a grayscale byte slice.
+func rgbaToGray(src *image.RGBA) ([]uint8, int, int) {
+	sw, sh := src.Bounds().Dx(), src.Bounds().Dy()
+	srcPix := src.Pix
+	srcStride := src.Stride
+	gray := make([]uint8, sw*sh)
+	for y := 0; y < sh; y++ {
+		for x := 0; x < sw; x++ {
+			si := y*srcStride + x*4
+			gray[y*sw+x] = uint8((299*uint32(srcPix[si]) + 587*uint32(srcPix[si+1]) + 114*uint32(srcPix[si+2])) / 1000)
+		}
+	}
+	return gray, sw, sh
+}
+
+// despeckleBW clears isolated set bits with no 4-connected neighbors.
+func despeckleBW(bw []bool, w, h int) {
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			if !bw[y*w+x] {
+				continue
+			}
+			hasNeighbor := false
+			for _, d := range [][2]int{{-1, 0}, {1, 0}, {0, -1}, {0, 1}} {
+				nx, ny := x+d[0], y+d[1]
+				if nx >= 0 && nx < w && ny >= 0 && ny < h && bw[ny*w+nx] {
+					hasNeighbor = true
+					break
+				}
+			}
+			if !hasNeighbor {
+				bw[y*w+x] = false
+			}
+		}
+	}
 }
 
 // showOCRPreview displays a dialog with three processing phases:
@@ -3265,48 +3462,14 @@ func (cp *ComponentsPanel) showOCRPreview(raw, masked *image.RGBA, orientation s
 
 	// Helper: Otsu threshold an RGBA image to 2x B&W NRGBA
 	otsuBW := func(src *image.RGBA) (*image.NRGBA, uint8) {
-		sw, sh := src.Bounds().Dx(), src.Bounds().Dy()
-		srcPix := src.Pix
-		srcStride := src.Stride
+		gray, sw, sh := rgbaToGray(src)
+		thresh := robustOtsu(gray, sw, sh)
 
-		gray := make([]uint8, sw*sh)
-		var hist [256]int
-		for y := 0; y < sh; y++ {
-			for x := 0; x < sw; x++ {
-				si := y*srcStride + x*4
-				gv := uint8((299*uint32(srcPix[si]) + 587*uint32(srcPix[si+1]) + 114*uint32(srcPix[si+2])) / 1000)
-				gray[y*sw+x] = gv
-				hist[gv]++
-			}
+		bw := make([]bool, sw*sh)
+		for i := 0; i < sw*sh; i++ {
+			bw[i] = gray[i] > thresh
 		}
-
-		total := sw * sh
-		var sum float64
-		for i := 0; i < 256; i++ {
-			sum += float64(i) * float64(hist[i])
-		}
-		var sumB float64
-		var wB, wF int
-		var maxVar float64
-		thresh := uint8(128)
-		for t := 0; t < 256; t++ {
-			wB += hist[t]
-			if wB == 0 {
-				continue
-			}
-			wF = total - wB
-			if wF == 0 {
-				break
-			}
-			sumB += float64(t) * float64(hist[t])
-			mB := sumB / float64(wB)
-			mF := (sum - sumB) / float64(wF)
-			variance := float64(wB) * float64(wF) * (mB - mF) * (mB - mF)
-			if variance > maxVar {
-				maxVar = variance
-				thresh = uint8(t)
-			}
-		}
+		despeckleBW(bw, sw, sh)
 
 		out := image.NewNRGBA(image.Rect(0, 0, sw*2, sh*2))
 		outPix := out.Pix
@@ -3314,7 +3477,7 @@ func (cp *ComponentsPanel) showOCRPreview(raw, masked *image.RGBA, orientation s
 		for y := 0; y < sh; y++ {
 			for x := 0; x < sw; x++ {
 				var v byte
-				if gray[y*sw+x] > thresh {
+				if bw[y*sw+x] {
 					v = 255
 				}
 				for _, dy := range [2]int{0, 1} {
@@ -3360,11 +3523,17 @@ func (cp *ComponentsPanel) showOCRPreview(raw, masked *image.RGBA, orientation s
 		widget.NewLabel(fmt.Sprintf("%dx%d", w, h)),
 	)
 
-	d := dialog.NewCustom(
-		fmt.Sprintf("OCR Preview — %s (%s)", cp.editingComp.ID, orientation),
-		"Close", container.NewScroll(content), cp.window)
-	d.Resize(fyne.NewSize(float32(w*2+60), float32(h*6+280)))
-	d.Show()
+	title := fmt.Sprintf("OCR Preview — %s (%s)", cp.editingComp.ID, orientation)
+	previewWin := fyne.CurrentApp().NewWindow(title)
+	previewWin.SetContent(container.NewScroll(content))
+	previewWin.Resize(fyne.NewSize(float32(w*2+60), float32(h*6+280)))
+	previewWin.Show()
+
+	// Set always-on-top via wmctrl (Linux)
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		exec.Command("wmctrl", "-r", title, "-b", "add,above").Run()
+	}()
 }
 
 // runOCRWithHistogramThreshold uses histogram analysis for better OCR.
@@ -3746,6 +3915,116 @@ func extractLogoNames(text string) []string {
 	return names
 }
 
+// fixOCRPartNumbers corrects common OCR misreads where 4↔A and 5↔S are
+// confused in 74/54-series logic part numbers. For example:
+//
+//	7AL500 → 74LS00, 7ALS00N → 74LS00N, 5A138 → 54138
+//
+// The approach: find tokens that look like mangled 74/54-series parts, then
+// fix the prefix (7A→74, 5A→54), the family code (L5→LS, AL5→ALS, etc.),
+// and digits after the family (S→5, A→4).
+func fixOCRPartNumbers(text string) string {
+	// Known 74/54-series logic families
+	families := []string{
+		"ALS", "ALS", "AS", "LS", "S", "F",
+		"HC", "HCT", "AC", "ACT",
+		"LV", "LVC", "LVT", "ABT",
+		"BCT", "FCT", "GTL", "GTLP",
+	}
+
+	// Build a map of mangled family → correct family
+	// Only fix cases where S→5 or 4→A creates ambiguity
+	familyFixes := map[string]string{
+		"L5":   "LS",
+		"AL5":  "ALS",
+		"A5":   "AS",
+		"": "", // no family is valid (e.g., 7400)
+	}
+	// Also add all correct families as identity mappings
+	for _, f := range families {
+		familyFixes[f] = f
+	}
+
+	// Common manufacturer prefix misreads: 0↔D, 5↔S
+	prefixFixes := map[string]string{
+		"0M": "DM", "OM": "DM", "JM": "DM", // National Semiconductor
+		"5N": "SN", // Texas Instruments
+		"0S": "DS", // National Semiconductor
+		"MC": "MC", // Motorola (identity)
+		"SN": "SN", "DM": "DM", "DS": "DS",
+		"H0": "HD", // Hitachi
+		"HD": "HD", "HA": "HA",
+		"TC": "TC", "MB": "MB",
+		"UA": "UA", "CA": "CA", "CD": "CD",
+	}
+
+	// Match tokens that look like (optional manufacturer prefix)(7A|74|5A|54)(family?)(digits)(suffix?)
+	// Prefix pattern includes alphanumeric to catch 0M, 5N etc.
+	pat := regexp.MustCompile(`(?i)\b([A-Z0-9]{0,3})([7T][A4]|[5S][A4])([A-Z]{0,4})([0-9OSA]{1,4})([A-Z]{0,3})\b`)
+
+	result := pat.ReplaceAllStringFunc(text, func(match string) string {
+		sub := pat.FindStringSubmatch(match)
+		if sub == nil {
+			return match
+		}
+		prefix := sub[1]   // e.g., "SN", "0M", ""
+		series := sub[2]   // e.g., "7A", "74", "5A", "54"
+		family := sub[3]   // e.g., "L5", "LS", "HC", ""
+		digits := sub[4]   // e.g., "00", "245"
+		suffix := sub[5]   // e.g., "N", "D", ""
+
+		// Fix prefix: 0M→DM, 5N→SN, H0→HD
+		prefixUpper := strings.ToUpper(prefix)
+		if fixed, ok := prefixFixes[prefixUpper]; ok {
+			prefix = fixed
+		} else {
+			prefix = prefixUpper
+		}
+
+		// Fix series: 7A/TA/T4→74, 5A/SA/S4→54
+		seriesUpper := strings.ToUpper(series)
+		switch seriesUpper[0] {
+		case '7', 'T':
+			series = "74"
+		case '5', 'S':
+			series = "54"
+		}
+
+		// Fix family: L5→LS, AL5→ALS, A5→AS
+		// Reject if family code is present but not a known/mangled logic family
+		familyUpper := strings.ToUpper(family)
+		if familyUpper != "" {
+			if fixed, ok := familyFixes[familyUpper]; ok {
+				family = fixed
+			} else {
+				// Unknown family like LVAC — not a real part number, skip
+				return match
+			}
+		}
+
+		// Fix digits: S→5, A→4 in the digit string (shouldn't have letters but OCR mangles them)
+		fixedDigits := strings.Map(func(r rune) rune {
+			switch r {
+			case 'S', 's':
+				return '5'
+			case 'A', 'a':
+				return '4'
+			case 'O', 'o':
+				return '0'
+			default:
+				return r
+			}
+		}, digits)
+
+		fixed := prefix + series + family + fixedDigits + suffix
+		fmt.Printf("[OCR Fix] %q → %q (prefix=%s series=%s family=%s digits=%s suffix=%s)\n",
+			match, fixed, sub[1], sub[2], sub[3], sub[4], sub[5])
+		return fixed
+	})
+
+	return result
+}
+
 // componentInfo holds parsed component information from OCR text.
 type componentInfo struct {
 	PartNumber   string
@@ -3763,7 +4042,35 @@ func parseComponentInfo(text string) componentInfo {
 	logoPattern := regexp.MustCompile(`<([A-Za-z0-9]+)>`)
 	logoMatches := logoPattern.FindAllStringSubmatch(text, -1)
 
-	// First non-logo, non-empty line is the part number
+	// Location names to skip when looking for part numbers
+	locationNames := []string{
+		"MALAYSIA", "PHILIPPINES", "SINGAPORE", "INDONESIA", "THAILAND",
+		"VIETNAM", "IRELAND", "GERMANY", "ENGLAND", "SCOTLAND", "CANADA",
+		"BRAZIL", "TAIWAN", "SALVADOR", "MEXICO", "KOREA", "JAPAN",
+		"CHINA", "INDIA", "HONGKONG", "CAMBODIA", "PORTUGAL", "FRANCE",
+		"ITALY", "SPAIN", "AUSTRIA", "SWEDEN", "ISRAEL",
+	}
+	isLocationLine := func(s string) bool {
+		upper := strings.ToUpper(s)
+		// Strip digits and punctuation for fuzzy check
+		lettersOnly := strings.Map(func(r rune) rune {
+			if r >= 'A' && r <= 'Z' {
+				return r
+			}
+			return -1
+		}, upper)
+		for _, loc := range locationNames {
+			if strings.Contains(lettersOnly, loc) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Find the best part number line: prefer lines with letters+digits (actual part numbers)
+	// over short all-digit lines (likely date codes or noise)
+	partNumPattern := regexp.MustCompile(`[A-Za-z]`)
+	var fallbackPartNum string
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -3772,16 +4079,43 @@ func parseComponentInfo(text string) componentInfo {
 		// Skip lines that are only logos
 		withoutLogos := logoPattern.ReplaceAllString(line, "")
 		withoutLogos = strings.TrimSpace(withoutLogos)
-		if withoutLogos != "" {
+		if withoutLogos == "" {
+			continue
+		}
+		// Strip trailing punctuation (OCR artifacts like trailing -)
+		withoutLogos = strings.TrimRight(withoutLogos, "-_.,;:!/ ")
+		if withoutLogos == "" {
+			continue
+		}
+		// Skip lines that are manufacturing locations (e.g., MALAYSIA8A)
+		if isLocationLine(withoutLogos) {
+			continue
+		}
+		// Prefer lines containing letters (real part numbers) over all-digit lines
+		if partNumPattern.MatchString(withoutLogos) && len(withoutLogos) >= 3 {
 			info.PartNumber = withoutLogos
 			break
 		}
+		// Remember first all-digit line as fallback
+		if fallbackPartNum == "" {
+			fallbackPartNum = withoutLogos
+		}
+	}
+	if info.PartNumber == "" && fallbackPartNum != "" {
+		info.PartNumber = fallbackPartNum
 	}
 
-	// Check for 74-series part numbers with manufacturer prefixes (e.g., SN7438, DM74LS244)
-	logic74Pattern := regexp.MustCompile(`(?i)\b([A-Z]{1,3})?(74[A-Z]{0,4}\d{1,4})([A-Z]{1,3})?\b`)
+	// Check for 74/54-series part numbers with manufacturer prefixes (e.g., SN7438, DM74LS244)
+	logic74Pattern := regexp.MustCompile(`(?i)\b([A-Z]{1,3})?((?:74|54)[A-Z]{0,4}\d{1,4})[A-Z]{0,3}\b`)
 	if matches := logic74Pattern.FindStringSubmatch(upperText); len(matches) > 0 {
 		prefix := matches[1]
+		corePart := strings.ToUpper(matches[2]) // e.g., "74LS244", "7438"
+
+		// Use the core part (without manufacturer prefix or suffix) as the part number
+		if corePart != "" {
+			info.PartNumber = corePart
+		}
+
 		if prefix != "" && info.Manufacturer == "" {
 			// Map manufacturer prefixes
 			prefixToMfr := map[string]string{
@@ -3921,7 +4255,103 @@ func parseComponentInfo(text string) componentInfo {
 		}
 	}
 
+	// Fuzzy match if exact match failed — handles OCR mangling like ELSALVADOR,
+	// MA1AYSIA, THAI1AND, PH1LIPPINES, etc.
+	if info.Place == "" {
+		// Strip spaces/punctuation from the OCR text for comparison
+		stripped := strings.Map(func(r rune) rune {
+			if r >= 'A' && r <= 'Z' {
+				return r
+			}
+			return -1
+		}, upperText)
+
+		// Canonical names to fuzzy-match (no spaces, all uppercase)
+		fuzzyLocations := []struct {
+			canonical string
+			place     string
+		}{
+			{"ELSALVADOR", "El Salvador"},
+			{"PHILIPPINES", "Philippines"},
+			{"SINGAPORE", "Singapore"},
+			{"INDONESIA", "Indonesia"},
+			{"MALAYSIA", "Malaysia"},
+			{"THAILAND", "Thailand"},
+			{"VIETNAM", "Vietnam"},
+			{"HONGKONG", "Hong Kong"},
+			{"IRELAND", "Ireland"},
+			{"GERMANY", "Germany"},
+			{"ENGLAND", "UK"},
+			{"SCOTLAND", "UK"},
+			{"CANADA", "Canada"},
+			{"BRAZIL", "Brazil"},
+			{"TAIWAN", "Taiwan"},
+			{"MEXICO", "Mexico"},
+			{"KOREA", "Korea"},
+			{"JAPAN", "Japan"},
+			{"CHINA", "China"},
+			{"INDIA", "India"},
+		}
+
+		for _, loc := range fuzzyLocations {
+			if fuzzyContains(stripped, loc.canonical, len(loc.canonical)/5) {
+				fmt.Printf("[OCR Place] Fuzzy matched %q in %q → %s\n", loc.canonical, stripped, loc.place)
+				info.Place = loc.place
+				break
+			}
+		}
+	}
+
 	return info
+}
+
+// fuzzyContains checks if haystack contains a substring within maxErrors
+// edit distance of needle. Uses a simple sliding window approach comparing
+// each window of len(needle) characters with allowed substitutions.
+func fuzzyContains(haystack, needle string, maxErrors int) bool {
+	nLen := len(needle)
+	if nLen == 0 {
+		return true
+	}
+	if len(haystack) < nLen {
+		return false
+	}
+
+	// Common OCR substitution groups: characters that look alike
+	sameGroup := func(a, b byte) bool {
+		if a == b {
+			return true
+		}
+		groups := [][2]byte{
+			{'0', 'O'}, {'0', 'D'}, {'O', 'D'},
+			{'1', 'I'}, {'1', 'L'}, {'I', 'L'},
+			{'5', 'S'}, {'4', 'A'},
+			{'8', 'B'}, {'6', 'G'},
+			{'2', 'Z'},
+		}
+		for _, g := range groups {
+			if (a == g[0] && b == g[1]) || (a == g[1] && b == g[0]) {
+				return true
+			}
+		}
+		return false
+	}
+
+	for i := 0; i <= len(haystack)-nLen; i++ {
+		errors := 0
+		for j := 0; j < nLen; j++ {
+			if !sameGroup(haystack[i+j], needle[j]) {
+				errors++
+				if errors > maxErrors {
+					break
+				}
+			}
+		}
+		if errors <= maxErrors {
+			return true
+		}
+	}
+	return false
 }
 
 // deleteComponent removes a component by index.
@@ -4227,6 +4657,16 @@ func (cp *ComponentsPanel) OnMiddleClickFloodFill(x, y float64) {
 	fmt.Printf("Created component %s (%s) at (%.0f,%.0f) size %.0fx%.0f (%.1fx%.1f mm)\n",
 		compID, pkgType, newComp.Bounds.X, newComp.Bounds.Y,
 		newComp.Bounds.Width, newComp.Bounds.Height, widthMM, heightMM)
+
+	// Select the new component for editing
+	newCompIdx := len(cp.state.Components) - 1
+	for sortedPos, compIdx := range cp.sortedIndices {
+		if compIdx == newCompIdx {
+			cp.list.Select(sortedPos)
+			cp.showEditDialog(newCompIdx)
+			break
+		}
+	}
 
 	// Update overlay
 	cp.updateComponentOverlay()

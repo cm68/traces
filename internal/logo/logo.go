@@ -296,6 +296,27 @@ func quantizeRegionWithOptions(img image.Image, bounds geometry.RectInt, targetS
 		}
 	}
 
+	// Despeckle: clear isolated set bits with no set neighbors
+	for py := 0; py < h; py++ {
+		for px := 0; px < w; px++ {
+			if !getBitPacked(bits, px, py, w) {
+				continue
+			}
+			hasNeighbor := false
+			for _, d := range [][2]int{{-1, 0}, {1, 0}, {0, -1}, {0, 1}} {
+				nx, ny := px+d[0], py+d[1]
+				if nx >= 0 && nx < w && ny >= 0 && ny < h && getBitPacked(bits, nx, ny, w) {
+					hasNeighbor = true
+					break
+				}
+			}
+			if !hasNeighbor {
+				i := py*w + px
+				bits[i/8] &^= 1 << (7 - i%8)
+			}
+		}
+	}
+
 	return bits, w, h
 }
 
@@ -847,6 +868,27 @@ func (qi *quantizedImage) getWindow(x, y, w, h int) []byte {
 		}
 	}
 
+	// Despeckle: clear isolated set bits with no set neighbors
+	for py := 0; py < h; py++ {
+		for px := 0; px < w; px++ {
+			if !getBitPacked(bits, px, py, w) {
+				continue
+			}
+			hasNeighbor := false
+			for _, d := range [][2]int{{-1, 0}, {1, 0}, {0, -1}, {0, 1}} {
+				nx, ny := px+d[0], py+d[1]
+				if nx >= 0 && nx < w && ny >= 0 && ny < h && getBitPacked(bits, nx, ny, w) {
+					hasNeighbor = true
+					break
+				}
+			}
+			if !hasNeighbor {
+				i := py*w + px
+				bits[i/8] &^= 1 << (7 - i%8)
+			}
+		}
+	}
+
 	return bits
 }
 
@@ -887,8 +929,11 @@ func matchBits(a, b []byte, width, height int) float64 {
 	dx := bx - ax
 	dy := by - ay
 
-	matching := 0
-	total := 0
+	// Use Jaccard index (intersection over union) on set bits only.
+	// Counting matching zeros inflates scores on dark backgrounds where
+	// both template and window are mostly zero.
+	intersection := 0
+	union := 0
 
 	for y := 0; y < height; y++ {
 		by2 := y + dy
@@ -900,17 +945,21 @@ func matchBits(a, b []byte, width, height int) float64 {
 			if bx2 < 0 || bx2 >= width {
 				continue
 			}
-			total++
-			if getBitPacked(a, x, y, width) == getBitPacked(b, bx2, by2, width) {
-				matching++
+			aBit := getBitPacked(a, x, y, width)
+			bBit := getBitPacked(b, bx2, by2, width)
+			if aBit || bBit {
+				union++
+				if aBit && bBit {
+					intersection++
+				}
 			}
 		}
 	}
 
-	if total == 0 {
+	if union == 0 {
 		return 0
 	}
-	return float64(matching) / float64(total)
+	return float64(intersection) / float64(union)
 }
 
 // DetectLogos searches for logo templates in an image using fast pre-quantized matching.
@@ -1063,22 +1112,25 @@ func (lib *LogoLibrary) DetectLogos(img image.Image, searchBounds geometry.RectI
 		return matches[i].Score > matches[j].Score
 	})
 
-	// Remove overlapping matches for THE SAME logo template (keep highest scoring)
-	// Different logos are allowed to overlap (e.g., F and HI on same chip)
-	filtered := make([]LogoMatch, 0, len(matches))
+	// Keep only the single best match per template name.
+	// The shift-invariant matching in matchBits produces near-identical
+	// scores at many positions; only the highest-scoring hit matters.
+	bestByName := make(map[string]LogoMatch)
 	for _, m := range matches {
-		overlaps := false
-		for _, existing := range filtered {
-			// Only filter if same logo template AND overlapping bounds
-			if m.Logo.Name == existing.Logo.Name && boundsOverlap(m.Bounds, existing.Bounds, 0.5) {
-				overlaps = true
-				break
-			}
-		}
-		if !overlaps {
-			filtered = append(filtered, m)
+		if existing, ok := bestByName[m.Logo.Name]; !ok || m.Score > existing.Score {
+			bestByName[m.Logo.Name] = m
 		}
 	}
+
+	filtered := make([]LogoMatch, 0, len(bestByName))
+	for _, m := range bestByName {
+		filtered = append(filtered, m)
+	}
+
+	// Sort by score descending
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].Score > filtered[j].Score
+	})
 
 	return filtered
 }

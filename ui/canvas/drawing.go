@@ -2,7 +2,6 @@
 package canvas
 
 import (
-	"fmt"
 	"image"
 	"image/color"
 
@@ -232,9 +231,7 @@ func (ic *ImageCanvas) drawSelectionRect(output *image.RGBA, rect *OverlayRect) 
 
 // drawPolygon draws a filled or outlined polygon on the output image.
 func (ic *ImageCanvas) drawPolygon(output *image.RGBA, poly OverlayPolygon, col color.RGBA, offsetX, offsetY float64) {
-	fmt.Printf("      drawPolygon: label=%s pts=%d filled=%v\n", poly.Label, len(poly.Points), poly.Filled)
 	if len(poly.Points) < 3 {
-		fmt.Printf("      drawPolygon: SKIPPED (< 3 points)\n")
 		return
 	}
 
@@ -261,8 +258,6 @@ func (ic *ImageCanvas) drawPolygon(output *image.RGBA, poly OverlayPolygon, col 
 			maxY = scaledPoints[i].Y
 		}
 	}
-	fmt.Printf("      drawPolygon: bounds minX=%.1f maxX=%.1f minY=%.1f maxY=%.1f zoom=%.2f\n",
-		minX, maxX, minY, maxY, ic.zoom)
 
 	if poly.Filled {
 		// Fill polygon using scanline algorithm
@@ -324,14 +319,7 @@ func (ic *ImageCanvas) drawPolygon(output *image.RGBA, poly OverlayPolygon, col 
 
 	// Draw label if present
 	if poly.Label != "" {
-		// Calculate centroid for label placement
 		center := geometry.Centroid(scaledPoints)
-		// Debug: compare centroid with bounding box center
-		bboxCenterX := (minX + maxX) / 2
-		bboxCenterY := (minY + maxY) / 2
-		fmt.Printf("      drawPolygon: label=%s centroid=(%.1f,%.1f) bboxCenter=(%.1f,%.1f) diff=(%.1f,%.1f)\n",
-			poly.Label, center.X, center.Y, bboxCenterX, bboxCenterY,
-			center.X-bboxCenterX, center.Y-bboxCenterY)
 		ic.drawOverlayLabel(output, poly.Label, int(center.X), int(center.Y))
 	}
 }

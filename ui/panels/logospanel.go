@@ -1,223 +1,259 @@
-// Package panels provides UI panels for the application.
 package panels
 
 import (
 	"fmt"
 	"image"
 	"image/color"
-	"time"
 
 	"pcb-tracer/internal/app"
 	"pcb-tracer/internal/logo"
 	"pcb-tracer/pkg/geometry"
 	"pcb-tracer/ui/canvas"
 
-	"fyne.io/fyne/v2"
-	fynecanvas "fyne.io/fyne/v2/canvas"
-	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/widget"
+	"github.com/gotk3/gotk3/gdk"
+	"github.com/gotk3/gotk3/gtk"
 )
 
 // LogosPanel displays and manages logo templates.
 type LogosPanel struct {
-	state     *app.State
-	canvas    *canvas.ImageCanvas
-	container fyne.CanvasObject
-	window    fyne.Window
+	state  *app.State
+	canvas *canvas.ImageCanvas
+	win    *gtk.Window
+	box    *gtk.Box
 
-	list              *widget.List
-	detailCard        *widget.Card
-	rawImage          *fynecanvas.Image // Displays raw captured region (before quantization)
-	quantizedImage    *fynecanvas.Image // Displays monochrome quantization result
-	nameEntry         *widget.Entry
-	manufacturerEntry *widget.Entry // Manufacturer ID entry for selected logo
-	selectedIdx       int           // Currently selected logo index, -1 if none
+	listBox          *gtk.ListBox
+	detailFrame      *gtk.Frame
+	nameEntry        *gtk.Entry
+	manufacturerEntry *gtk.Entry
+	selectedIdx      int
+
+	rawImage      *gtk.Image
+	quantizedImage *gtk.Image
 
 	// Logo capture state
-	capturing         bool             // true when waiting for middle-click
-	captureSize       int              // Current capture size (pixels, square)
-	bitmapResolution  int              // Resolution of the quantized bitmap (e.g., 128)
-	captureBounds     geometry.RectInt // Last capture bounds for keyboard adjustment
+	capturing        bool
+	captureSize      int
+	bitmapResolution int
+	captureBounds    geometry.RectInt
 
-	// Focus wrapper for keyboard events
-	focusWrapper fyne.Focusable
+	// Size/resolution controls
+	sizeLabel *gtk.Label
+	resLabel  *gtk.Label
 }
 
 // NewLogosPanel creates a new logos panel.
-func NewLogosPanel(state *app.State, canv *canvas.ImageCanvas) *LogosPanel {
+func NewLogosPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window) *LogosPanel {
 	lp := &LogosPanel{
 		state:            state,
-		canvas:           canv,
+		canvas:           cvs,
+		win:              win,
 		selectedIdx:      -1,
-		captureSize:      64,  // Default capture region size in source image pixels
-		bitmapResolution: 128, // Default quantized bitmap resolution (independent of capture size)
+		captureSize:      64,
+		bitmapResolution: 128,
 	}
 
-	// Logo list
-	lp.list = widget.NewList(
-		func() int {
-			if state.LogoLibrary == nil {
-				return 0
-			}
-			return len(state.LogoLibrary.Logos)
-		},
-		func() fyne.CanvasObject {
-			return widget.NewLabel("Logo Name")
-		},
-		func(id widget.ListItemID, obj fyne.CanvasObject) {
-			label := obj.(*widget.Label)
-			if state.LogoLibrary != nil && id < len(state.LogoLibrary.Logos) {
-				logo := state.LogoLibrary.Logos[id]
-				mfr := logo.ManufacturerID
-				if mfr == "" {
-					mfr = "-"
-				}
-				label.SetText(fmt.Sprintf("<%s> %s %dx%d", logo.Name, mfr, logo.Width, logo.Height))
-			}
-		},
-	)
+	lp.box, _ = gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 4)
+	lp.box.SetMarginStart(4)
+	lp.box.SetMarginEnd(4)
+	lp.box.SetMarginTop(4)
+	lp.box.SetMarginBottom(4)
 
-	lp.list.OnSelected = func(id widget.ListItemID) {
-		lp.selectedIdx = int(id)
-		lp.showLogoDetail(id)
-		// Defer focus to wrapper so keyboard events work (list tries to keep focus)
-		go func() {
-			// Small delay to let the list and canvas finish their focus handling
-			time.Sleep(50 * time.Millisecond)
-			if lp.focusWrapper != nil {
-				if c := fyne.CurrentApp().Driver().CanvasForObject(lp.list); c != nil {
-					c.Focus(lp.focusWrapper)
-				}
-			}
-		}()
-	}
+	// --- Capture Controls ---
+	captureFrame, _ := gtk.FrameNew("Capture")
+	captureBox, _ := gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 4)
+	captureBox.SetMarginStart(4)
+	captureBox.SetMarginEnd(4)
+	captureBox.SetMarginTop(4)
+	captureBox.SetMarginBottom(4)
 
-	// Name entry for new/edit
-	lp.nameEntry = widget.NewEntry()
-	lp.nameEntry.SetPlaceHolder("Logo name (e.g., ST, NS, TI)")
+	lp.nameEntry, _ = gtk.EntryNew()
+	lp.nameEntry.SetPlaceholderText("Logo name (e.g., ST, NS, TI)")
+	captureBox.PackStart(lp.nameEntry, false, false, 0)
 
-	// Raw image display (captured region before quantization)
-	lp.rawImage = fynecanvas.NewImageFromImage(nil)
-	lp.rawImage.FillMode = fynecanvas.ImageFillContain
-	lp.rawImage.SetMinSize(fyne.NewSize(128, 128))
-
-	// Quantized image display (monochrome quantization result)
-	lp.quantizedImage = fynecanvas.NewImageFromImage(nil)
-	lp.quantizedImage.FillMode = fynecanvas.ImageFillContain
-	lp.quantizedImage.SetMinSize(fyne.NewSize(128, 128))
-
-	// Capture button
-	captureBtn := widget.NewButton("Capture Logo", func() {
-		lp.startCapture()
+	// Size slider
+	sizeRow, _ := gtk.BoxNew(gtk.ORIENTATION_HORIZONTAL, 4)
+	lp.sizeLabel, _ = gtk.LabelNew(fmt.Sprintf("Region: %dpx", lp.captureSize))
+	sizeSlider, _ := gtk.ScaleNewWithRange(gtk.ORIENTATION_HORIZONTAL, 16, 256, 1)
+	sizeSlider.SetValue(float64(lp.captureSize))
+	sizeSlider.SetDrawValue(false)
+	sizeSlider.Connect("value-changed", func() {
+		lp.captureSize = int(sizeSlider.GetValue())
+		lp.sizeLabel.SetText(fmt.Sprintf("Region: %dpx", lp.captureSize))
 	})
+	sizeRow.PackStart(lp.sizeLabel, false, false, 0)
+	sizeRow.PackStart(sizeSlider, true, true, 0)
+	captureBox.PackStart(sizeRow, false, false, 0)
 
-	// Size controls - capture region size in source image pixels
-	sizeLabel := widget.NewLabel(fmt.Sprintf("Region: %dpx", lp.captureSize))
-	sizeSlider := widget.NewSlider(16, 256)
-	sizeSlider.Value = float64(lp.captureSize)
-	sizeSlider.OnChanged = func(v float64) {
-		lp.captureSize = int(v)
-		sizeLabel.SetText(fmt.Sprintf("Region: %dpx", lp.captureSize))
-	}
-
-	// Resolution controls - quantized bitmap resolution (independent of capture size)
-	resLabel := widget.NewLabel(fmt.Sprintf("Resolution: %d", lp.bitmapResolution))
-	resSlider := widget.NewSlider(32, 256)
-	resSlider.Value = float64(lp.bitmapResolution)
-	resSlider.OnChanged = func(v float64) {
-		lp.bitmapResolution = int(v)
-		resLabel.SetText(fmt.Sprintf("Resolution: %d", lp.bitmapResolution))
-	}
-
-	// Delete button
-	deleteBtn := widget.NewButton("Delete", func() {
-		lp.deleteSelected()
+	// Resolution slider
+	resRow, _ := gtk.BoxNew(gtk.ORIENTATION_HORIZONTAL, 4)
+	lp.resLabel, _ = gtk.LabelNew(fmt.Sprintf("Resolution: %d", lp.bitmapResolution))
+	resSlider, _ := gtk.ScaleNewWithRange(gtk.ORIENTATION_HORIZONTAL, 32, 256, 1)
+	resSlider.SetValue(float64(lp.bitmapResolution))
+	resSlider.SetDrawValue(false)
+	resSlider.Connect("value-changed", func() {
+		lp.bitmapResolution = int(resSlider.GetValue())
+		lp.resLabel.SetText(fmt.Sprintf("Resolution: %d", lp.bitmapResolution))
 	})
+	resRow.PackStart(lp.resLabel, false, false, 0)
+	resRow.PackStart(resSlider, true, true, 0)
+	captureBox.PackStart(resRow, false, false, 0)
 
-	// Save button
-	saveBtn := widget.NewButton("Save Library", func() {
+	// Buttons
+	btnRow, _ := gtk.BoxNew(gtk.ORIENTATION_HORIZONTAL, 4)
+	captureBtn, _ := gtk.ButtonNewWithLabel("Capture Logo")
+	captureBtn.Connect("clicked", func() { lp.startCapture() })
+	deleteBtn, _ := gtk.ButtonNewWithLabel("Delete")
+	deleteBtn.Connect("clicked", func() { lp.deleteSelected() })
+	saveBtn, _ := gtk.ButtonNewWithLabel("Save Library")
+	saveBtn.Connect("clicked", func() {
 		if err := lp.state.SaveLogoLibrary(); err != nil {
 			fmt.Printf("Error saving logo library: %v\n", err)
 		} else {
 			fmt.Println("Logo library saved")
 		}
 	})
+	btnRow.PackStart(captureBtn, false, false, 0)
+	btnRow.PackStart(deleteBtn, false, false, 0)
+	btnRow.PackStart(saveBtn, false, false, 0)
+	captureBox.PackStart(btnRow, false, false, 0)
 
-	// Status label
-	statusLabel := widget.NewLabel("Middle-click to capture. Arrow keys adjust, +/- resize.")
+	statusLabel, _ := gtk.LabelNew("Middle-click to capture. Arrow keys adjust, +/- resize.")
+	statusLabel.SetHAlign(gtk.ALIGN_START)
+	statusLabel.SetLineWrap(true)
+	captureBox.PackStart(statusLabel, false, false, 0)
 
-	// Controls card
-	controlsCard := widget.NewCard("Capture", "",
-		container.NewVBox(
-			lp.nameEntry,
-			container.NewHBox(sizeLabel, sizeSlider),
-			container.NewHBox(resLabel, resSlider),
-			container.NewHBox(captureBtn, deleteBtn, saveBtn),
-			statusLabel,
-		),
-	)
+	captureFrame.Add(captureBox)
+	lp.box.PackStart(captureFrame, false, false, 0)
 
-	// Manufacturer ID entry for selected logo
-	lp.manufacturerEntry = widget.NewEntry()
-	lp.manufacturerEntry.SetPlaceHolder("Manufacturer (e.g., National Semiconductor)")
-	lp.manufacturerEntry.OnChanged = func(text string) {
-		lp.updateSelectedManufacturer(text)
-	}
+	// --- Logo List ---
+	listScroll, _ := gtk.ScrolledWindowNew(nil, nil)
+	listScroll.SetPolicy(gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC)
+	listScroll.SetSizeRequest(-1, 150)
 
-	// Detail card with two image previews side by side
-	rawPreview := container.NewVBox(
-		widget.NewLabel("Raw Capture:"),
-		container.NewCenter(lp.rawImage),
-	)
-	quantizedPreview := container.NewVBox(
-		widget.NewLabel("Quantized:"),
-		container.NewCenter(lp.quantizedImage),
-	)
-	imageRow := container.NewHBox(rawPreview, quantizedPreview)
-	detailContent := container.NewVBox(
-		imageRow,
-		widget.NewLabel("Manufacturer:"),
-		lp.manufacturerEntry,
-	)
-	lp.detailCard = widget.NewCard("Selected Logo", "", detailContent)
+	lp.listBox, _ = gtk.ListBoxNew()
+	lp.listBox.Connect("row-activated", func(lb *gtk.ListBox, row *gtk.ListBoxRow) {
+		if row == nil {
+			return
+		}
+		idx := row.GetIndex()
+		lp.selectedIdx = idx
+		lp.showLogoDetail(idx)
+	})
+	listScroll.Add(lp.listBox)
+	lp.box.PackStart(listScroll, true, true, 0)
 
-	// Wrap list in a scroll container with fixed height
-	listScroll := container.NewVScroll(lp.list)
-	listScroll.SetMinSize(fyne.NewSize(0, 150))
+	// --- Detail Panel ---
+	lp.detailFrame, _ = gtk.FrameNew("Selected Logo")
+	detailBox, _ := gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 4)
+	detailBox.SetMarginStart(4)
+	detailBox.SetMarginEnd(4)
+	detailBox.SetMarginTop(4)
+	detailBox.SetMarginBottom(4)
 
-	// Create focusable wrapper with key handler
-	focusWrapper := newFocusableContainer(listScroll, lp.onKeyPressed)
-	lp.focusWrapper = focusWrapper
+	// Image previews side by side
+	imgRow, _ := gtk.BoxNew(gtk.ORIENTATION_HORIZONTAL, 8)
 
-	// Layout
-	lp.container = container.NewBorder(
-		controlsCard,
-		lp.detailCard,
-		nil, nil,
-		focusWrapper,
-	)
+	rawBox, _ := gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 2)
+	rawLabel, _ := gtk.LabelNew("Raw Capture:")
+	lp.rawImage, _ = gtk.ImageNew()
+	rawBox.PackStart(rawLabel, false, false, 0)
+	rawBox.PackStart(lp.rawImage, false, false, 0)
+
+	quantBox, _ := gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 2)
+	quantLabel, _ := gtk.LabelNew("Quantized:")
+	lp.quantizedImage, _ = gtk.ImageNew()
+	quantBox.PackStart(quantLabel, false, false, 0)
+	quantBox.PackStart(lp.quantizedImage, false, false, 0)
+
+	imgRow.PackStart(rawBox, true, true, 0)
+	imgRow.PackStart(quantBox, true, true, 0)
+	detailBox.PackStart(imgRow, false, false, 0)
+
+	mfrLabel, _ := gtk.LabelNew("Manufacturer:")
+	mfrLabel.SetHAlign(gtk.ALIGN_START)
+	detailBox.PackStart(mfrLabel, false, false, 0)
+
+	lp.manufacturerEntry, _ = gtk.EntryNew()
+	lp.manufacturerEntry.SetPlaceholderText("Manufacturer (e.g., National Semiconductor)")
+	lp.manufacturerEntry.Connect("changed", func() {
+		t, _ := lp.manufacturerEntry.GetText()
+		lp.updateSelectedManufacturer(t)
+	})
+	detailBox.PackStart(lp.manufacturerEntry, false, false, 0)
+
+	lp.detailFrame.Add(detailBox)
+	lp.box.PackStart(lp.detailFrame, false, false, 0)
+
+	lp.refreshList()
 
 	return lp
 }
 
-// Container returns the panel container.
-func (lp *LogosPanel) Container() fyne.CanvasObject {
-	return lp.container
+// Widget returns the panel widget for embedding.
+func (lp *LogosPanel) Widget() gtk.IWidget {
+	return lp.box
 }
 
-// SetWindow sets the parent window for dialogs.
-func (lp *LogosPanel) SetWindow(w fyne.Window) {
-	lp.window = w
+// OnKeyPressed handles keyboard events for logo editing.
+func (lp *LogosPanel) OnKeyPressed(ev *gdk.EventKey) bool {
+	if lp.selectedIdx < 0 || lp.state.LogoLibrary == nil {
+		return false
+	}
+	if lp.selectedIdx >= len(lp.state.LogoLibrary.Logos) {
+		return false
+	}
+
+	step := 1
+	keyval := ev.KeyVal()
+	switch keyval {
+	case gdk.KEY_Up:
+		lp.AdjustCaptureBounds(0, -step)
+	case gdk.KEY_Down:
+		lp.AdjustCaptureBounds(0, step)
+	case gdk.KEY_Left:
+		lp.AdjustCaptureBounds(-step, 0)
+	case gdk.KEY_Right:
+		lp.AdjustCaptureBounds(step, 0)
+	case gdk.KEY_plus, gdk.KEY_equal, gdk.KEY_KP_Add:
+		lp.ResizeCapture(2)
+	case gdk.KEY_minus, gdk.KEY_KP_Subtract:
+		lp.ResizeCapture(-2)
+	default:
+		return false
+	}
+	return true
+}
+
+// refreshList rebuilds the list from the logo library.
+func (lp *LogosPanel) refreshList() {
+	children := lp.listBox.GetChildren()
+	children.Foreach(func(item interface{}) {
+		w := item.(*gtk.Widget)
+		lp.listBox.Remove(w)
+	})
+
+	if lp.state.LogoLibrary == nil {
+		return
+	}
+
+	for _, l := range lp.state.LogoLibrary.Logos {
+		mfr := l.ManufacturerID
+		if mfr == "" {
+			mfr = "-"
+		}
+		text := fmt.Sprintf("<%s> %s %dx%d", l.Name, mfr, l.Width, l.Height)
+		label, _ := gtk.LabelNew(text)
+		label.SetHAlign(gtk.ALIGN_START)
+		lp.listBox.Add(label)
+	}
+	lp.listBox.ShowAll()
 }
 
 // startCapture initiates logo capture mode.
 func (lp *LogosPanel) startCapture() {
-	name := lp.nameEntry.Text
+	name, _ := lp.nameEntry.GetText()
 	if name == "" {
-		if lp.window != nil {
-			dialog.ShowInformation("Name Required", "Please enter a logo name first", lp.window)
-		}
+		fmt.Println("Logo capture: please enter a logo name first")
 		return
 	}
 
@@ -226,25 +262,22 @@ func (lp *LogosPanel) startCapture() {
 }
 
 // OnMiddleClick handles middle-click for logo capture.
-// Called from main app when logos panel is active.
 func (lp *LogosPanel) OnMiddleClick(x, y float64) {
 	if !lp.capturing {
 		return
 	}
 
-	name := lp.nameEntry.Text
+	name, _ := lp.nameEntry.GetText()
 	if name == "" {
 		return
 	}
 
-	// Get the rendered canvas output
 	img := lp.canvas.GetRenderedOutput()
 	if img == nil {
 		fmt.Println("No image available for logo capture")
 		return
 	}
 
-	// Center the capture region on the click point
 	halfSize := lp.captureSize / 2
 	bounds := geometry.RectInt{
 		X:      int(x) - halfSize,
@@ -253,16 +286,10 @@ func (lp *LogosPanel) OnMiddleClick(x, y float64) {
 		Height: lp.captureSize,
 	}
 
-	// Clamp to image bounds
 	imgBounds := img.Bounds()
-	imgW := imgBounds.Max.X - imgBounds.Min.X
-	imgH := imgBounds.Max.Y - imgBounds.Min.Y
-
-	// Check if click is outside image bounds entirely
 	if int(x) < imgBounds.Min.X || int(x) >= imgBounds.Max.X ||
 		int(y) < imgBounds.Min.Y || int(y) >= imgBounds.Max.Y {
-		fmt.Printf("Logo capture: click position (%.0f,%.0f) outside image bounds (%dx%d)\n",
-			x, y, imgW, imgH)
+		fmt.Printf("Logo capture: click position (%.0f,%.0f) outside image bounds\n", x, y)
 		return
 	}
 
@@ -279,18 +306,13 @@ func (lp *LogosPanel) OnMiddleClick(x, y float64) {
 		bounds.Height = imgBounds.Max.Y - bounds.Y
 	}
 
-	// Ensure minimum capture size
-	const minCaptureSize = 8
-	if bounds.Width < minCaptureSize || bounds.Height < minCaptureSize {
-		fmt.Printf("Logo capture: region too small (%dx%d) after clamping to image bounds\n",
-			bounds.Width, bounds.Height)
+	if bounds.Width < 8 || bounds.Height < 8 {
+		fmt.Printf("Logo capture: region too small (%dx%d)\n", bounds.Width, bounds.Height)
 		return
 	}
 
-	// Store bounds for keyboard adjustment (in canvas coordinates)
 	lp.captureBounds = bounds
 
-	// Convert bounds to source image coordinates for storage (zoom-independent)
 	zoom := lp.canvas.GetZoom()
 	sourceBounds := geometry.RectInt{
 		X:      int(float64(bounds.X) / zoom),
@@ -299,11 +321,8 @@ func (lp *LogosPanel) OnMiddleClick(x, y float64) {
 		Height: int(float64(bounds.Height) / zoom),
 	}
 
-	// Create logo from region (use bitmapResolution for quantization, not captureSize)
-	// Pass canvas bounds for quantization, but store source bounds in the logo
 	newLogo := logo.NewLogo(name, img, bounds, lp.bitmapResolution)
 	if newLogo != nil {
-		// Override bounds with source coordinates for zoom-independent storage
 		newLogo.Bounds = sourceBounds
 	}
 	if newLogo == nil {
@@ -311,7 +330,6 @@ func (lp *LogosPanel) OnMiddleClick(x, y float64) {
 		return
 	}
 
-	// Add to library and save to preferences
 	lp.state.LogoLibrary.Add(newLogo)
 	if err := lp.state.SaveLogoLibrary(); err != nil {
 		fmt.Printf("Warning: could not save logo library: %v\n", err)
@@ -321,13 +339,11 @@ func (lp *LogosPanel) OnMiddleClick(x, y float64) {
 		name, bounds.X, bounds.Y, bounds.Width, bounds.Height,
 		newLogo.Width, newLogo.Height)
 
-	// Update UI
-	lp.list.Refresh()
+	lp.refreshList()
 	lp.capturing = false
 	lp.nameEntry.SetText("")
 
-	// Select the newly added logo to populate the detail panels
-	// Find by name since library is sorted
+	// Select newly added logo
 	newIdx := 0
 	for i, l := range lp.state.LogoLibrary.Logos {
 		if l.Name == name {
@@ -335,7 +351,9 @@ func (lp *LogosPanel) OnMiddleClick(x, y float64) {
 			break
 		}
 	}
-	lp.list.Select(newIdx)
+	lp.selectedIdx = newIdx
+	lp.listBox.SelectRow(lp.listBox.GetRowAtIndex(newIdx))
+	lp.showLogoDetail(newIdx)
 }
 
 // showCaptureOverlay displays the capture region on the canvas.
@@ -348,7 +366,7 @@ func (lp *LogosPanel) showCaptureOverlay(bounds geometry.RectInt) {
 			Width:  int(float64(bounds.Width) / zoom),
 			Height: int(float64(bounds.Height) / zoom),
 		}},
-		Color: color.RGBA{R: 255, G: 0, B: 255, A: 200}, // Magenta
+		Color: color.RGBA{R: 255, G: 0, B: 255, A: 200},
 	})
 }
 
@@ -360,8 +378,6 @@ func (lp *LogosPanel) showLogoDetail(idx int) {
 
 	l := lp.state.LogoLibrary.Logos[idx]
 
-	// The bounds are stored in source image coordinates (zoom-independent).
-	// Convert to canvas coordinates for extraction and overlay display.
 	zoom := lp.canvas.GetZoom()
 	canvasBounds := geometry.RectInt{
 		X:      int(float64(l.Bounds.X) * zoom),
@@ -370,55 +386,70 @@ func (lp *LogosPanel) showLogoDetail(idx int) {
 		Height: int(float64(l.Bounds.Height) * zoom),
 	}
 
-	// Get raw image from canvas to show the captured region
 	canvasImg := lp.canvas.GetRenderedOutput()
 	if canvasImg != nil {
 		rawRegion := lp.extractRawRegion(canvasImg, canvasBounds)
 		if rawRegion != nil {
-			lp.rawImage.Image = rawRegion
-			lp.rawImage.Refresh()
+			pixbuf := rgbaToPixbuf(rawRegion)
+			if pixbuf != nil {
+				lp.rawImage.SetFromPixbuf(pixbuf)
+			}
 		} else {
-			// Clear the raw image if extraction failed
-			lp.rawImage.Image = nil
-			lp.rawImage.Refresh()
+			lp.rawImage.Clear()
 		}
 	}
 
-	// Create scaled quantized image for display
-	scaled := l.ToScaledImage(1) // 1:1 scale, image is already at quantized size
-	if scaled == nil {
-		return
-	}
-
-	// Convert to RGBA for fyne (show black/white quantization)
-	rgba := image.NewRGBA(scaled.Bounds())
-	for y := 0; y < scaled.Bounds().Dy(); y++ {
-		for x := 0; x < scaled.Bounds().Dx(); x++ {
-			gray := scaled.GrayAt(x, y)
-			rgba.Set(x, y, color.RGBA{R: gray.Y, G: gray.Y, B: gray.Y, A: 255})
+	scaled := l.ToScaledImage(1)
+	if scaled != nil {
+		rgba := image.NewRGBA(scaled.Bounds())
+		for y := 0; y < scaled.Bounds().Dy(); y++ {
+			for x := 0; x < scaled.Bounds().Dx(); x++ {
+				gray := scaled.GrayAt(x, y)
+				rgba.Set(x, y, color.RGBA{R: gray.Y, G: gray.Y, B: gray.Y, A: 255})
+			}
+		}
+		pixbuf := rgbaToPixbuf(rgba)
+		if pixbuf != nil {
+			lp.quantizedImage.SetFromPixbuf(pixbuf)
 		}
 	}
 
-	lp.quantizedImage.Image = rgba
-	lp.quantizedImage.Refresh()
-
-	lp.detailCard.SetTitle(fmt.Sprintf("<%s>", l.Name))
-	lp.detailCard.SetSubTitle(fmt.Sprintf("Bitmap: %dx%d, Source: %dx%d @ (%d,%d)",
-		l.Width, l.Height, l.Bounds.Width, l.Bounds.Height, l.Bounds.X, l.Bounds.Y))
-
-	// Populate manufacturer entry
+	lp.detailFrame.SetLabel(fmt.Sprintf("<%s>", l.Name))
 	lp.manufacturerEntry.SetText(l.ManufacturerID)
 
-	// Show overlay on canvas for selected logo (using canvas bounds computed above)
 	lp.showCaptureOverlay(canvasBounds)
-
-	// Scroll canvas to show the logo region (use source bounds)
 	lp.canvas.ScrollToRegion(l.Bounds.X, l.Bounds.Y, l.Bounds.Width, l.Bounds.Height)
 }
 
-// extractRawRegion extracts a region from the canvas image without any processing.
+// rgbaToPixbuf converts an RGBA image to a GDK Pixbuf.
+func rgbaToPixbuf(img *image.RGBA) *gdk.Pixbuf {
+	bounds := img.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+	if w <= 0 || h <= 0 {
+		return nil
+	}
+
+	// Convert RGBA to RGB for pixbuf (drop alpha)
+	rgb := make([]byte, w*h*3)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			c := img.RGBAAt(x+bounds.Min.X, y+bounds.Min.Y)
+			off := (y*w + x) * 3
+			rgb[off] = c.R
+			rgb[off+1] = c.G
+			rgb[off+2] = c.B
+		}
+	}
+
+	pixbuf, err := gdk.PixbufNewFromData(rgb, gdk.COLORSPACE_RGB, false, 8, w, h, w*3)
+	if err != nil {
+		return nil
+	}
+	return pixbuf
+}
+
+// extractRawRegion extracts a region from the canvas image.
 func (lp *LogosPanel) extractRawRegion(img *image.RGBA, bounds geometry.RectInt) *image.RGBA {
-	// Clamp bounds to image
 	imgBounds := img.Bounds()
 	x0 := bounds.X
 	y0 := bounds.Y
@@ -444,14 +475,12 @@ func (lp *LogosPanel) extractRawRegion(img *image.RGBA, bounds geometry.RectInt)
 		return nil
 	}
 
-	// Copy raw pixel data
 	result := image.NewRGBA(image.Rect(0, 0, w, h))
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			result.Set(x, y, img.At(x0+x, y0+y))
 		}
 	}
-
 	return result
 }
 
@@ -466,16 +495,13 @@ func (lp *LogosPanel) updateSelectedManufacturer(manufacturer string) {
 
 	l := lp.state.LogoLibrary.Logos[lp.selectedIdx]
 	if l.ManufacturerID == manufacturer {
-		return // No change
+		return
 	}
 
 	l.ManufacturerID = manufacturer
-
-	// Save to preferences
 	if err := lp.state.SaveLogoLibrary(); err != nil {
 		fmt.Printf("Warning: could not save logo library: %v\n", err)
 	}
-
 	fmt.Printf("Updated logo <%s> manufacturer to %q\n", l.Name, manufacturer)
 }
 
@@ -484,43 +510,30 @@ func (lp *LogosPanel) deleteSelected() {
 	if lp.selectedIdx < 0 || lp.state.LogoLibrary == nil {
 		return
 	}
-
 	if lp.selectedIdx >= len(lp.state.LogoLibrary.Logos) {
 		return
 	}
 
 	name := lp.state.LogoLibrary.Logos[lp.selectedIdx].Name
 
-	if lp.window != nil {
-		dialog.ShowConfirm("Delete Logo",
-			fmt.Sprintf("Delete logo <%s>?", name),
-			func(confirmed bool) {
-				if confirmed {
-					lp.state.LogoLibrary.Remove(name)
-					if err := lp.state.SaveLogoLibrary(); err != nil {
-						fmt.Printf("Warning: could not save logo library: %v\n", err)
-					}
-					lp.selectedIdx = -1
-					lp.list.UnselectAll()
-					lp.list.Refresh()
-					lp.rawImage.Image = nil
-					lp.rawImage.Refresh()
-					lp.quantizedImage.Image = nil
-					lp.quantizedImage.Refresh()
-					lp.detailCard.SetTitle("Selected Logo")
-					lp.detailCard.SetSubTitle("")
-					// Clear the selection overlay
-					lp.canvas.ClearOverlay("logo_capture")
-					fmt.Printf("Deleted logo <%s>\n", name)
-				}
-			},
-			lp.window)
-	}
-}
+	dlg := gtk.MessageDialogNew(lp.win, gtk.DIALOG_MODAL, gtk.MESSAGE_QUESTION, gtk.BUTTONS_YES_NO,
+		"Delete logo <%s>?", name)
+	response := dlg.Run()
+	dlg.Destroy()
 
-// Refresh refreshes the panel display.
-func (lp *LogosPanel) Refresh() {
-	lp.list.Refresh()
+	if response == gtk.RESPONSE_YES {
+		lp.state.LogoLibrary.Remove(name)
+		if err := lp.state.SaveLogoLibrary(); err != nil {
+			fmt.Printf("Warning: could not save logo library: %v\n", err)
+		}
+		lp.selectedIdx = -1
+		lp.rawImage.Clear()
+		lp.quantizedImage.Clear()
+		lp.detailFrame.SetLabel("Selected Logo")
+		lp.canvas.ClearOverlay("logo_capture")
+		lp.refreshList()
+		fmt.Printf("Deleted logo <%s>\n", name)
+	}
 }
 
 // IsCapturing returns true if logo capture mode is active.
@@ -529,29 +542,23 @@ func (lp *LogosPanel) IsCapturing() bool {
 }
 
 // AdjustCaptureBounds adjusts the last capture bounds and re-captures.
-// dx, dy are pixel offsets in source image coordinates.
 func (lp *LogosPanel) AdjustCaptureBounds(dx, dy int) {
 	if lp.selectedIdx < 0 || lp.state.LogoLibrary == nil {
 		return
 	}
-
 	if lp.selectedIdx >= len(lp.state.LogoLibrary.Logos) {
 		return
 	}
 
 	l := lp.state.LogoLibrary.Logos[lp.selectedIdx]
-
-	// Adjust the source bounds (in source image coordinates)
 	l.Bounds.X += dx
 	l.Bounds.Y += dy
 
-	// Re-quantize from the adjusted bounds
 	img := lp.canvas.GetRenderedOutput()
 	if img == nil {
 		return
 	}
 
-	// Convert source bounds to canvas coordinates for NewLogo
 	zoom := lp.canvas.GetZoom()
 	canvasBounds := geometry.RectInt{
 		X:      int(float64(l.Bounds.X) * zoom),
@@ -560,56 +567,44 @@ func (lp *LogosPanel) AdjustCaptureBounds(dx, dy int) {
 		Height: int(float64(l.Bounds.Height) * zoom),
 	}
 
-	// Use stored quantized size, or default if not set
 	qSize := l.QuantizedSize
 	if qSize < 8 {
-		qSize = 64 // Default for legacy logos
+		qSize = 64
 	}
 
-	// Create new quantized version using canvas coordinates
 	newLogo := logo.NewLogo(l.Name, img, canvasBounds, qSize)
 	if newLogo == nil {
 		return
 	}
 
-	// Update the logo in place
 	l.Bits = newLogo.Bits
 	l.Width = newLogo.Width
 	l.Height = newLogo.Height
 
-	// Save to preferences
 	if err := lp.state.SaveLogoLibrary(); err != nil {
 		fmt.Printf("Warning: could not save logo library: %v\n", err)
 	}
 
-	// showLogoDetail will handle overlay display
 	lp.showLogoDetail(lp.selectedIdx)
-
 	fmt.Printf("Adjusted logo <%s> to (%d,%d)\n", l.Name, l.Bounds.X, l.Bounds.Y)
 }
 
 // ResizeCapture changes the capture size and re-captures.
-// delta is in source image pixels.
 func (lp *LogosPanel) ResizeCapture(delta int) {
 	if lp.selectedIdx < 0 || lp.state.LogoLibrary == nil {
-		fmt.Println("ResizeCapture: no selection or library")
 		return
 	}
-
 	if lp.selectedIdx >= len(lp.state.LogoLibrary.Logos) {
-		fmt.Println("ResizeCapture: selection out of range")
 		return
 	}
 
 	l := lp.state.LogoLibrary.Logos[lp.selectedIdx]
 
-	// Adjust the bounds size in source coordinates (keep center fixed)
 	oldCenterX := l.Bounds.X + l.Bounds.Width/2
 	oldCenterY := l.Bounds.Y + l.Bounds.Height/2
 
 	l.Bounds.Width += delta
 	l.Bounds.Height += delta
-
 	if l.Bounds.Width < 8 {
 		l.Bounds.Width = 8
 	}
@@ -617,18 +612,14 @@ func (lp *LogosPanel) ResizeCapture(delta int) {
 		l.Bounds.Height = 8
 	}
 
-	// Re-center
 	l.Bounds.X = oldCenterX - l.Bounds.Width/2
 	l.Bounds.Y = oldCenterY - l.Bounds.Height/2
 
-	// Re-quantize from canvas image
 	img := lp.canvas.GetRenderedOutput()
 	if img == nil {
-		fmt.Println("ResizeCapture: GetRenderedOutput returned nil")
 		return
 	}
 
-	// Convert source bounds to canvas coordinates for NewLogo
 	zoom := lp.canvas.GetZoom()
 	canvasBounds := geometry.RectInt{
 		X:      int(float64(l.Bounds.X) * zoom),
@@ -637,73 +628,25 @@ func (lp *LogosPanel) ResizeCapture(delta int) {
 		Height: int(float64(l.Bounds.Height) * zoom),
 	}
 
-	fmt.Printf("ResizeCapture: re-reading from image %dx%d, canvas bounds (%d,%d) %dx%d\n",
-		img.Bounds().Dx(), img.Bounds().Dy(),
-		canvasBounds.X, canvasBounds.Y, canvasBounds.Width, canvasBounds.Height)
-
-	// Use stored quantized size, or default if not set
 	qSize := l.QuantizedSize
 	if qSize < 8 {
-		qSize = 64 // Default for legacy logos
+		qSize = 64
 	}
 
 	newLogo := logo.NewLogo(l.Name, img, canvasBounds, qSize)
 	if newLogo == nil {
-		fmt.Println("ResizeCapture: NewLogo returned nil")
 		return
 	}
 
-	// Update logo in place with fresh data from image
 	l.Bits = newLogo.Bits
 	l.Width = newLogo.Width
 	l.Height = newLogo.Height
 
-	fmt.Printf("ResizeCapture: new bitmap %dx%d (%d bytes)\n", l.Width, l.Height, len(l.Bits))
-
-	// Save to preferences
 	if err := lp.state.SaveLogoLibrary(); err != nil {
 		fmt.Printf("Warning: could not save logo library: %v\n", err)
 	}
 
-	// showLogoDetail will handle overlay display
 	lp.showLogoDetail(lp.selectedIdx)
-
 	fmt.Printf("Resized logo <%s> to source %dx%d -> bitmap %dx%d\n",
 		l.Name, l.Bounds.Width, l.Bounds.Height, l.Width, l.Height)
-}
-
-// onKeyPressed handles keyboard events for logo editing.
-// Arrow keys adjust position, +/- adjust size.
-func (lp *LogosPanel) onKeyPressed(ev *fyne.KeyEvent) {
-	fmt.Printf("LogosPanel.onKeyPressed: key=%s selectedIdx=%d\n", ev.Name, lp.selectedIdx)
-
-	if lp.selectedIdx < 0 || lp.state.LogoLibrary == nil {
-		fmt.Println("  -> no selection or no library")
-		return
-	}
-	if lp.selectedIdx >= len(lp.state.LogoLibrary.Logos) {
-		fmt.Println("  -> selection out of range")
-		return
-	}
-
-	// Use 1 pixel steps for fine adjustment
-	step := 1
-
-	switch ev.Name {
-	case fyne.KeyUp:
-		lp.AdjustCaptureBounds(0, -step)
-	case fyne.KeyDown:
-		lp.AdjustCaptureBounds(0, step)
-	case fyne.KeyLeft:
-		lp.AdjustCaptureBounds(-step, 0)
-	case fyne.KeyRight:
-		lp.AdjustCaptureBounds(step, 0)
-	case "Plus":
-		lp.ResizeCapture(2) // Grow by 2 pixels
-	case "Minus":
-		lp.ResizeCapture(-2) // Shrink by 2 pixels
-	default:
-		fmt.Printf("  -> unhandled key: %s\n", ev.Name)
-		return
-	}
 }

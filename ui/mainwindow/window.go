@@ -3,20 +3,18 @@ package mainwindow
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
 	"pcb-tracer/internal/app"
-	"pcb-tracer/internal/image"
 	"pcb-tracer/internal/version"
 	"pcb-tracer/ui/canvas"
 	"pcb-tracer/ui/panels"
+	"pcb-tracer/ui/prefs"
 
-	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/storage"
-	"fyne.io/fyne/v2/widget"
+	"github.com/gotk3/gotk3/gdk"
+	"github.com/gotk3/gotk3/gtk"
 )
 
 const (
@@ -29,260 +27,304 @@ const (
 
 // MainWindow is the primary application window.
 type MainWindow struct {
-	fyne.Window
-	app       fyne.App
-	state     *app.State
-	canvas    *canvas.ImageCanvas
+	win    *gtk.Window
+	state  *app.State
+	prefs  *prefs.Prefs
+	canvas *canvas.ImageCanvas
+
+	// Status bar
+	statusBar *gtk.Label
+
+	// Opacity sliders
+	frontOpacitySlider *gtk.Scale
+	backOpacitySlider  *gtk.Scale
+
+	// Checkerboard toggle
+	checkerboardCheck *gtk.CheckButton
+
+	// View menu items
+	viewImportItem     *gtk.RadioMenuItem
+	viewComponentsItem *gtk.RadioMenuItem
+	viewTracesItem     *gtk.RadioMenuItem
+	viewPropertiesItem *gtk.RadioMenuItem
+	viewLogosItem      *gtk.RadioMenuItem
+
+	// Side panel
 	sidePanel *panels.SidePanel
-	statusBar *widget.Label
 
-	// View menu items for panel switching (some need disable until aligned)
-	viewImportItem      *fyne.MenuItem
-	viewComponentsItem  *fyne.MenuItem
-	viewTracesItem      *fyne.MenuItem
-	viewPropertiesItem  *fyne.MenuItem
-	viewLogosItem       *fyne.MenuItem
-
-	// Opacity sliders in toolbar
-	frontOpacitySlider *widget.Slider
-	backOpacitySlider  *widget.Slider
-
-	// Checkerboard alignment toggle
-	checkerboardCheck *widget.Check
-
-	// Track last saved size for change detection
-	lastSavedWidth  float32
-	lastSavedHeight float32
+	// Track last saved size
+	lastSavedWidth  int
+	lastSavedHeight int
 }
 
 // New creates a new main window.
-func New(fyneApp fyne.App, state *app.State) *MainWindow {
-	win := fyneApp.NewWindow("PCB Tracer")
+func New(state *app.State, p *prefs.Prefs) *MainWindow {
+	win, _ := gtk.WindowNew(gtk.WINDOW_TOPLEVEL)
 
 	mw := &MainWindow{
-		Window: win,
-		app:    fyneApp,
-		state:  state,
+		win:   win,
+		state: state,
+		prefs: p,
 	}
 
 	mw.setupUI()
 	mw.setupMenus()
 	mw.setupEventHandlers()
+	mw.setupKeyboard()
 
-	// Sync menu enabled state with current project (restoreLastProject runs
-	// during setupUI before setupMenus/setupEventHandlers, so the event-based
-	// enable gets overwritten by setupMenus unconditionally disabling items).
-	mw.updateViewMenuEnabled()
-
-	// Save window size and panel preferences on close
-	win.SetCloseIntercept(func() {
+	win.Connect("destroy", func() {
 		mw.saveWindowSize()
 		mw.sidePanel.SavePreferences()
-		fyneApp.Quit()
+		mw.prefs.Save()
+		gtk.MainQuit()
 	})
 
 	return mw
 }
 
+// Window returns the underlying GTK window.
+func (mw *MainWindow) Window() *gtk.Window {
+	return mw.win
+}
+
+// SetTitle sets the window title.
+func (mw *MainWindow) SetTitle(title string) {
+	mw.win.SetTitle(title)
+}
+
+// ShowAll shows the window and all children.
+func (mw *MainWindow) ShowAll() {
+	mw.win.ShowAll()
+}
+
 // setupUI creates the main UI layout.
 func (mw *MainWindow) setupUI() {
-	// Create the image canvas
 	mw.canvas = canvas.NewImageCanvas()
 
-	// Create the side panel with tabs
-	mw.sidePanel = panels.NewSidePanel(mw.state, mw.canvas)
-	mw.sidePanel.SetWindow(mw.Window)
+	// Status bar
+	mw.statusBar, _ = gtk.LabelNew("Ready")
+	mw.statusBar.SetHAlign(gtk.ALIGN_START)
+	mw.statusBar.SetMarginStart(6)
+	mw.statusBar.SetMarginEnd(6)
+	mw.statusBar.SetMarginTop(2)
+	mw.statusBar.SetMarginBottom(2)
 
-	// Create status bar
-	mw.statusBar = widget.NewLabel("Ready")
-
-	// Create toolbar with zoom controls
+	// Toolbar
 	toolbar := mw.createToolbar()
 
-	// Restore window size from preferences
+	// Side panel
+	mw.sidePanel = panels.NewSidePanel(mw.state, mw.canvas, mw.win)
+
+	// Wrap side panel in scrolled window
+	sidePanelScroll, _ := gtk.ScrolledWindowNew(nil, nil)
+	sidePanelScroll.SetPolicy(gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC)
+	sidePanelScroll.SetSizeRequest(320, -1)
+	sidePanelScroll.Add(mw.sidePanel.Widget())
+
+	// Right side: toolbar on top, canvas below
+	rightBox, _ := gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 0)
+	rightBox.PackStart(toolbar, false, false, 0)
+	rightBox.PackStart(mw.canvas.Widget(), true, true, 0)
+
+	// Main paned: side panel | canvas area
+	paned, _ := gtk.PanedNew(gtk.ORIENTATION_HORIZONTAL)
+	paned.Pack1(sidePanelScroll, false, false)
+	paned.Pack2(rightBox, true, true)
+	paned.SetPosition(320)
+
+	// Overall layout: menu is set separately, then paned + status bar
+	vbox, _ := gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 0)
+	vbox.PackStart(paned, true, true, 0)
+
+	sep, _ := gtk.SeparatorNew(gtk.ORIENTATION_HORIZONTAL)
+	vbox.PackStart(sep, false, false, 0)
+	vbox.PackStart(mw.statusBar, false, false, 0)
+
+	mw.win.Add(vbox)
+
+	// Restore window size
 	mw.restoreWindowSize()
 
-	// Set up zoom change callback to save zoom
+	// Set up zoom callback
 	mw.canvas.OnZoomChange(func(zoom float64) {
 		fmt.Printf("OnZoomChange: saving zoom=%.3f\n", zoom)
-		mw.app.Preferences().SetFloat(prefKeyZoom, zoom)
+		mw.prefs.SetFloat(prefKeyZoom, zoom)
+		mw.prefs.Save()
 	})
 
-	// Restore zoom from preferences
+	// Restore zoom
 	mw.restoreZoom()
 
-	// Restore last project from preferences
+	// Restore last project
 	mw.restoreLastProject()
-
-	// Canvas area with toolbar on top
-	canvasArea := container.NewBorder(
-		toolbar,             // top
-		nil,                 // bottom
-		nil,                 // left
-		nil,                 // right
-		mw.canvas.Container(), // center
-	)
-
-	// Create main layout: side panel on left, canvas area in center
-	// Using Border layout instead of HSplit to avoid Fyne scroll offset bug
-	// that causes sidepanel clicks to be dispatched incorrectly when canvas is scrolled
-	sidePanelWithScroll := container.NewVScroll(mw.sidePanel.Container())
-	sidePanelWithScroll.SetMinSize(fyne.NewSize(320, 0))
-
-	// Main container with status bar at bottom
-	content := container.NewBorder(
-		nil,                               // top
-		container.NewPadded(mw.statusBar), // bottom
-		sidePanelWithScroll,               // left - scrollable sidepanel
-		nil,                               // right
-		canvasArea,                        // center - canvas takes remaining space
-	)
-
-	mw.SetContent(content)
 }
 
 // createToolbar creates the toolbar with zoom and opacity controls.
-func (mw *MainWindow) createToolbar() fyne.CanvasObject {
-	zoomOutBtn := widget.NewButton("-", func() {
-		mw.onZoomOut()
-	})
-	zoomInBtn := widget.NewButton("+", func() {
-		mw.onZoomIn()
-	})
-	fitBtn := widget.NewButton("Fit", func() {
-		mw.onToggleFitToWindow()
-	})
-	actualBtn := widget.NewButton("1:1", func() {
-		mw.onActualSize()
-	})
+func (mw *MainWindow) createToolbar() *gtk.Box {
+	hbox, _ := gtk.BoxNew(gtk.ORIENTATION_HORIZONTAL, 4)
+	hbox.SetMarginStart(4)
+	hbox.SetMarginEnd(4)
+	hbox.SetMarginTop(2)
+	hbox.SetMarginBottom(2)
 
-	// Opacity sliders for front and back layers
-	mw.frontOpacitySlider = widget.NewSlider(0, 100)
+	// Zoom controls
+	zoomLabel, _ := gtk.LabelNew("Zoom:")
+	hbox.PackStart(zoomLabel, false, false, 0)
+
+	zoomOutBtn, _ := gtk.ButtonNewWithLabel("-")
+	zoomOutBtn.Connect("clicked", func() { mw.onZoomOut() })
+	hbox.PackStart(zoomOutBtn, false, false, 0)
+
+	zoomInBtn, _ := gtk.ButtonNewWithLabel("+")
+	zoomInBtn.Connect("clicked", func() { mw.onZoomIn() })
+	hbox.PackStart(zoomInBtn, false, false, 0)
+
+	fitBtn, _ := gtk.ButtonNewWithLabel("Fit")
+	fitBtn.Connect("clicked", func() { mw.onToggleFitToWindow() })
+	hbox.PackStart(fitBtn, false, false, 0)
+
+	actualBtn, _ := gtk.ButtonNewWithLabel("1:1")
+	actualBtn.Connect("clicked", func() { mw.onActualSize() })
+	hbox.PackStart(actualBtn, false, false, 0)
+
+	// Separator
+	sep1, _ := gtk.SeparatorNew(gtk.ORIENTATION_VERTICAL)
+	hbox.PackStart(sep1, false, false, 4)
+
+	// Front opacity
+	frontLabel, _ := gtk.LabelNew("Front:")
+	hbox.PackStart(frontLabel, false, false, 0)
+
+	mw.frontOpacitySlider, _ = gtk.ScaleNewWithRange(gtk.ORIENTATION_HORIZONTAL, 0, 100, 1)
 	mw.frontOpacitySlider.SetValue(100)
-	mw.frontOpacitySlider.OnChanged = func(val float64) {
+	mw.frontOpacitySlider.SetSizeRequest(80, -1)
+	mw.frontOpacitySlider.SetDrawValue(false)
+	mw.frontOpacitySlider.Connect("value-changed", func() {
+		val := mw.frontOpacitySlider.GetValue()
 		if mw.state.FrontImage != nil {
 			mw.state.FrontImage.Opacity = val / 100.0
-			mw.sidePanel.SyncLayers()
+			mw.canvas.Refresh()
 		}
-	}
+	})
+	hbox.PackStart(mw.frontOpacitySlider, false, false, 0)
 
-	mw.backOpacitySlider = widget.NewSlider(0, 100)
+	// Back opacity
+	backLabel, _ := gtk.LabelNew("Back:")
+	hbox.PackStart(backLabel, false, false, 0)
+
+	mw.backOpacitySlider, _ = gtk.ScaleNewWithRange(gtk.ORIENTATION_HORIZONTAL, 0, 100, 1)
 	mw.backOpacitySlider.SetValue(100)
-	mw.backOpacitySlider.OnChanged = func(val float64) {
+	mw.backOpacitySlider.SetSizeRequest(80, -1)
+	mw.backOpacitySlider.SetDrawValue(false)
+	mw.backOpacitySlider.Connect("value-changed", func() {
+		val := mw.backOpacitySlider.GetValue()
 		if mw.state.BackImage != nil {
 			mw.state.BackImage.Opacity = val / 100.0
-			mw.sidePanel.SyncLayers()
+			mw.canvas.Refresh()
 		}
-	}
-
-	// Checkerboard alignment visualization checkbox
-	mw.checkerboardCheck = widget.NewCheck("Checker", func(checked bool) {
-		mw.onToggleCheckerboard(checked)
 	})
+	hbox.PackStart(mw.backOpacitySlider, false, false, 0)
 
-	return container.NewHBox(
-		widget.NewLabel("Zoom:"),
-		zoomOutBtn,
-		zoomInBtn,
-		fitBtn,
-		actualBtn,
-		widget.NewSeparator(),
-		widget.NewLabel("Front:"),
-		container.NewGridWrap(fyne.NewSize(80, 30), mw.frontOpacitySlider),
-		widget.NewLabel("Back:"),
-		container.NewGridWrap(fyne.NewSize(80, 30), mw.backOpacitySlider),
-		widget.NewSeparator(),
-		mw.checkerboardCheck,
-	)
+	// Separator
+	sep2, _ := gtk.SeparatorNew(gtk.ORIENTATION_VERTICAL)
+	hbox.PackStart(sep2, false, false, 4)
+
+	// Checkerboard toggle
+	mw.checkerboardCheck, _ = gtk.CheckButtonNewWithLabel("Checker")
+	mw.checkerboardCheck.Connect("toggled", func() {
+		mw.onToggleCheckerboard(mw.checkerboardCheck.GetActive())
+	})
+	hbox.PackStart(mw.checkerboardCheck, false, false, 0)
+
+	return hbox
 }
 
 // setupMenus creates the application menus.
 func (mw *MainWindow) setupMenus() {
+	menuBar, _ := gtk.MenuBarNew()
+
 	// File menu
-	fileMenu := fyne.NewMenu("File",
-		fyne.NewMenuItem("New Project...", mw.onNewProject),
-		fyne.NewMenuItem("Open Project...", mw.onOpenProject),
-		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("Save Project", mw.onSaveProject),
-		fyne.NewMenuItem("Save Project As...", mw.onSaveProjectAs),
-		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("Export Netlist...", mw.onExportNetlist),
-		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("Quit", func() { mw.app.Quit() }),
+	fileMenu := mw.createMenu("File",
+		menuEntry{"New Project...", mw.onNewProject},
+		menuEntry{"Open Project...", mw.onOpenProject},
+		menuEntry{}, // separator
+		menuEntry{"Save Project", mw.onSaveProject},
+		menuEntry{"Save Project As...", mw.onSaveProjectAs},
+		menuEntry{}, // separator
+		menuEntry{"Export Netlist...", mw.onExportNetlist},
+		menuEntry{}, // separator
+		menuEntry{"Quit", func() { mw.win.Close() }},
 	)
+	menuBar.Append(fileMenu)
 
-	// View menu - panel switching
-	mw.viewImportItem = fyne.NewMenuItem("Align", func() {
-		mw.sidePanel.ShowPanel(panels.PanelImport)
-		mw.updateViewMenuChecks()
-	})
-	mw.viewComponentsItem = fyne.NewMenuItem("Components", func() {
-		mw.sidePanel.ShowPanel(panels.PanelComponents)
-		mw.updateViewMenuChecks()
-	})
-	mw.viewTracesItem = fyne.NewMenuItem("Traces", func() {
-		mw.sidePanel.ShowPanel(panels.PanelTraces)
-		mw.updateViewMenuChecks()
-	})
-	mw.viewPropertiesItem = fyne.NewMenuItem("Properties", func() {
-		mw.sidePanel.ShowPanel(panels.PanelProperties)
-		mw.updateViewMenuChecks()
-	})
-	mw.viewLogosItem = fyne.NewMenuItem("Logos", func() {
-		mw.sidePanel.ShowPanel(panels.PanelLogos)
-		mw.updateViewMenuChecks()
-	})
-
-	// Disable non-alignment panels initially (enabled after project load if normalized)
-	mw.viewComponentsItem.Disabled = true
-	mw.viewTracesItem.Disabled = true
-	mw.viewPropertiesItem.Disabled = true
-	mw.viewLogosItem.Disabled = true
-	mw.sidePanel.SetTracesEnabled(false)
-
-	// Mark current panel
-	mw.updateViewMenuChecks()
-
-	viewMenu := fyne.NewMenu("View",
-		mw.viewImportItem,
-		mw.viewComponentsItem,
-		mw.viewTracesItem,
-		mw.viewPropertiesItem,
-		mw.viewLogosItem,
-	)
+	// View menu
+	viewMenuItem, _ := gtk.MenuItemNewWithLabel("View")
+	viewMenu, _ := gtk.MenuNew()
+	viewMenuItem.SetSubmenu(viewMenu)
+	menuBar.Append(viewMenuItem)
+	// TODO: Add panel switching radio items once panels are ported
 
 	// Board menu
-	boardMenu := fyne.NewMenu("Board",
-		fyne.NewMenuItem("S-100 (IEEE 696)", func() { mw.onSelectBoard("S-100 (IEEE 696)") }),
-		fyne.NewMenuItem("8-bit ISA", func() { mw.onSelectBoard("8-bit ISA") }),
-		fyne.NewMenuItem("16-bit ISA", func() { mw.onSelectBoard("16-bit ISA") }),
-		fyne.NewMenuItem("Multibus I (P1)", func() { mw.onSelectBoard("Multibus I (P1)") }),
-		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("Custom Board...", mw.onCustomBoard),
+	boardMenu := mw.createMenu("Board",
+		menuEntry{"S-100 (IEEE 696)", func() { mw.onSelectBoard("S-100 (IEEE 696)") }},
+		menuEntry{"8-bit ISA", func() { mw.onSelectBoard("8-bit ISA") }},
+		menuEntry{"16-bit ISA", func() { mw.onSelectBoard("16-bit ISA") }},
+		menuEntry{"Multibus I (P1)", func() { mw.onSelectBoard("Multibus I (P1)") }},
+		menuEntry{}, // separator
+		menuEntry{"Custom Board...", mw.onCustomBoard},
 	)
+	menuBar.Append(boardMenu)
 
 	// Help menu
-	helpMenu := fyne.NewMenu("Help",
-		fyne.NewMenuItem("About", mw.onAbout),
+	helpMenu := mw.createMenu("Help",
+		menuEntry{"About", mw.onAbout},
 	)
+	menuBar.Append(helpMenu)
 
-	mainMenu := fyne.NewMainMenu(fileMenu, viewMenu, boardMenu, helpMenu)
-	mw.SetMainMenu(mainMenu)
+	// Insert menu bar at top of main vbox
+	if vbox, err := mw.win.GetChild(); err == nil {
+		if box, ok := vbox.(*gtk.Box); ok {
+			box.PackStart(menuBar, false, false, 0)
+			box.ReorderChild(menuBar, 0)
+		}
+	}
 }
 
-// setupEventHandlers registers for application events.
+type menuEntry struct {
+	label  string
+	action func()
+}
+
+func (mw *MainWindow) createMenu(title string, entries ...menuEntry) *gtk.MenuItem {
+	item, _ := gtk.MenuItemNewWithLabel(title)
+	menu, _ := gtk.MenuNew()
+	item.SetSubmenu(menu)
+
+	for _, e := range entries {
+		if e.label == "" {
+			sep, _ := gtk.SeparatorMenuItemNew()
+			menu.Append(sep)
+		} else {
+			mi, _ := gtk.MenuItemNewWithLabel(e.label)
+			action := e.action
+			mi.Connect("activate", func() { action() })
+			menu.Append(mi)
+		}
+	}
+
+	return item
+}
+
+// setupEventHandlers registers for application state events.
 func (mw *MainWindow) setupEventHandlers() {
 	mw.state.On(app.EventProjectLoaded, func(data interface{}) {
 		if path, ok := data.(string); ok {
-			mw.SetTitle("PCB Tracer - " + filepath.Base(path))
+			mw.win.SetTitle("PCB Tracer - " + filepath.Base(path))
 			mw.updateStatus("Project loaded: " + path)
 		}
-		// Enable/disable menu items based on normalized state
-		mw.updateViewMenuEnabled()
 	})
 
 	mw.state.On(app.EventImageLoaded, func(data interface{}) {
-		// Sync the rotated/processed image to the canvas
 		mw.sidePanel.SyncLayers()
 		mw.canvas.Refresh()
 		mw.updateStatus("Image loaded")
@@ -290,9 +332,9 @@ func (mw *MainWindow) setupEventHandlers() {
 
 	mw.state.On(app.EventModified, func(data interface{}) {
 		if modified, ok := data.(bool); ok && modified {
-			title := mw.Title()
+			title, _ := mw.win.GetTitle()
 			if len(title) > 0 && title[len(title)-1] != '*' {
-				mw.SetTitle(title + " *")
+				mw.win.SetTitle(title + " *")
 			}
 		}
 	})
@@ -305,54 +347,20 @@ func (mw *MainWindow) setupEventHandlers() {
 	mw.state.On(app.EventNormalizationComplete, func(data interface{}) {
 		mw.canvas.Refresh()
 		mw.updateStatus("Aligned images saved")
-		mw.updateViewMenuEnabled()
 	})
 }
 
-// updateViewMenuChecks updates the checkmarks on View menu panel items.
-func (mw *MainWindow) updateViewMenuChecks() {
-	current := mw.sidePanel.CurrentPanel()
-
-	// Use checkmark prefix to indicate current panel
-	if current == panels.PanelImport {
-		mw.viewImportItem.Label = "✓ Align"
-	} else {
-		mw.viewImportItem.Label = "  Align"
-	}
-
-	if current == panels.PanelComponents {
-		mw.viewComponentsItem.Label = "✓ Components"
-	} else {
-		mw.viewComponentsItem.Label = "  Components"
-	}
-
-	if current == panels.PanelTraces {
-		mw.viewTracesItem.Label = "✓ Traces"
-	} else {
-		mw.viewTracesItem.Label = "  Traces"
-	}
-
-	if current == panels.PanelProperties {
-		mw.viewPropertiesItem.Label = "✓ Properties"
-	} else {
-		mw.viewPropertiesItem.Label = "  Properties"
-	}
-
-	if current == panels.PanelLogos {
-		mw.viewLogosItem.Label = "✓ Logos"
-	} else {
-		mw.viewLogosItem.Label = "  Logos"
-	}
+// setupKeyboard registers global keyboard shortcuts.
+func (mw *MainWindow) setupKeyboard() {
+	mw.win.Connect("key-press-event", func(win *gtk.Window, ev *gdk.Event) bool {
+		keyEvent := gdk.EventKeyNewFromEvent(ev)
+		return mw.sidePanel.OnKeyPressed(keyEvent)
+	})
 }
 
-// updateViewMenuEnabled enables/disables view menu items based on normalization state.
-func (mw *MainWindow) updateViewMenuEnabled() {
-	enabled := mw.state.HasNormalizedImages()
-	mw.viewComponentsItem.Disabled = !enabled
-	mw.viewTracesItem.Disabled = !enabled
-	mw.viewPropertiesItem.Disabled = !enabled
-	mw.viewLogosItem.Disabled = !enabled
-	mw.sidePanel.SetTracesEnabled(enabled)
+// syncLayers syncs the state's images to the canvas.
+func (mw *MainWindow) syncLayers() {
+	mw.sidePanel.SyncLayers()
 }
 
 // updateStatus updates the status bar text.
@@ -360,79 +368,56 @@ func (mw *MainWindow) updateStatus(text string) {
 	mw.statusBar.SetText(text)
 }
 
-// getLastDir returns the last used directory as a ListableURI, or nil.
-func (mw *MainWindow) getLastDir() fyne.ListableURI {
-	path := mw.app.Preferences().String(prefKeyLastDir)
-	if path == "" {
-		return nil
-	}
-	uri := storage.NewFileURI(path)
-	listable, err := storage.ListerForURI(uri)
-	if err != nil {
-		return nil
-	}
-	return listable
-}
-
-// saveLastDir saves the directory of the given file path.
-func (mw *MainWindow) saveLastDir(filePath string) {
-	dir := filepath.Dir(filePath)
-	mw.app.Preferences().SetString(prefKeyLastDir, dir)
-}
-
 // restoreWindowSize restores the window size from preferences.
 func (mw *MainWindow) restoreWindowSize() {
-	width := mw.app.Preferences().Float(prefKeyWindowWidth)
-	height := mw.app.Preferences().Float(prefKeyWindowHeight)
+	width := mw.prefs.Float(prefKeyWindowWidth)
+	height := mw.prefs.Float(prefKeyWindowHeight)
 
 	fmt.Printf("restoreWindowSize: saved width=%.1f height=%.1f\n", width, height)
 
 	if width > 100 && height > 100 {
-		mw.Resize(fyne.NewSize(float32(width), float32(height)))
+		mw.win.SetDefaultSize(int(width), int(height))
 		fmt.Printf("restoreWindowSize: restored to %.1fx%.1f\n", width, height)
 	} else {
-		// Default size
-		mw.Resize(fyne.NewSize(1200, 800))
+		mw.win.SetDefaultSize(1200, 800)
 		fmt.Println("restoreWindowSize: using default 1200x800")
 	}
 }
 
 // saveWindowSize saves the current window size to preferences.
 func (mw *MainWindow) saveWindowSize() {
-	// Use window size, not canvas size (canvas is content area only)
-	size := mw.Window.Canvas().Size()
-	fmt.Printf("saveWindowSize: saving %.1fx%.1f\n", size.Width, size.Height)
-	mw.app.Preferences().SetFloat(prefKeyWindowWidth, float64(size.Width))
-	mw.app.Preferences().SetFloat(prefKeyWindowHeight, float64(size.Height))
+	w, h := mw.win.GetSize()
+	fmt.Printf("saveWindowSize: saving %dx%d\n", w, h)
+	mw.prefs.SetFloat(prefKeyWindowWidth, float64(w))
+	mw.prefs.SetFloat(prefKeyWindowHeight, float64(h))
+	mw.prefs.Save()
 }
 
 // SavePreferences saves window size and zoom to preferences.
-// Call this before hot reload restart to preserve UI state.
 func (mw *MainWindow) SavePreferences() {
 	mw.saveWindowSize()
-	// Zoom is already saved on every change via OnZoomChange callback
 	fmt.Println("SavePreferences: saved window size and zoom")
 }
 
 // SavePreferencesIfChanged saves window geometry only if it has changed.
-// Called periodically by the hot reload timer.
 func (mw *MainWindow) SavePreferencesIfChanged() {
-	size := mw.Window.Canvas().Size()
-	if size.Width != mw.lastSavedWidth || size.Height != mw.lastSavedHeight {
-		if size.Width > 100 && size.Height > 100 {
-			fmt.Printf("SavePreferencesIfChanged: %.0fx%.0f -> %.0fx%.0f\n",
-				mw.lastSavedWidth, mw.lastSavedHeight, size.Width, size.Height)
-			mw.app.Preferences().SetFloat(prefKeyWindowWidth, float64(size.Width))
-			mw.app.Preferences().SetFloat(prefKeyWindowHeight, float64(size.Height))
-			mw.lastSavedWidth = size.Width
-			mw.lastSavedHeight = size.Height
+	w, h := mw.win.GetSize()
+	if w != mw.lastSavedWidth || h != mw.lastSavedHeight {
+		if w > 100 && h > 100 {
+			fmt.Printf("SavePreferencesIfChanged: %dx%d -> %dx%d\n",
+				mw.lastSavedWidth, mw.lastSavedHeight, w, h)
+			mw.prefs.SetFloat(prefKeyWindowWidth, float64(w))
+			mw.prefs.SetFloat(prefKeyWindowHeight, float64(h))
+			mw.prefs.Save()
+			mw.lastSavedWidth = w
+			mw.lastSavedHeight = h
 		}
 	}
 }
 
 // restoreZoom restores the zoom level from preferences.
 func (mw *MainWindow) restoreZoom() {
-	zoom := mw.app.Preferences().Float(prefKeyZoom)
+	zoom := mw.prefs.Float(prefKeyZoom)
 	fmt.Printf("restoreZoom: saved zoom=%.3f\n", zoom)
 	if zoom >= 0.1 && zoom <= 10.0 {
 		mw.canvas.SetZoom(zoom)
@@ -444,7 +429,7 @@ func (mw *MainWindow) restoreZoom() {
 
 // restoreLastProject loads the previously saved project file.
 func (mw *MainWindow) restoreLastProject() {
-	projectPath := mw.app.Preferences().String(prefKeyLastProject)
+	projectPath := mw.prefs.String(prefKeyLastProject)
 
 	fmt.Printf("restoreLastProject: projectPath=%q\n", projectPath)
 
@@ -453,21 +438,18 @@ func (mw *MainWindow) restoreLastProject() {
 		return
 	}
 
-	// Check if file exists
 	if _, err := os.Stat(projectPath); os.IsNotExist(err) {
 		fmt.Printf("Saved project file not found: %s\n", projectPath)
 		return
 	}
 
-	// Load the project (this uses the saved crop bounds/rotation, no auto-detection)
 	if err := mw.state.LoadProject(projectPath); err != nil {
 		fmt.Printf("Failed to load project: %v\n", err)
 		return
 	}
 
-	// Sync layers to canvas
-	mw.sidePanel.SyncLayers()
-	mw.state.SetModified(false) // Don't mark as modified on restore
+	mw.syncLayers()
+	mw.state.SetModified(false)
 
 	hasFront := mw.state.FrontImage != nil
 	hasBack := mw.state.BackImage != nil
@@ -477,121 +459,101 @@ func (mw *MainWindow) restoreLastProject() {
 // Menu action handlers
 
 func (mw *MainWindow) onNewProject() {
-	// Show a dialog to import front and back images
-	mw.showNewProjectDialog()
-}
-
-// showNewProjectDialog shows a dialog for creating a new project with front and back images.
-func (mw *MainWindow) showNewProjectDialog() {
-	var frontPath, backPath string
-	var frontLabel, backLabel *widget.Label
-
-	// Create labels to show selected file names
-	frontLabel = widget.NewLabel("(none)")
-	backLabel = widget.NewLabel("(none)")
-
-	// Create buttons to browse for files
-	frontBtn := widget.NewButton("Browse...", func() {
-		fd := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
-			if err != nil || reader == nil {
-				return
-			}
-			reader.Close()
-			frontPath = reader.URI().Path()
-			mw.saveLastDir(frontPath)
-			frontLabel.SetText(filepath.Base(frontPath))
-		}, mw.Window)
-		fd.SetFilter(storage.NewExtensionFileFilter(image.SupportedFormats()))
-		if loc := mw.getLastDir(); loc != nil {
-			fd.SetLocation(loc)
-		}
-		fd.Show()
-	})
-
-	backBtn := widget.NewButton("Browse...", func() {
-		fd := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
-			if err != nil || reader == nil {
-				return
-			}
-			reader.Close()
-			backPath = reader.URI().Path()
-			mw.saveLastDir(backPath)
-			backLabel.SetText(filepath.Base(backPath))
-		}, mw.Window)
-		fd.SetFilter(storage.NewExtensionFileFilter(image.SupportedFormats()))
-		if loc := mw.getLastDir(); loc != nil {
-			fd.SetLocation(loc)
-		}
-		fd.Show()
-	})
-
-	// Create the form layout
-	form := container.NewVBox(
-		widget.NewLabel("Select the scanned images for the new project:"),
-		widget.NewSeparator(),
-		container.NewBorder(nil, nil, widget.NewLabel("Front Image:"), frontBtn, frontLabel),
-		container.NewBorder(nil, nil, widget.NewLabel("Back Image:"), backBtn, backLabel),
+	dlg, _ := gtk.FileChooserDialogNewWith2Buttons(
+		"Select Front Image",
+		mw.win,
+		gtk.FILE_CHOOSER_ACTION_OPEN,
+		"Cancel", gtk.RESPONSE_CANCEL,
+		"Open", gtk.RESPONSE_ACCEPT,
 	)
+	mw.addImageFilters(dlg)
 
-	// Show custom dialog
-	dlg := dialog.NewCustomConfirm("New Project", "Create", "Cancel", form, func(confirmed bool) {
-		if !confirmed {
-			return
-		}
+	if lastDir := mw.prefs.String(prefKeyLastDir); lastDir != "" {
+		dlg.SetCurrentFolder(lastDir)
+	}
 
-		if frontPath == "" || backPath == "" {
-			dialog.ShowError(fmt.Errorf("please select both front and back images"), mw.Window)
-			return
-		}
+	response := dlg.Run()
+	dlg.Destroy()
+	if response != gtk.RESPONSE_ACCEPT {
+		return
+	}
+	frontPath := dlg.GetFilename()
 
-		// Reset all state for new project - zero all alignment settings
-		mw.state.ResetForNewProject()
+	// Now select back image
+	dlg2, _ := gtk.FileChooserDialogNewWith2Buttons(
+		"Select Back Image",
+		mw.win,
+		gtk.FILE_CHOOSER_ACTION_OPEN,
+		"Cancel", gtk.RESPONSE_CANCEL,
+		"Open", gtk.RESPONSE_ACCEPT,
+	)
+	mw.addImageFilters(dlg2)
+	dlg2.SetCurrentFolder(filepath.Dir(frontPath))
 
-		// Load raw front image (no auto-detection)
-		mw.updateStatus("Loading front image...")
-		if err := mw.state.LoadRawFrontImage(frontPath); err != nil {
-			dialog.ShowError(fmt.Errorf("failed to load front image: %w", err), mw.Window)
-			return
-		}
+	response2 := dlg2.Run()
+	dlg2.Destroy()
+	if response2 != gtk.RESPONSE_ACCEPT {
+		return
+	}
+	backPath := dlg2.GetFilename()
 
-		// Load raw back image (no auto-detection)
-		mw.updateStatus("Loading back image...")
-		if err := mw.state.LoadRawBackImage(backPath); err != nil {
-			dialog.ShowError(fmt.Errorf("failed to load back image: %w", err), mw.Window)
-			return
-		}
+	mw.prefs.SetString(prefKeyLastDir, filepath.Dir(frontPath))
+	mw.prefs.Save()
 
-		mw.SetTitle("PCB Tracer - New Project")
-		mw.sidePanel.SyncLayers()
-		mw.sidePanel.ShowPanel(panels.PanelImport) // Show align panel
-		mw.updateStatus("New project created - use Auto Align or adjust settings manually")
-	}, mw.Window)
+	mw.state.ResetForNewProject()
 
-	dlg.Resize(fyne.NewSize(500, 200))
-	dlg.Show()
+	mw.updateStatus("Loading front image...")
+	if err := mw.state.LoadRawFrontImage(frontPath); err != nil {
+		mw.showError("Failed to load front image: " + err.Error())
+		return
+	}
+
+	mw.updateStatus("Loading back image...")
+	if err := mw.state.LoadRawBackImage(backPath); err != nil {
+		mw.showError("Failed to load back image: " + err.Error())
+		return
+	}
+
+	mw.win.SetTitle("PCB Tracer - New Project")
+	mw.syncLayers()
+	mw.updateStatus("New project created")
 }
 
 func (mw *MainWindow) onOpenProject() {
-	fd := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
-		if err != nil || reader == nil {
-			return
-		}
-		reader.Close()
-		path := reader.URI().Path()
-		mw.saveLastDir(path)
-		if err := mw.state.LoadProject(path); err != nil {
-			dialog.ShowError(err, mw.Window)
-			return
-		}
-		// Save as last project for next startup
-		mw.app.Preferences().SetString(prefKeyLastProject, path)
-		mw.sidePanel.SyncLayers()
-	}, mw.Window)
-	fd.SetFilter(storage.NewExtensionFileFilter([]string{".pcbproj"}))
-	if loc := mw.getLastDir(); loc != nil {
-		fd.SetLocation(loc)
+	dlg, _ := gtk.FileChooserDialogNewWith2Buttons(
+		"Open Project",
+		mw.win,
+		gtk.FILE_CHOOSER_ACTION_OPEN,
+		"Cancel", gtk.RESPONSE_CANCEL,
+		"Open", gtk.RESPONSE_ACCEPT,
+	)
+
+	filter, _ := gtk.FileFilterNew()
+	filter.SetName("PCB Projects (*.pcbproj)")
+	filter.AddPattern("*.pcbproj")
+	dlg.AddFilter(filter)
+
+	if lastDir := mw.prefs.String(prefKeyLastDir); lastDir != "" {
+		dlg.SetCurrentFolder(lastDir)
 	}
-	fd.Show()
+
+	response := dlg.Run()
+	dlg.Destroy()
+	if response != gtk.RESPONSE_ACCEPT {
+		return
+	}
+
+	path := dlg.GetFilename()
+	mw.prefs.SetString(prefKeyLastDir, filepath.Dir(path))
+
+	if err := mw.state.LoadProject(path); err != nil {
+		mw.showError("Failed to load project: " + err.Error())
+		return
+	}
+
+	mw.prefs.SetString(prefKeyLastProject, path)
+	mw.prefs.Save()
+	mw.syncLayers()
 }
 
 func (mw *MainWindow) onSaveProject() {
@@ -600,57 +562,55 @@ func (mw *MainWindow) onSaveProject() {
 		return
 	}
 	if err := mw.state.SaveProject(mw.state.ProjectPath); err != nil {
-		dialog.ShowError(err, mw.Window)
+		mw.showError("Failed to save project: " + err.Error())
 		return
 	}
-	// Save as last project for next startup
-	mw.app.Preferences().SetString(prefKeyLastProject, mw.state.ProjectPath)
+	mw.prefs.SetString(prefKeyLastProject, mw.state.ProjectPath)
+	mw.prefs.Save()
 }
 
 func (mw *MainWindow) onSaveProjectAs() {
-	fd := dialog.NewFileSave(func(writer fyne.URIWriteCloser, err error) {
-		if err != nil || writer == nil {
-			return
-		}
-		writer.Close()
-		path := writer.URI().Path()
-		if filepath.Ext(path) != ".pcbproj" {
-			path += ".pcbproj"
-		}
-		mw.saveLastDir(path)
-		if err := mw.state.SaveProject(path); err != nil {
-			dialog.ShowError(err, mw.Window)
-			return
-		}
-		// Save as last project for next startup
-		mw.app.Preferences().SetString(prefKeyLastProject, path)
-	}, mw.Window)
-	fd.SetFileName("project.pcbproj")
-	if loc := mw.getLastDir(); loc != nil {
-		fd.SetLocation(loc)
+	dlg, _ := gtk.FileChooserDialogNewWith2Buttons(
+		"Save Project As",
+		mw.win,
+		gtk.FILE_CHOOSER_ACTION_SAVE,
+		"Cancel", gtk.RESPONSE_CANCEL,
+		"Save", gtk.RESPONSE_ACCEPT,
+	)
+	dlg.SetDoOverwriteConfirmation(true)
+	dlg.SetCurrentName("project.pcbproj")
+
+	filter, _ := gtk.FileFilterNew()
+	filter.SetName("PCB Projects (*.pcbproj)")
+	filter.AddPattern("*.pcbproj")
+	dlg.AddFilter(filter)
+
+	if lastDir := mw.prefs.String(prefKeyLastDir); lastDir != "" {
+		dlg.SetCurrentFolder(lastDir)
 	}
-	fd.Show()
+
+	response := dlg.Run()
+	dlg.Destroy()
+	if response != gtk.RESPONSE_ACCEPT {
+		return
+	}
+
+	path := dlg.GetFilename()
+	if filepath.Ext(path) != ".pcbproj" {
+		path += ".pcbproj"
+	}
+	mw.prefs.SetString(prefKeyLastDir, filepath.Dir(path))
+
+	if err := mw.state.SaveProject(path); err != nil {
+		mw.showError("Failed to save project: " + err.Error())
+		return
+	}
+	mw.prefs.SetString(prefKeyLastProject, path)
+	mw.prefs.Save()
 }
 
 func (mw *MainWindow) onExportNetlist() {
 	mw.updateStatus("Export netlist not yet implemented")
-}
-
-func (mw *MainWindow) onUndo() {
-	mw.updateStatus("Undo not yet implemented")
-}
-
-func (mw *MainWindow) onRedo() {
-	mw.updateStatus("Redo not yet implemented")
-}
-
-func (mw *MainWindow) onShowAlignPanel() {
-	mw.sidePanel.ShowPanel(panels.PanelImport)
-	mw.updateViewMenuChecks()
-}
-
-func (mw *MainWindow) onPreferences() {
-	mw.updateStatus("Preferences dialog not yet implemented")
 }
 
 func (mw *MainWindow) onZoomIn() {
@@ -664,7 +624,6 @@ func (mw *MainWindow) onZoomOut() {
 }
 
 func (mw *MainWindow) onToggleFitToWindow() {
-	// Toggle state
 	enabled := !mw.canvas.GetFitToWindow()
 	mw.canvas.SetFitToWindow(enabled)
 }
@@ -674,20 +633,15 @@ func (mw *MainWindow) onActualSize() {
 	mw.canvas.SetZoom(1.0)
 }
 
-// onToggleCheckerboard enables/disables the checkerboard alignment visualization.
 func (mw *MainWindow) onToggleCheckerboard(enabled bool) {
 	if !enabled {
 		mw.canvas.SetStepEdgeViz(false, 0, 0)
 		return
 	}
-
-	// Enable with current DPI
 	dpi := mw.state.DPI
 	if dpi == 0 {
-		dpi = 400 // Default fallback
+		dpi = 400
 	}
-
-	// Use a placeholder Y value (checkerboard doesn't use it)
 	mw.canvas.SetStepEdgeViz(true, 0, dpi)
 }
 
@@ -695,30 +649,6 @@ func (mw *MainWindow) disableFitToWindow() {
 	if mw.canvas.GetFitToWindow() {
 		mw.canvas.SetFitToWindow(false)
 	}
-}
-
-func (mw *MainWindow) onDetectContacts() {
-	mw.updateStatus("Contact detection not yet implemented")
-}
-
-func (mw *MainWindow) onAlignImages() {
-	mw.updateStatus("Image alignment not yet implemented")
-}
-
-func (mw *MainWindow) onDetectComponents() {
-	mw.updateStatus("Component detection not yet implemented")
-}
-
-func (mw *MainWindow) onRunOCR() {
-	mw.updateStatus("OCR not yet implemented")
-}
-
-func (mw *MainWindow) onDetectTraces() {
-	mw.updateStatus("Trace detection not yet implemented")
-}
-
-func (mw *MainWindow) onGenerateNetlist() {
-	mw.updateStatus("Netlist generation not yet implemented")
 }
 
 func (mw *MainWindow) onSelectBoard(name string) {
@@ -730,12 +660,56 @@ func (mw *MainWindow) onCustomBoard() {
 }
 
 func (mw *MainWindow) onAbout() {
-	dialog.ShowInformation("About PCB Tracer",
+	dlg := gtk.MessageDialogNew(
+		mw.win,
+		gtk.DIALOG_MODAL,
+		gtk.MESSAGE_INFO,
+		gtk.BUTTONS_OK,
 		fmt.Sprintf("PCB Tracer v%s\n\n"+
 			"A cross-platform PCB reverse engineering tool.\n\n"+
 			"Supports S-100, ISA, Multibus, and custom boards.\n\n"+
-			"Built: %s\n"+
-			"Commit: %s",
+			"Built: %s\nCommit: %s",
 			version.Version, version.BuildTime, version.GitCommit),
-		mw.Window)
+	)
+	dlg.SetTitle("About PCB Tracer")
+	dlg.Run()
+	dlg.Destroy()
+}
+
+// addImageFilters adds common image format filters to a file chooser.
+func (mw *MainWindow) addImageFilters(dlg *gtk.FileChooserDialog) {
+	filter, _ := gtk.FileFilterNew()
+	filter.SetName("Images (*.png, *.jpg, *.tif)")
+	filter.AddPattern("*.png")
+	filter.AddPattern("*.PNG")
+	filter.AddPattern("*.jpg")
+	filter.AddPattern("*.jpeg")
+	filter.AddPattern("*.JPG")
+	filter.AddPattern("*.JPEG")
+	filter.AddPattern("*.tif")
+	filter.AddPattern("*.tiff")
+	filter.AddPattern("*.TIF")
+	filter.AddPattern("*.TIFF")
+	filter.AddPattern("*.bmp")
+	filter.AddPattern("*.BMP")
+	dlg.AddFilter(filter)
+
+	allFilter, _ := gtk.FileFilterNew()
+	allFilter.SetName("All files (*)")
+	allFilter.AddPattern("*")
+	dlg.AddFilter(allFilter)
+}
+
+// showError shows an error dialog.
+func (mw *MainWindow) showError(message string) {
+	log.Println("Error:", message)
+	dlg := gtk.MessageDialogNew(
+		mw.win,
+		gtk.DIALOG_MODAL,
+		gtk.MESSAGE_ERROR,
+		gtk.BUTTONS_OK,
+		message,
+	)
+	dlg.Run()
+	dlg.Destroy()
 }

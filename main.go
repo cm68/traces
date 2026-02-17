@@ -8,32 +8,28 @@ import (
 
 	"pcb-tracer/internal/app"
 	"pcb-tracer/ui/mainwindow"
+	"pcb-tracer/ui/prefs"
 
-	fyneapp "fyne.io/fyne/v2/app"
-	"fyne.io/fyne/v2/dialog"
+	"github.com/gotk3/gotk3/glib"
+	"github.com/gotk3/gotk3/gtk"
 )
 
 const (
-	appID      = "com.pcbtracer.app"
 	appTitle   = "PCB Tracer"
 	appVersion = "0.1.0"
 )
 
 func main() {
-	// Initialize logging
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.Printf("Starting %s v%s", appTitle, appVersion)
 
-	// Create Fyne application
-	fyneApp := fyneapp.NewWithID(appID)
-	fyneApp.Settings().SetTheme(&app.PCBTracerTheme{})
+	gtk.Init(nil)
 
-	// Create application state
 	appState := app.NewState()
+	appPrefs := prefs.Load()
 
-	// Create main window (size is restored from preferences in New())
-	mainWin := mainwindow.New(fyneApp, appState)
-	mainWin.SetTitle(appTitle)
+	win := mainwindow.New(appState, appPrefs)
+	win.SetTitle(appTitle)
 
 	// Handle command line arguments
 	if len(os.Args) > 1 {
@@ -43,11 +39,10 @@ func main() {
 		}
 	}
 
-	// Set up hot reload watcher for development
-	setupHotReload(mainWin)
+	setupHotReload(win)
 
-	// Show window and run
-	mainWin.ShowAndRun()
+	win.ShowAll()
+	gtk.Main()
 }
 
 // setupHotReload configures automatic restart detection when the binary is recompiled.
@@ -61,34 +56,36 @@ func setupHotReload(win *mainwindow.MainWindow) {
 	log.Printf("Hot reload: watching %s (modified %s)",
 		reloader.ExecPath(), reloader.StartupTime().Format("15:04:05"))
 
-	// Save window geometry on every tick (if changed)
 	reloader.OnTick(func() {
 		win.SavePreferencesIfChanged()
 	})
 
 	reloader.OnNewBinary(func() {
 		log.Println("Hot reload: newer binary detected")
-		// Show dialog on main thread
-		dialog.ShowConfirm(
-			"New Version Available",
-			"The application binary has been updated.\nRestart now?",
-			func(restart bool) {
-				if restart {
-					log.Println("Hot reload: saving preferences before restart...")
-					win.SavePreferences()
-					log.Println("Hot reload: restarting...")
-					if err := reloader.Restart(); err != nil {
-						log.Printf("Hot reload: restart failed: %v", err)
-						dialog.ShowError(err, win)
-					}
-				} else {
-					// User declined - reset baseline and resume watching
-					reloader.ResetBaseline()
-					reloader.Start()
+		glib.IdleAdd(func() {
+			dlg := gtk.MessageDialogNew(
+				win.Window(),
+				gtk.DIALOG_MODAL,
+				gtk.MESSAGE_QUESTION,
+				gtk.BUTTONS_YES_NO,
+				"The application binary has been updated.\nRestart now?",
+			)
+			dlg.SetTitle("New Version Available")
+			response := dlg.Run()
+			dlg.Destroy()
+
+			if response == gtk.RESPONSE_YES {
+				log.Println("Hot reload: saving preferences before restart...")
+				win.SavePreferences()
+				log.Println("Hot reload: restarting...")
+				if err := reloader.Restart(); err != nil {
+					log.Printf("Hot reload: restart failed: %v", err)
 				}
-			},
-			win,
-		)
+			} else {
+				reloader.ResetBaseline()
+				reloader.Start()
+			}
+		})
 	})
 
 	reloader.Start()

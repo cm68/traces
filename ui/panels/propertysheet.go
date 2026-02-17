@@ -1,4 +1,3 @@
-// Package panels provides UI panels for the application.
 package panels
 
 import (
@@ -6,80 +5,70 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/storage"
-	"fyne.io/fyne/v2/widget"
-
 	"pcb-tracer/internal/app"
-	"pcb-tracer/internal/image"
+	pcbimage "pcb-tracer/internal/image"
 	"pcb-tracer/pkg/geometry"
 	"pcb-tracer/ui/canvas"
+
+	"github.com/gotk3/gotk3/gtk"
 )
 
 // PropertySheet displays and allows editing of all project properties.
 type PropertySheet struct {
-	state     *app.State
-	canvas    *canvas.ImageCanvas
-	container fyne.CanvasObject
-	window    fyne.Window
+	state  *app.State
+	canvas *canvas.ImageCanvas
+	win    *gtk.Window
+	box    *gtk.Box
 
-	// Callbacks for refresh
 	onUpdate func()
 
-	// Project info entries
-	dpiEntry *widget.Entry
+	dpiEntry *gtk.Entry
 
-	// Front file info - button with label and browse capability
-	frontFileBtn   *widget.Button
-	frontCropLabel *widget.Label
+	frontFileBtn   *gtk.Button
+	frontCropLabel *gtk.Label
 
-	// Front side entries
-	frontOffsetXEntry      *widget.Entry
-	frontOffsetYEntry      *widget.Entry
-	frontRotationEntry     *widget.Entry
-	frontShearTopXEntry    *widget.Entry
-	frontShearBottomXEntry *widget.Entry
-	frontShearLeftYEntry   *widget.Entry
-	frontShearRightYEntry  *widget.Entry
-	frontAutoRotEntry      *widget.Entry
-	frontAutoScaleXEntry   *widget.Entry
-	frontAutoScaleYEntry   *widget.Entry
-	frontRotCenterXEntry   *widget.Entry
-	frontRotCenterYEntry   *widget.Entry
+	frontOffsetXEntry      *gtk.Entry
+	frontOffsetYEntry      *gtk.Entry
+	frontRotationEntry     *gtk.Entry
+	frontShearTopXEntry    *gtk.Entry
+	frontShearBottomXEntry *gtk.Entry
+	frontShearLeftYEntry   *gtk.Entry
+	frontShearRightYEntry  *gtk.Entry
+	frontAutoRotEntry      *gtk.Entry
+	frontAutoScaleXEntry   *gtk.Entry
+	frontAutoScaleYEntry   *gtk.Entry
+	frontRotCenterXEntry   *gtk.Entry
+	frontRotCenterYEntry   *gtk.Entry
 
-	// Back file info - button with label and browse capability
-	backFileBtn   *widget.Button
-	backCropLabel *widget.Label
+	backFileBtn   *gtk.Button
+	backCropLabel *gtk.Label
 
-	// Back side entries
-	backOffsetXEntry      *widget.Entry
-	backOffsetYEntry      *widget.Entry
-	backRotationEntry     *widget.Entry
-	backShearTopXEntry    *widget.Entry
-	backShearBottomXEntry *widget.Entry
-	backShearLeftYEntry   *widget.Entry
-	backShearRightYEntry  *widget.Entry
-	backAutoRotEntry      *widget.Entry
-	backAutoScaleXEntry   *widget.Entry
-	backAutoScaleYEntry   *widget.Entry
-	backRotCenterXEntry   *widget.Entry
-	backRotCenterYEntry   *widget.Entry
+	backOffsetXEntry      *gtk.Entry
+	backOffsetYEntry      *gtk.Entry
+	backRotationEntry     *gtk.Entry
+	backShearTopXEntry    *gtk.Entry
+	backShearBottomXEntry *gtk.Entry
+	backShearLeftYEntry   *gtk.Entry
+	backShearRightYEntry  *gtk.Entry
+	backAutoRotEntry      *gtk.Entry
+	backAutoScaleXEntry   *gtk.Entry
+	backAutoScaleYEntry   *gtk.Entry
+	backRotCenterXEntry   *gtk.Entry
+	backRotCenterYEntry   *gtk.Entry
 }
 
 // NewPropertySheet creates a new property sheet panel.
-func NewPropertySheet(state *app.State, cvs *canvas.ImageCanvas, onUpdate func()) *PropertySheet {
+func NewPropertySheet(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, onUpdate func()) *PropertySheet {
 	ps := &PropertySheet{
 		state:    state,
 		canvas:   cvs,
+		win:      win,
 		onUpdate: onUpdate,
 	}
 
 	ps.buildUI()
 	ps.refresh()
 
-	// Subscribe to state changes
 	state.On(app.EventImageLoaded, func(_ interface{}) { ps.refresh() })
 	state.On(app.EventAlignmentComplete, func(_ interface{}) { ps.refresh() })
 	state.On(app.EventProjectLoaded, func(_ interface{}) { ps.refresh() })
@@ -87,182 +76,267 @@ func NewPropertySheet(state *app.State, cvs *canvas.ImageCanvas, onUpdate func()
 	return ps
 }
 
-// Container returns the panel's container.
-func (ps *PropertySheet) Container() fyne.CanvasObject {
-	return ps.container
+// Widget returns the panel widget for embedding.
+func (ps *PropertySheet) Widget() gtk.IWidget {
+	return ps.box
 }
 
-// buildUI creates the property sheet UI.
 func (ps *PropertySheet) buildUI() {
-	// Project info section
-	ps.dpiEntry = widget.NewEntry()
-	ps.dpiEntry.OnChanged = ps.onDPIChanged
+	// Outer scrolled window
+	scrollWin, _ := gtk.ScrolledWindowNew(nil, nil)
+	scrollWin.SetPolicy(gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC)
 
-	projectInfo := widget.NewCard("Project", "",
-		container.NewVBox(
-			ps.makeFormRow("DPI:", ps.dpiEntry),
-		),
-	)
+	content, _ := gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 4)
+	content.SetMarginStart(4)
+	content.SetMarginEnd(4)
+	content.SetMarginTop(4)
+	content.SetMarginBottom(4)
 
-	// Front file info - clickable button to browse for file
-	ps.frontFileBtn = widget.NewButton("(none)", ps.onBrowseFrontFile)
-	ps.frontFileBtn.Alignment = widget.ButtonAlignLeading
-	ps.frontCropLabel = widget.NewLabel("")
+	newEntry := func() *gtk.Entry {
+		e, _ := gtk.EntryNew()
+		return e
+	}
 
-	frontInfo := widget.NewCard("Front Image", "",
-		container.NewVBox(
-			ps.makeButtonRow("File:", ps.frontFileBtn),
-			ps.makeLabelRow("Crop:", ps.frontCropLabel),
-		),
-	)
+	addFrame := func(label string) *gtk.Box {
+		frame, _ := gtk.FrameNew(label)
+		inner, _ := gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 2)
+		inner.SetMarginStart(4)
+		inner.SetMarginEnd(4)
+		inner.SetMarginTop(4)
+		inner.SetMarginBottom(4)
+		frame.Add(inner)
+		content.PackStart(frame, false, false, 2)
+		return inner
+	}
 
-	// Front alignment parameters (auto-alignment seeds these, all editable)
-	ps.frontOffsetXEntry = widget.NewEntry()
-	ps.frontOffsetXEntry.OnChanged = func(s string) { ps.onIntChanged(s, &ps.state.FrontManualOffset.X, true) }
-	ps.frontOffsetYEntry = widget.NewEntry()
-	ps.frontOffsetYEntry.OnChanged = func(s string) { ps.onIntChanged(s, &ps.state.FrontManualOffset.Y, true) }
-	ps.frontRotationEntry = widget.NewEntry()
-	ps.frontRotationEntry.OnChanged = func(s string) { ps.onFloatChanged(s, &ps.state.FrontManualRotation, true) }
-	ps.frontShearTopXEntry = widget.NewEntry()
-	ps.frontShearTopXEntry.OnChanged = func(s string) { ps.onFloatChanged(s, &ps.state.FrontShearTopX, true) }
-	ps.frontShearBottomXEntry = widget.NewEntry()
-	ps.frontShearBottomXEntry.OnChanged = func(s string) { ps.onFloatChanged(s, &ps.state.FrontShearBottomX, true) }
-	ps.frontShearLeftYEntry = widget.NewEntry()
-	ps.frontShearLeftYEntry.OnChanged = func(s string) { ps.onFloatChanged(s, &ps.state.FrontShearLeftY, true) }
-	ps.frontShearRightYEntry = widget.NewEntry()
-	ps.frontShearRightYEntry.OnChanged = func(s string) { ps.onFloatChanged(s, &ps.state.FrontShearRightY, true) }
-	ps.frontAutoRotEntry = widget.NewEntry()
-	ps.frontAutoRotEntry.OnChanged = func(s string) { ps.onFloatChanged(s, &ps.state.FrontAutoRotation, true) }
-	ps.frontAutoScaleXEntry = widget.NewEntry()
-	ps.frontAutoScaleXEntry.OnChanged = func(s string) { ps.onFloatChanged(s, &ps.state.FrontAutoScaleX, true) }
-	ps.frontAutoScaleYEntry = widget.NewEntry()
-	ps.frontAutoScaleYEntry.OnChanged = func(s string) { ps.onFloatChanged(s, &ps.state.FrontAutoScaleY, true) }
-	ps.frontRotCenterXEntry = widget.NewEntry()
-	ps.frontRotCenterXEntry.OnChanged = func(s string) { ps.onFloatChanged(s, &ps.state.FrontRotationCenter.X, true) }
-	ps.frontRotCenterYEntry = widget.NewEntry()
-	ps.frontRotCenterYEntry.OnChanged = func(s string) { ps.onFloatChanged(s, &ps.state.FrontRotationCenter.Y, true) }
+	addRow := func(parent *gtk.Box, label string, entry *gtk.Entry) {
+		row, _ := gtk.BoxNew(gtk.ORIENTATION_HORIZONTAL, 4)
+		lbl, _ := gtk.LabelNew(label)
+		lbl.SetWidthChars(14)
+		lbl.SetXAlign(1.0)
+		row.PackStart(lbl, false, false, 0)
+		row.PackStart(entry, true, true, 0)
+		parent.PackStart(row, false, false, 0)
+	}
 
-	frontAlignment := widget.NewCard("Front Alignment", "",
-		container.NewVBox(
-			ps.makeFormRow("Offset X:", ps.frontOffsetXEntry),
-			ps.makeFormRow("Offset Y:", ps.frontOffsetYEntry),
-			ps.makeFormRow("Rotation:", ps.frontRotationEntry),
-			ps.makeFormRow("Import Rot:", ps.frontAutoRotEntry),
-			ps.makeFormRow("Rot Center X:", ps.frontRotCenterXEntry),
-			ps.makeFormRow("Rot Center Y:", ps.frontRotCenterYEntry),
-			ps.makeFormRow("Scale X:", ps.frontAutoScaleXEntry),
-			ps.makeFormRow("Scale Y:", ps.frontAutoScaleYEntry),
-			ps.makeFormRow("Shear Top X:", ps.frontShearTopXEntry),
-			ps.makeFormRow("Shear Bot X:", ps.frontShearBottomXEntry),
-			ps.makeFormRow("Shear Left Y:", ps.frontShearLeftYEntry),
-			ps.makeFormRow("Shear Right Y:", ps.frontShearRightYEntry),
-		),
-	)
+	addLabelRow := func(parent *gtk.Box, label string, value *gtk.Label) {
+		row, _ := gtk.BoxNew(gtk.ORIENTATION_HORIZONTAL, 4)
+		lbl, _ := gtk.LabelNew(label)
+		lbl.SetWidthChars(14)
+		lbl.SetXAlign(1.0)
+		row.PackStart(lbl, false, false, 0)
+		row.PackStart(value, true, true, 0)
+		parent.PackStart(row, false, false, 0)
+	}
 
-	// Back file info - clickable button to browse for file
-	ps.backFileBtn = widget.NewButton("(none)", ps.onBrowseBackFile)
-	ps.backFileBtn.Alignment = widget.ButtonAlignLeading
-	ps.backCropLabel = widget.NewLabel("")
+	addBtnRow := func(parent *gtk.Box, label string, btn *gtk.Button) {
+		row, _ := gtk.BoxNew(gtk.ORIENTATION_HORIZONTAL, 4)
+		lbl, _ := gtk.LabelNew(label)
+		lbl.SetWidthChars(14)
+		lbl.SetXAlign(1.0)
+		row.PackStart(lbl, false, false, 0)
+		row.PackStart(btn, true, true, 0)
+		parent.PackStart(row, false, false, 0)
+	}
 
-	backInfo := widget.NewCard("Back Image", "",
-		container.NewVBox(
-			ps.makeButtonRow("File:", ps.backFileBtn),
-			ps.makeLabelRow("Crop:", ps.backCropLabel),
-		),
-	)
+	// Project info
+	projBox := addFrame("Project")
+	ps.dpiEntry = newEntry()
+	ps.dpiEntry.Connect("changed", func() { ps.onDPIChanged() })
+	addRow(projBox, "DPI:", ps.dpiEntry)
 
-	// Back alignment parameters (auto-alignment seeds these, all editable)
-	ps.backOffsetXEntry = widget.NewEntry()
-	ps.backOffsetXEntry.OnChanged = func(s string) { ps.onIntChanged(s, &ps.state.BackManualOffset.X, false) }
-	ps.backOffsetYEntry = widget.NewEntry()
-	ps.backOffsetYEntry.OnChanged = func(s string) { ps.onIntChanged(s, &ps.state.BackManualOffset.Y, false) }
-	ps.backRotationEntry = widget.NewEntry()
-	ps.backRotationEntry.OnChanged = func(s string) { ps.onFloatChanged(s, &ps.state.BackManualRotation, false) }
-	ps.backShearTopXEntry = widget.NewEntry()
-	ps.backShearTopXEntry.OnChanged = func(s string) { ps.onFloatChanged(s, &ps.state.BackShearTopX, false) }
-	ps.backShearBottomXEntry = widget.NewEntry()
-	ps.backShearBottomXEntry.OnChanged = func(s string) { ps.onFloatChanged(s, &ps.state.BackShearBottomX, false) }
-	ps.backShearLeftYEntry = widget.NewEntry()
-	ps.backShearLeftYEntry.OnChanged = func(s string) { ps.onFloatChanged(s, &ps.state.BackShearLeftY, false) }
-	ps.backShearRightYEntry = widget.NewEntry()
-	ps.backShearRightYEntry.OnChanged = func(s string) { ps.onFloatChanged(s, &ps.state.BackShearRightY, false) }
-	ps.backAutoRotEntry = widget.NewEntry()
-	ps.backAutoRotEntry.OnChanged = func(s string) { ps.onFloatChanged(s, &ps.state.BackAutoRotation, false) }
-	ps.backAutoScaleXEntry = widget.NewEntry()
-	ps.backAutoScaleXEntry.OnChanged = func(s string) { ps.onFloatChanged(s, &ps.state.BackAutoScaleX, false) }
-	ps.backAutoScaleYEntry = widget.NewEntry()
-	ps.backAutoScaleYEntry.OnChanged = func(s string) { ps.onFloatChanged(s, &ps.state.BackAutoScaleY, false) }
-	ps.backRotCenterXEntry = widget.NewEntry()
-	ps.backRotCenterXEntry.OnChanged = func(s string) { ps.onFloatChanged(s, &ps.state.BackRotationCenter.X, false) }
-	ps.backRotCenterYEntry = widget.NewEntry()
-	ps.backRotCenterYEntry.OnChanged = func(s string) { ps.onFloatChanged(s, &ps.state.BackRotationCenter.Y, false) }
+	// Front Image info
+	frontInfoBox := addFrame("Front Image")
+	ps.frontFileBtn, _ = gtk.ButtonNewWithLabel("(none)")
+	ps.frontFileBtn.Connect("clicked", func() { ps.onBrowseFrontFile() })
+	ps.frontCropLabel, _ = gtk.LabelNew("")
+	ps.frontCropLabel.SetHAlign(gtk.ALIGN_START)
+	addBtnRow(frontInfoBox, "File:", ps.frontFileBtn)
+	addLabelRow(frontInfoBox, "Crop:", ps.frontCropLabel)
 
-	backAlignment := widget.NewCard("Back Alignment", "",
-		container.NewVBox(
-			ps.makeFormRow("Offset X:", ps.backOffsetXEntry),
-			ps.makeFormRow("Offset Y:", ps.backOffsetYEntry),
-			ps.makeFormRow("Rotation:", ps.backRotationEntry),
-			ps.makeFormRow("Import Rot:", ps.backAutoRotEntry),
-			ps.makeFormRow("Rot Center X:", ps.backRotCenterXEntry),
-			ps.makeFormRow("Rot Center Y:", ps.backRotCenterYEntry),
-			ps.makeFormRow("Scale X:", ps.backAutoScaleXEntry),
-			ps.makeFormRow("Scale Y:", ps.backAutoScaleYEntry),
-			ps.makeFormRow("Shear Top X:", ps.backShearTopXEntry),
-			ps.makeFormRow("Shear Bot X:", ps.backShearBottomXEntry),
-			ps.makeFormRow("Shear Left Y:", ps.backShearLeftYEntry),
-			ps.makeFormRow("Shear Right Y:", ps.backShearRightYEntry),
-		),
-	)
+	// Front Alignment
+	frontAlignBox := addFrame("Front Alignment")
+	ps.frontOffsetXEntry = newEntry()
+	ps.frontOffsetXEntry.Connect("changed", func() {
+		t, _ := ps.frontOffsetXEntry.GetText()
+		ps.onIntChanged(t, &ps.state.FrontManualOffset.X)
+	})
+	ps.frontOffsetYEntry = newEntry()
+	ps.frontOffsetYEntry.Connect("changed", func() {
+		t, _ := ps.frontOffsetYEntry.GetText()
+		ps.onIntChanged(t, &ps.state.FrontManualOffset.Y)
+	})
+	ps.frontRotationEntry = newEntry()
+	ps.frontRotationEntry.Connect("changed", func() {
+		t, _ := ps.frontRotationEntry.GetText()
+		ps.onFloatChanged(t, &ps.state.FrontManualRotation)
+	})
+	ps.frontAutoRotEntry = newEntry()
+	ps.frontAutoRotEntry.Connect("changed", func() {
+		t, _ := ps.frontAutoRotEntry.GetText()
+		ps.onFloatChanged(t, &ps.state.FrontAutoRotation)
+	})
+	ps.frontRotCenterXEntry = newEntry()
+	ps.frontRotCenterXEntry.Connect("changed", func() {
+		t, _ := ps.frontRotCenterXEntry.GetText()
+		ps.onFloatChanged(t, &ps.state.FrontRotationCenter.X)
+	})
+	ps.frontRotCenterYEntry = newEntry()
+	ps.frontRotCenterYEntry.Connect("changed", func() {
+		t, _ := ps.frontRotCenterYEntry.GetText()
+		ps.onFloatChanged(t, &ps.state.FrontRotationCenter.Y)
+	})
+	ps.frontAutoScaleXEntry = newEntry()
+	ps.frontAutoScaleXEntry.Connect("changed", func() {
+		t, _ := ps.frontAutoScaleXEntry.GetText()
+		ps.onFloatChanged(t, &ps.state.FrontAutoScaleX)
+	})
+	ps.frontAutoScaleYEntry = newEntry()
+	ps.frontAutoScaleYEntry.Connect("changed", func() {
+		t, _ := ps.frontAutoScaleYEntry.GetText()
+		ps.onFloatChanged(t, &ps.state.FrontAutoScaleY)
+	})
+	ps.frontShearTopXEntry = newEntry()
+	ps.frontShearTopXEntry.Connect("changed", func() {
+		t, _ := ps.frontShearTopXEntry.GetText()
+		ps.onFloatChanged(t, &ps.state.FrontShearTopX)
+	})
+	ps.frontShearBottomXEntry = newEntry()
+	ps.frontShearBottomXEntry.Connect("changed", func() {
+		t, _ := ps.frontShearBottomXEntry.GetText()
+		ps.onFloatChanged(t, &ps.state.FrontShearBottomX)
+	})
+	ps.frontShearLeftYEntry = newEntry()
+	ps.frontShearLeftYEntry.Connect("changed", func() {
+		t, _ := ps.frontShearLeftYEntry.GetText()
+		ps.onFloatChanged(t, &ps.state.FrontShearLeftY)
+	})
+	ps.frontShearRightYEntry = newEntry()
+	ps.frontShearRightYEntry.Connect("changed", func() {
+		t, _ := ps.frontShearRightYEntry.GetText()
+		ps.onFloatChanged(t, &ps.state.FrontShearRightY)
+	})
+
+	addRow(frontAlignBox, "Offset X:", ps.frontOffsetXEntry)
+	addRow(frontAlignBox, "Offset Y:", ps.frontOffsetYEntry)
+	addRow(frontAlignBox, "Rotation:", ps.frontRotationEntry)
+	addRow(frontAlignBox, "Import Rot:", ps.frontAutoRotEntry)
+	addRow(frontAlignBox, "Rot Center X:", ps.frontRotCenterXEntry)
+	addRow(frontAlignBox, "Rot Center Y:", ps.frontRotCenterYEntry)
+	addRow(frontAlignBox, "Scale X:", ps.frontAutoScaleXEntry)
+	addRow(frontAlignBox, "Scale Y:", ps.frontAutoScaleYEntry)
+	addRow(frontAlignBox, "Shear Top X:", ps.frontShearTopXEntry)
+	addRow(frontAlignBox, "Shear Bot X:", ps.frontShearBottomXEntry)
+	addRow(frontAlignBox, "Shear Left Y:", ps.frontShearLeftYEntry)
+	addRow(frontAlignBox, "Shear Right Y:", ps.frontShearRightYEntry)
+
+	// Back Image info
+	backInfoBox := addFrame("Back Image")
+	ps.backFileBtn, _ = gtk.ButtonNewWithLabel("(none)")
+	ps.backFileBtn.Connect("clicked", func() { ps.onBrowseBackFile() })
+	ps.backCropLabel, _ = gtk.LabelNew("")
+	ps.backCropLabel.SetHAlign(gtk.ALIGN_START)
+	addBtnRow(backInfoBox, "File:", ps.backFileBtn)
+	addLabelRow(backInfoBox, "Crop:", ps.backCropLabel)
+
+	// Back Alignment
+	backAlignBox := addFrame("Back Alignment")
+	ps.backOffsetXEntry = newEntry()
+	ps.backOffsetXEntry.Connect("changed", func() {
+		t, _ := ps.backOffsetXEntry.GetText()
+		ps.onIntChanged(t, &ps.state.BackManualOffset.X)
+	})
+	ps.backOffsetYEntry = newEntry()
+	ps.backOffsetYEntry.Connect("changed", func() {
+		t, _ := ps.backOffsetYEntry.GetText()
+		ps.onIntChanged(t, &ps.state.BackManualOffset.Y)
+	})
+	ps.backRotationEntry = newEntry()
+	ps.backRotationEntry.Connect("changed", func() {
+		t, _ := ps.backRotationEntry.GetText()
+		ps.onFloatChanged(t, &ps.state.BackManualRotation)
+	})
+	ps.backAutoRotEntry = newEntry()
+	ps.backAutoRotEntry.Connect("changed", func() {
+		t, _ := ps.backAutoRotEntry.GetText()
+		ps.onFloatChanged(t, &ps.state.BackAutoRotation)
+	})
+	ps.backRotCenterXEntry = newEntry()
+	ps.backRotCenterXEntry.Connect("changed", func() {
+		t, _ := ps.backRotCenterXEntry.GetText()
+		ps.onFloatChanged(t, &ps.state.BackRotationCenter.X)
+	})
+	ps.backRotCenterYEntry = newEntry()
+	ps.backRotCenterYEntry.Connect("changed", func() {
+		t, _ := ps.backRotCenterYEntry.GetText()
+		ps.onFloatChanged(t, &ps.state.BackRotationCenter.Y)
+	})
+	ps.backAutoScaleXEntry = newEntry()
+	ps.backAutoScaleXEntry.Connect("changed", func() {
+		t, _ := ps.backAutoScaleXEntry.GetText()
+		ps.onFloatChanged(t, &ps.state.BackAutoScaleX)
+	})
+	ps.backAutoScaleYEntry = newEntry()
+	ps.backAutoScaleYEntry.Connect("changed", func() {
+		t, _ := ps.backAutoScaleYEntry.GetText()
+		ps.onFloatChanged(t, &ps.state.BackAutoScaleY)
+	})
+	ps.backShearTopXEntry = newEntry()
+	ps.backShearTopXEntry.Connect("changed", func() {
+		t, _ := ps.backShearTopXEntry.GetText()
+		ps.onFloatChanged(t, &ps.state.BackShearTopX)
+	})
+	ps.backShearBottomXEntry = newEntry()
+	ps.backShearBottomXEntry.Connect("changed", func() {
+		t, _ := ps.backShearBottomXEntry.GetText()
+		ps.onFloatChanged(t, &ps.state.BackShearBottomX)
+	})
+	ps.backShearLeftYEntry = newEntry()
+	ps.backShearLeftYEntry.Connect("changed", func() {
+		t, _ := ps.backShearLeftYEntry.GetText()
+		ps.onFloatChanged(t, &ps.state.BackShearLeftY)
+	})
+	ps.backShearRightYEntry = newEntry()
+	ps.backShearRightYEntry.Connect("changed", func() {
+		t, _ := ps.backShearRightYEntry.GetText()
+		ps.onFloatChanged(t, &ps.state.BackShearRightY)
+	})
+
+	addRow(backAlignBox, "Offset X:", ps.backOffsetXEntry)
+	addRow(backAlignBox, "Offset Y:", ps.backOffsetYEntry)
+	addRow(backAlignBox, "Rotation:", ps.backRotationEntry)
+	addRow(backAlignBox, "Import Rot:", ps.backAutoRotEntry)
+	addRow(backAlignBox, "Rot Center X:", ps.backRotCenterXEntry)
+	addRow(backAlignBox, "Rot Center Y:", ps.backRotCenterYEntry)
+	addRow(backAlignBox, "Scale X:", ps.backAutoScaleXEntry)
+	addRow(backAlignBox, "Scale Y:", ps.backAutoScaleYEntry)
+	addRow(backAlignBox, "Shear Top X:", ps.backShearTopXEntry)
+	addRow(backAlignBox, "Shear Bot X:", ps.backShearBottomXEntry)
+	addRow(backAlignBox, "Shear Left Y:", ps.backShearLeftYEntry)
+	addRow(backAlignBox, "Shear Right Y:", ps.backShearRightYEntry)
 
 	// Buttons
-	applyBtn := widget.NewButton("Apply All", ps.applyAll)
-	clearBtn := widget.NewButton("Clear Manual", ps.clearManual)
+	btnBox, _ := gtk.BoxNew(gtk.ORIENTATION_HORIZONTAL, 4)
+	applyBtn, _ := gtk.ButtonNewWithLabel("Apply All")
+	applyBtn.Connect("clicked", func() { ps.applyAll() })
+	clearBtn, _ := gtk.ButtonNewWithLabel("Clear Manual")
+	clearBtn.Connect("clicked", func() { ps.clearManual() })
+	btnBox.PackStart(applyBtn, false, false, 0)
+	btnBox.PackStart(clearBtn, false, false, 0)
+	content.PackStart(btnBox, false, false, 4)
 
-	buttons := container.NewHBox(applyBtn, clearBtn)
+	scrollWin.Add(content)
 
-	// Combine into scrollable container
-	content := container.NewVBox(
-		projectInfo,
-		frontInfo,
-		frontAlignment,
-		backInfo,
-		backAlignment,
-		buttons,
-	)
-
-	ps.container = container.NewVScroll(content)
+	// Wrap in a box so Widget() returns a consistent type
+	ps.box, _ = gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 0)
+	ps.box.PackStart(scrollWin, true, true, 0)
 }
 
-// makeFormRow creates a labeled form row with an editable entry.
-func (ps *PropertySheet) makeFormRow(label string, entry *widget.Entry) fyne.CanvasObject {
-	entry.Wrapping = fyne.TextWrapOff
-	lbl := widget.NewLabel(label)
-	lbl.Alignment = fyne.TextAlignTrailing
-	return container.NewBorder(nil, nil, lbl, nil, entry)
-}
-
-// makeLabelRow creates a labeled row with a read-only label.
-func (ps *PropertySheet) makeLabelRow(label string, value *widget.Label) fyne.CanvasObject {
-	lbl := widget.NewLabel(label)
-	lbl.Alignment = fyne.TextAlignTrailing
-	return container.NewBorder(nil, nil, lbl, nil, value)
-}
-
-// makeButtonRow creates a labeled row with a button.
-func (ps *PropertySheet) makeButtonRow(label string, btn *widget.Button) fyne.CanvasObject {
-	lbl := widget.NewLabel(label)
-	lbl.Alignment = fyne.TextAlignTrailing
-	return container.NewBorder(nil, nil, lbl, nil, btn)
-}
-
-// refresh updates all entries from state.
 func (ps *PropertySheet) refresh() {
-	// Project info
 	ps.dpiEntry.SetText(fmt.Sprintf("%.1f", ps.state.DPI))
 
-	// Front file/crop info
 	if ps.state.FrontImage != nil {
-		ps.frontFileBtn.SetText(filepath.Base(ps.state.FrontImage.Path))
+		ps.frontFileBtn.SetLabel(filepath.Base(ps.state.FrontImage.Path))
 		crop := ps.state.FrontCropBounds
 		if crop.Width > 0 && crop.Height > 0 {
 			ps.frontCropLabel.SetText(fmt.Sprintf("%d,%d %dx%d", crop.X, crop.Y, crop.Width, crop.Height))
@@ -270,11 +344,10 @@ func (ps *PropertySheet) refresh() {
 			ps.frontCropLabel.SetText("(none)")
 		}
 	} else {
-		ps.frontFileBtn.SetText("(none)")
+		ps.frontFileBtn.SetLabel("(none)")
 		ps.frontCropLabel.SetText("(none)")
 	}
 
-	// Front alignment
 	ps.frontOffsetXEntry.SetText(strconv.Itoa(ps.state.FrontManualOffset.X))
 	ps.frontOffsetYEntry.SetText(strconv.Itoa(ps.state.FrontManualOffset.Y))
 	ps.frontRotationEntry.SetText(fmt.Sprintf("%.4f", ps.state.FrontManualRotation))
@@ -288,9 +361,8 @@ func (ps *PropertySheet) refresh() {
 	ps.frontShearLeftYEntry.SetText(fmt.Sprintf("%.6f", ps.state.FrontShearLeftY))
 	ps.frontShearRightYEntry.SetText(fmt.Sprintf("%.6f", ps.state.FrontShearRightY))
 
-	// Back file/crop info
 	if ps.state.BackImage != nil {
-		ps.backFileBtn.SetText(filepath.Base(ps.state.BackImage.Path))
+		ps.backFileBtn.SetLabel(filepath.Base(ps.state.BackImage.Path))
 		crop := ps.state.BackCropBounds
 		if crop.Width > 0 && crop.Height > 0 {
 			ps.backCropLabel.SetText(fmt.Sprintf("%d,%d %dx%d", crop.X, crop.Y, crop.Width, crop.Height))
@@ -298,11 +370,10 @@ func (ps *PropertySheet) refresh() {
 			ps.backCropLabel.SetText("(none)")
 		}
 	} else {
-		ps.backFileBtn.SetText("(none)")
+		ps.backFileBtn.SetLabel("(none)")
 		ps.backCropLabel.SetText("(none)")
 	}
 
-	// Back alignment
 	ps.backOffsetXEntry.SetText(strconv.Itoa(ps.state.BackManualOffset.X))
 	ps.backOffsetYEntry.SetText(strconv.Itoa(ps.state.BackManualOffset.Y))
 	ps.backRotationEntry.SetText(fmt.Sprintf("%.4f", ps.state.BackManualRotation))
@@ -317,33 +388,29 @@ func (ps *PropertySheet) refresh() {
 	ps.backShearRightYEntry.SetText(fmt.Sprintf("%.6f", ps.state.BackShearRightY))
 }
 
-// onDPIChanged handles DPI entry changes.
-func (ps *PropertySheet) onDPIChanged(s string) {
-	if v, err := strconv.ParseFloat(s, 64); err == nil && v > 0 {
+func (ps *PropertySheet) onDPIChanged() {
+	t, _ := ps.dpiEntry.GetText()
+	if v, err := strconv.ParseFloat(t, 64); err == nil && v > 0 {
 		ps.state.DPI = v
 		ps.state.SetModified(true)
 	}
 }
 
-// onIntChanged handles integer entry changes.
-func (ps *PropertySheet) onIntChanged(s string, target *int, isFront bool) {
+func (ps *PropertySheet) onIntChanged(s string, target *int) {
 	if v, err := strconv.Atoi(s); err == nil {
 		*target = v
 		ps.state.SetModified(true)
 	}
 }
 
-// onFloatChanged handles float entry changes.
-func (ps *PropertySheet) onFloatChanged(s string, target *float64, isFront bool) {
+func (ps *PropertySheet) onFloatChanged(s string, target *float64) {
 	if v, err := strconv.ParseFloat(s, 64); err == nil {
 		*target = v
 		ps.state.SetModified(true)
 	}
 }
 
-// clearManual resets all manual adjustment settings to defaults.
 func (ps *PropertySheet) clearManual() {
-	// Reset front manual settings
 	ps.state.FrontManualOffset = geometry.PointInt{}
 	ps.state.FrontManualRotation = 0
 	ps.state.FrontShearTopX = 1.0
@@ -351,7 +418,6 @@ func (ps *PropertySheet) clearManual() {
 	ps.state.FrontShearLeftY = 1.0
 	ps.state.FrontShearRightY = 1.0
 
-	// Reset back manual settings
 	ps.state.BackManualOffset = geometry.PointInt{}
 	ps.state.BackManualRotation = 0
 	ps.state.BackShearTopX = 1.0
@@ -359,16 +425,11 @@ func (ps *PropertySheet) clearManual() {
 	ps.state.BackShearLeftY = 1.0
 	ps.state.BackShearRightY = 1.0
 
-	// Apply to layers
 	ps.applyAll()
-
-	// Refresh UI
 	ps.refresh()
 }
 
-// applyAll applies all current values to the layers and refreshes the canvas.
 func (ps *PropertySheet) applyAll() {
-	// Apply to front image
 	if ps.state.FrontImage != nil {
 		ps.state.FrontImage.ManualOffsetX = ps.state.FrontManualOffset.X
 		ps.state.FrontImage.ManualOffsetY = ps.state.FrontManualOffset.Y
@@ -382,28 +443,9 @@ func (ps *PropertySheet) applyAll() {
 		ps.state.FrontImage.AutoScaleY = ps.state.FrontAutoScaleY
 		ps.state.FrontImage.RotationCenterX = ps.state.FrontRotationCenter.X
 		ps.state.FrontImage.RotationCenterY = ps.state.FrontRotationCenter.Y
-		// Ensure defaults
-		if ps.state.FrontImage.ShearTopX == 0 {
-			ps.state.FrontImage.ShearTopX = 1.0
-		}
-		if ps.state.FrontImage.ShearBottomX == 0 {
-			ps.state.FrontImage.ShearBottomX = 1.0
-		}
-		if ps.state.FrontImage.ShearLeftY == 0 {
-			ps.state.FrontImage.ShearLeftY = 1.0
-		}
-		if ps.state.FrontImage.ShearRightY == 0 {
-			ps.state.FrontImage.ShearRightY = 1.0
-		}
-		if ps.state.FrontImage.AutoScaleX == 0 {
-			ps.state.FrontImage.AutoScaleX = 1.0
-		}
-		if ps.state.FrontImage.AutoScaleY == 0 {
-			ps.state.FrontImage.AutoScaleY = 1.0
-		}
+		ensureShearDefaults(ps.state.FrontImage)
 	}
 
-	// Apply to back image
 	if ps.state.BackImage != nil {
 		ps.state.BackImage.ManualOffsetX = ps.state.BackManualOffset.X
 		ps.state.BackImage.ManualOffsetY = ps.state.BackManualOffset.Y
@@ -417,25 +459,7 @@ func (ps *PropertySheet) applyAll() {
 		ps.state.BackImage.AutoScaleY = ps.state.BackAutoScaleY
 		ps.state.BackImage.RotationCenterX = ps.state.BackRotationCenter.X
 		ps.state.BackImage.RotationCenterY = ps.state.BackRotationCenter.Y
-		// Ensure defaults
-		if ps.state.BackImage.ShearTopX == 0 {
-			ps.state.BackImage.ShearTopX = 1.0
-		}
-		if ps.state.BackImage.ShearBottomX == 0 {
-			ps.state.BackImage.ShearBottomX = 1.0
-		}
-		if ps.state.BackImage.ShearLeftY == 0 {
-			ps.state.BackImage.ShearLeftY = 1.0
-		}
-		if ps.state.BackImage.ShearRightY == 0 {
-			ps.state.BackImage.ShearRightY = 1.0
-		}
-		if ps.state.BackImage.AutoScaleX == 0 {
-			ps.state.BackImage.AutoScaleX = 1.0
-		}
-		if ps.state.BackImage.AutoScaleY == 0 {
-			ps.state.BackImage.AutoScaleY = 1.0
-		}
+		ensureShearDefaults(ps.state.BackImage)
 	}
 
 	ps.state.SetModified(true)
@@ -443,6 +467,27 @@ func (ps *PropertySheet) applyAll() {
 
 	if ps.onUpdate != nil {
 		ps.onUpdate()
+	}
+}
+
+func ensureShearDefaults(img *pcbimage.Layer) {
+	if img.ShearTopX == 0 {
+		img.ShearTopX = 1.0
+	}
+	if img.ShearBottomX == 0 {
+		img.ShearBottomX = 1.0
+	}
+	if img.ShearLeftY == 0 {
+		img.ShearLeftY = 1.0
+	}
+	if img.ShearRightY == 0 {
+		img.ShearRightY = 1.0
+	}
+	if img.AutoScaleX == 0 {
+		img.AutoScaleX = 1.0
+	}
+	if img.AutoScaleY == 0 {
+		img.AutoScaleY = 1.0
 	}
 }
 
@@ -464,79 +509,56 @@ func (ps *PropertySheet) SetRotationCenter(isFront bool, center geometry.Point2D
 	}
 }
 
-// SetWindow sets the parent window for file dialogs.
-func (ps *PropertySheet) SetWindow(w fyne.Window) {
-	ps.window = w
-}
-
-// onBrowseFrontFile opens a file dialog to select a front image.
-// Uses ImportFrontImage to run auto-detection on the new image.
 func (ps *PropertySheet) onBrowseFrontFile() {
-	if ps.window == nil {
-		return
+	dlg, _ := gtk.FileChooserDialogNewWith2Buttons("Open Front Image", ps.win,
+		gtk.FILE_CHOOSER_ACTION_OPEN,
+		"Cancel", gtk.RESPONSE_CANCEL,
+		"Open", gtk.RESPONSE_ACCEPT)
+
+	filter, _ := gtk.FileFilterNew()
+	filter.SetName("Images")
+	for _, ext := range pcbimage.SupportedFormats() {
+		filter.AddPattern("*" + ext)
 	}
+	dlg.AddFilter(filter)
 
-	fd := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
-		if err != nil || reader == nil {
-			return
+	response := dlg.Run()
+	if response == gtk.RESPONSE_ACCEPT {
+		path := dlg.GetFilename()
+		if pcbimage.IsSupportedFormat(path) {
+			if err := ps.state.ImportFrontImage(path); err != nil {
+				fmt.Printf("Error importing front image: %v\n", err)
+			} else if ps.onUpdate != nil {
+				ps.onUpdate()
+			}
 		}
-		reader.Close()
-
-		path := reader.URI().Path()
-		if !image.IsSupportedFormat(path) {
-			dialog.ShowError(fmt.Errorf("unsupported image format"), ps.window)
-			return
-		}
-
-		// Use ImportFrontImage to run auto-detection on the new image
-		if err := ps.state.ImportFrontImage(path); err != nil {
-			dialog.ShowError(err, ps.window)
-			return
-		}
-
-		// Sync layers to canvas
-		if ps.onUpdate != nil {
-			ps.onUpdate()
-		}
-	}, ps.window)
-
-	// Set file filter for images
-	fd.SetFilter(storage.NewExtensionFileFilter(image.SupportedFormats()))
-	fd.Show()
+	}
+	dlg.Destroy()
 }
 
-// onBrowseBackFile opens a file dialog to select a back image.
-// Uses ImportBackImage to run auto-detection on the new image.
 func (ps *PropertySheet) onBrowseBackFile() {
-	if ps.window == nil {
-		return
+	dlg, _ := gtk.FileChooserDialogNewWith2Buttons("Open Back Image", ps.win,
+		gtk.FILE_CHOOSER_ACTION_OPEN,
+		"Cancel", gtk.RESPONSE_CANCEL,
+		"Open", gtk.RESPONSE_ACCEPT)
+
+	filter, _ := gtk.FileFilterNew()
+	filter.SetName("Images")
+	for _, ext := range pcbimage.SupportedFormats() {
+		filter.AddPattern("*" + ext)
 	}
+	dlg.AddFilter(filter)
 
-	fd := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
-		if err != nil || reader == nil {
-			return
+	response := dlg.Run()
+	if response == gtk.RESPONSE_ACCEPT {
+		path := dlg.GetFilename()
+		if pcbimage.IsSupportedFormat(path) {
+			if err := ps.state.ImportBackImage(path); err != nil {
+				fmt.Printf("Error importing back image: %v\n", err)
+			} else if ps.onUpdate != nil {
+				ps.onUpdate()
+			}
 		}
-		reader.Close()
-
-		path := reader.URI().Path()
-		if !image.IsSupportedFormat(path) {
-			dialog.ShowError(fmt.Errorf("unsupported image format"), ps.window)
-			return
-		}
-
-		// Use ImportBackImage to run auto-detection on the new image
-		if err := ps.state.ImportBackImage(path); err != nil {
-			dialog.ShowError(err, ps.window)
-			return
-		}
-
-		// Sync layers to canvas
-		if ps.onUpdate != nil {
-			ps.onUpdate()
-		}
-	}, ps.window)
-
-	// Set file filter for images
-	fd.SetFilter(storage.NewExtensionFileFilter(image.SupportedFormats()))
-	fd.Show()
+	}
+	dlg.Destroy()
 }

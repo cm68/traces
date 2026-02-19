@@ -35,7 +35,6 @@ type ComponentsPanel struct {
 	listBox       *gtk.ListBox
 	listScroll    *gtk.ScrolledWindow
 	paned         *gtk.Paned // Draggable split between list and edit form
-	hoveredIndex  int        // -1 when no component is hovered
 	sortedIndices []int      // Indices into state.Components, sorted by ID
 
 	// Inline edit form
@@ -63,7 +62,6 @@ func NewComponentsPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Wind
 		state:        state,
 		canvas:       cvs,
 		win:          win,
-		hoveredIndex: -1,
 		editingIndex: -1,
 	}
 
@@ -91,7 +89,7 @@ func NewComponentsPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Wind
 		idx := row.GetIndex()
 		if idx >= 0 && idx < len(cp.sortedIndices) {
 			compIdx := cp.sortedIndices[idx]
-			cp.showEditDialog(compIdx)
+			cp.selectComponentByIndex(compIdx)
 		}
 	})
 
@@ -112,11 +110,6 @@ func NewComponentsPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Wind
 
 	// Populate the list initially
 	cp.refreshList()
-
-	// Set up canvas event handlers
-	cp.canvas.OnRightClick(cp.onRightClickDeleteComponent)
-	cp.canvas.OnLeftClick(cp.onLeftClickResize)
-	cp.canvas.OnMiddleClick(cp.OnMiddleClickFloodFill)
 
 	// Subscribe to events
 	state.On(app.EventComponentsChanged, func(_ interface{}) {
@@ -325,7 +318,7 @@ func (cp *ComponentsPanel) refreshList() {
 		}
 	})
 
-	for i, compIdx := range cp.sortedIndices {
+	for _, compIdx := range cp.sortedIndices {
 		if compIdx >= len(cp.state.Components) {
 			continue
 		}
@@ -342,48 +335,14 @@ func (cp *ComponentsPanel) refreshList() {
 		text := fmt.Sprintf("%s%s %s", prefix, comp.ID, detail)
 
 		row, _ := gtk.ListBoxRowNew()
-		// Event box for hover and right-click
-		evBox, _ := gtk.EventBoxNew()
-		evBox.SetEvents(int(gdk.ENTER_NOTIFY_MASK | gdk.LEAVE_NOTIFY_MASK | gdk.BUTTON_PRESS_MASK))
-
 		label, _ := gtk.LabelNew(text)
 		label.SetHAlign(gtk.ALIGN_START)
 		label.SetMarginStart(4)
 		label.SetMarginEnd(4)
 		label.SetMarginTop(2)
 		label.SetMarginBottom(2)
-		evBox.Add(label)
-		row.Add(evBox)
-
-		actualIdx := compIdx
-		sortedPos := i
-
-		// Right-click context menu
-		evBox.Connect("button-press-event", func(_ *gtk.EventBox, ev *gdk.Event) bool {
-			btnEvent := gdk.EventButtonNewFromEvent(ev)
-			if btnEvent.Button() == gdk.BUTTON_SECONDARY {
-				cp.showEditDialog(actualIdx)
-				return true
-			}
-			return false
-		})
-
-		// Hover enter — highlight component
-		evBox.Connect("enter-notify-event", func(_ *gtk.EventBox, ev *gdk.Event) bool {
-			cp.hoveredIndex = actualIdx
-			cp.highlightComponent(actualIdx, false)
-			return false
-		})
-
-		// Hover leave — clear highlight
-		evBox.Connect("leave-notify-event", func(_ *gtk.EventBox, ev *gdk.Event) bool {
-			cp.hoveredIndex = -1
-			cp.clearHighlight()
-			return false
-		})
-
+		row.Add(label)
 		cp.listBox.Add(row)
-		_ = sortedPos
 	}
 
 	cp.listBox.ShowAll()
@@ -599,8 +558,7 @@ func (cp *ComponentsPanel) clearEditForm() {
 	cp.setSelectedOrientation("N")
 
 	cp.editFrame.SetLabel("Component")
-	cp.canvas.SetOverlay("component_highlight", nil)
-	cp.canvas.Refresh()
+	cp.updateComponentOverlay()
 }
 
 // getComponentImage returns the source image for the currently editing component.
@@ -953,7 +911,8 @@ func (cp *ComponentsPanel) showOCRPreview(raw, masked *image.RGBA, orientation s
 	}()
 }
 
-// runOCRTraining runs parameter annealing to find the best OCR settings.
+// runOCRTraining adds the current component image + corrected text as a training sample.
+// Uses current best params to run OCR once, scores the result, and stores the sample.
 func (cp *ComponentsPanel) runOCRTraining() {
 	if cp.editingComp == nil {
 		fmt.Println("[OCR Train] No component selected")
@@ -1003,7 +962,15 @@ func (cp *ComponentsPanel) runOCRTraining() {
 	comp := cp.editingComp
 	compID := comp.ID
 
-	fmt.Printf("[OCR Train] Starting background training for %s (orientation %s)...\n", compID, orientation)
+	// Get current best params from training DB (or defaults)
+	params := cp.state.GetRecommendedOCRParams()
+	if cp.state.GlobalOCRTraining != nil {
+		if p, ok := cp.state.GlobalOCRTraining.GetParamsForOrientation(orientation); ok {
+			params = p
+		}
+	}
+
+	fmt.Printf("[OCR Train] %s: adding training sample (orientation %s)\n", compID, orientation)
 
 	go func() {
 		rotated := rotateForOCR(cropped, orientation)
@@ -1026,24 +993,22 @@ func (cp *ComponentsPanel) runOCRTraining() {
 		}
 		defer engine.Close()
 
-		bestParams, bestScore, bestText := engine.AnnealOCRParams(bgr, groundTruth, 5000)
-		fmt.Printf("[OCR Train] %s: score=%.1f%% text=%s\n", compID, bestScore*100, bestText)
+		// Run OCR once with current best params
+		ocrText, _ := engine.RecognizeWithParams(bgr, params)
+		score := ocr.TextSimilarity(ocrText, groundTruth)
+		fmt.Printf("[OCR Train] %s: score=%.1f%% text=%q\n", compID, score*100, ocrText)
 
-		if bestScore >= 0.7 {
-			cp.state.AddOCRTrainingSample(groundTruth, bestText, bestScore, orientation, bestParams)
-			fmt.Printf("[OCR Train] %s: added to global training database\n", compID)
-		}
+		// Always add — the ground truth is known, that's the whole point
+		cp.state.AddOCRTrainingSample(groundTruth, ocrText, score, orientation, params)
+		fmt.Printf("[OCR Train] %s: added to training database\n", compID)
 
-		// Update UI on main thread
 		glib.IdleAdd(func() {
 			cp.updateOCRTrainingLabel()
 			if cp.editingComp == comp {
-				setTextViewText(cp.ocrTextEntry, bestText)
-				comp.OCRText = bestText
+				setTextViewText(cp.ocrTextEntry, ocrText)
+				comp.OCRText = ocrText
 			}
 		})
-
-		fmt.Printf("[OCR Train] %s: complete\n", compID)
 	}()
 
 	// Parse ground truth into form fields
@@ -1127,45 +1092,19 @@ func (cp *ComponentsPanel) deleteComponent(index int) {
 	cp.updateComponentOverlay()
 }
 
-// highlightComponent shows a highlight overlay for the component at the given index.
+// highlightComponent scrolls the canvas to show the component at the given index.
 func (cp *ComponentsPanel) highlightComponent(index int, scrollToView bool) {
-	if index < 0 || index >= len(cp.state.Components) {
-		return
-	}
-	comp := cp.state.Components[index]
-	highlight := &canvas.Overlay{
-		Color: color.RGBA{R: 255, G: 0, B: 255, A: 255},
-		Rectangles: []canvas.OverlayRect{{
-			X:      int(comp.Bounds.X),
-			Y:      int(comp.Bounds.Y),
-			Width:  int(comp.Bounds.Width),
-			Height: int(comp.Bounds.Height),
-			Fill:   canvas.FillNone,
-		}},
-		Layer: canvas.LayerFront,
-	}
-	cp.canvas.SetOverlay("component_highlight", highlight)
-	cp.canvas.Refresh()
-
-	if scrollToView {
+	cp.updateComponentOverlay()
+	if scrollToView && index >= 0 && index < len(cp.state.Components) {
+		comp := cp.state.Components[index]
 		cp.canvas.ScrollToRegion(int(comp.Bounds.X), int(comp.Bounds.Y),
 			int(comp.Bounds.Width), int(comp.Bounds.Height))
 	}
 }
 
-// clearHighlight removes the component highlight overlay.
-func (cp *ComponentsPanel) clearHighlight() {
-	if cp.editingComp != nil && cp.editingIndex >= 0 {
-		cp.highlightComponent(cp.editingIndex, false)
-		return
-	}
-	cp.canvas.SetOverlay("component_highlight", nil)
-	cp.canvas.Refresh()
-}
-
 // onKeyPressed handles keyboard input for component adjustment.
 func (cp *ComponentsPanel) onKeyPressed(ev *gdk.EventKey) bool {
-	if cp.hoveredIndex < 0 || cp.hoveredIndex >= len(cp.state.Components) {
+	if cp.editingIndex < 0 || cp.editingIndex >= len(cp.state.Components) {
 		return false
 	}
 
@@ -1175,7 +1114,7 @@ func (cp *ComponentsPanel) onKeyPressed(ev *gdk.EventKey) bool {
 	}
 	step := dpi * 0.00394 // 0.1mm in pixels
 
-	comp := cp.state.Components[cp.hoveredIndex]
+	comp := cp.state.Components[cp.editingIndex]
 	keyval := ev.KeyVal()
 
 	switch keyval {
@@ -1191,22 +1130,13 @@ func (cp *ComponentsPanel) onKeyPressed(ev *gdk.EventKey) bool {
 		if comp.Bounds.Width > step {
 			comp.Bounds.Width -= step
 		}
-	case gdk.KEY_Up:
-		comp.Bounds.Y -= step
-	case gdk.KEY_Down:
-		comp.Bounds.Y += step
-	case gdk.KEY_Left:
-		comp.Bounds.X -= step
-	case gdk.KEY_Right:
-		comp.Bounds.X += step
 	default:
 		return false
 	}
 
 	cp.state.SetModified(true)
 	cp.updateComponentOverlay()
-	cp.highlightComponent(cp.hoveredIndex, false)
-	cp.refreshList()
+	cp.highlightComponent(cp.editingIndex, false)
 
 	fmt.Printf("Adjusted component %s: pos=(%.1f,%.1f) size=%.1fx%.1f\n",
 		comp.ID, comp.Bounds.X, comp.Bounds.Y, comp.Bounds.Width, comp.Bounds.Height)
@@ -1224,8 +1154,8 @@ func (cp *ComponentsPanel) onRightClickDeleteComponent(x, y float64) {
 	}
 }
 
-// onLeftClickResize handles left-click to resize component bounds.
-func (cp *ComponentsPanel) onLeftClickResize(x, y float64) {
+// OnLeftClick handles left-click: select component if inside bounds, resize if near edge.
+func (cp *ComponentsPanel) OnLeftClick(x, y float64) {
 	const edgeThreshold = 10.0
 
 	for i, comp := range cp.state.Components {
@@ -1234,6 +1164,7 @@ func (cp *ComponentsPanel) onLeftClickResize(x, y float64) {
 		top := comp.Bounds.Y
 		bottom := comp.Bounds.Y + comp.Bounds.Height
 
+		// Check if click is inside (with edge threshold margin)
 		if y < top-edgeThreshold || y > bottom+edgeThreshold {
 			continue
 		}
@@ -1246,46 +1177,80 @@ func (cp *ComponentsPanel) onLeftClickResize(x, y float64) {
 		distTop := abs64(y - top)
 		distBottom := abs64(y - bottom)
 
-		minDist := distLeft
+		minEdgeDist := distLeft
 		edge := "left"
-		if distRight < minDist {
-			minDist = distRight
+		if distRight < minEdgeDist {
+			minEdgeDist = distRight
 			edge = "right"
 		}
-		if distTop < minDist {
-			minDist = distTop
+		if distTop < minEdgeDist {
+			minEdgeDist = distTop
 			edge = "top"
 		}
-		if distBottom < minDist {
-			minDist = distBottom
+		if distBottom < minEdgeDist {
+			minEdgeDist = distBottom
 			edge = "bottom"
 		}
 
-		if minDist > edgeThreshold {
-			continue
+		// Near an edge — resize
+		if minEdgeDist <= edgeThreshold {
+			switch edge {
+			case "left":
+				delta := x - left
+				cp.state.Components[i].Bounds.X = x
+				cp.state.Components[i].Bounds.Width -= delta
+			case "right":
+				cp.state.Components[i].Bounds.Width = x - left
+			case "top":
+				delta := y - top
+				cp.state.Components[i].Bounds.Y = y
+				cp.state.Components[i].Bounds.Height -= delta
+			case "bottom":
+				cp.state.Components[i].Bounds.Height = y - top
+			}
+			cp.state.SetModified(true)
+			cp.updateComponentOverlay()
+			fmt.Printf("Resized component %s %s edge to %.0f\n", comp.ID, edge, map[string]float64{
+				"left": x, "right": x, "top": y, "bottom": y,
+			}[edge])
+			return
 		}
 
-		switch edge {
-		case "left":
-			delta := x - left
-			cp.state.Components[i].Bounds.X = x
-			cp.state.Components[i].Bounds.Width -= delta
-		case "right":
-			cp.state.Components[i].Bounds.Width = x - left
-		case "top":
-			delta := y - top
-			cp.state.Components[i].Bounds.Y = y
-			cp.state.Components[i].Bounds.Height -= delta
-		case "bottom":
-			cp.state.Components[i].Bounds.Height = y - top
-		}
-
-		cp.state.SetModified(true)
-		cp.updateComponentOverlay()
-		fmt.Printf("Resized component %s %s edge to %.0f\n", comp.ID, edge, map[string]float64{
-			"left": x, "right": x, "top": y, "bottom": y,
-		}[edge])
+		// Inside the component — select it
+		cp.selectComponentByIndex(i)
 		return
+	}
+}
+
+// selectComponentByIndex selects a component in both the edit form and the list.
+func (cp *ComponentsPanel) selectComponentByIndex(index int) {
+	if index == cp.editingIndex {
+		return
+	}
+	cp.showEditDialog(index)
+
+	// Find the sorted position for this component index and select the list row
+	for sortedPos, compIdx := range cp.sortedIndices {
+		if compIdx == index {
+			row := cp.listBox.GetRowAtIndex(sortedPos)
+			if row != nil {
+				cp.listBox.SelectRow(row)
+				// Scroll the list to make the selected row visible
+				alloc := row.GetAllocation()
+				adj := cp.listScroll.GetVAdjustment()
+				upper := adj.GetUpper()
+				pageSize := adj.GetPageSize()
+				rowY := float64(alloc.GetY())
+				rowH := float64(alloc.GetHeight())
+				current := adj.GetValue()
+				if rowY < current {
+					adj.SetValue(rowY)
+				} else if rowY+rowH > current+pageSize && upper > pageSize {
+					adj.SetValue(rowY + rowH - pageSize)
+				}
+			}
+			break
+		}
 	}
 }
 
@@ -1431,8 +1396,25 @@ func (cp *ComponentsPanel) updateComponentOverlay() {
 		cp.canvas.Refresh()
 		return
 	}
-	overlay := component.CreateOverlay(cp.state.Components)
-	overlay.Layer = canvas.LayerFront
+	magenta := color.RGBA{R: 255, G: 0, B: 255, A: 255}
+	overlay := &canvas.Overlay{
+		Color: color.RGBA{R: 255, G: 255, B: 255, A: 255},
+		Layer: canvas.LayerFront,
+	}
+	for i, comp := range cp.state.Components {
+		rect := canvas.OverlayRect{
+			X:      int(comp.Bounds.X),
+			Y:      int(comp.Bounds.Y),
+			Width:  int(comp.Bounds.Width),
+			Height: int(comp.Bounds.Height),
+			Label:  comp.ID + " " + comp.Package,
+			Fill:   canvas.FillNone,
+		}
+		if i == cp.editingIndex {
+			rect.Color = &magenta
+		}
+		overlay.Rectangles = append(overlay.Rectangles, rect)
+	}
 	cp.canvas.SetOverlay("components", overlay)
 	cp.canvas.Refresh()
 }

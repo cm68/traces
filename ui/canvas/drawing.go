@@ -103,6 +103,12 @@ func (ic *ImageCanvas) drawOverlay(output *image.RGBA, overlay *Overlay) {
 	}
 
 	for _, rect := range overlay.Rectangles {
+		// Per-rect color override
+		rectCol := col
+		if rect.Color != nil {
+			rectCol = *rect.Color
+		}
+
 		// Scale rectangle coordinates by zoom, applying layer offset
 		x1 := int((float64(rect.X) + offsetX) * ic.zoom)
 		y1 := int((float64(rect.Y) + offsetY) * ic.zoom)
@@ -123,7 +129,7 @@ func (ic *ImageCanvas) drawOverlay(output *image.RGBA, overlay *Overlay) {
 				interval = 2
 			}
 
-			ic.drawFillPattern(output, x1, y1, x2, y2, col, rect.Fill, interval)
+			ic.drawFillPattern(output, x1, y1, x2, y2, rectCol, rect.Fill, interval)
 		}
 
 		// Draw rectangle outline (2 pixel thick)
@@ -131,25 +137,25 @@ func (ic *ImageCanvas) drawOverlay(output *image.RGBA, overlay *Overlay) {
 			// Top edge
 			for x := x1; x <= x2; x++ {
 				if x >= bounds.Min.X && x < bounds.Max.X && y1+t >= bounds.Min.Y && y1+t < bounds.Max.Y {
-					output.Set(x, y1+t, col)
+					output.Set(x, y1+t, rectCol)
 				}
 			}
 			// Bottom edge
 			for x := x1; x <= x2; x++ {
 				if x >= bounds.Min.X && x < bounds.Max.X && y2-t >= bounds.Min.Y && y2-t < bounds.Max.Y {
-					output.Set(x, y2-t, col)
+					output.Set(x, y2-t, rectCol)
 				}
 			}
 			// Left edge
 			for y := y1; y <= y2; y++ {
 				if x1+t >= bounds.Min.X && x1+t < bounds.Max.X && y >= bounds.Min.Y && y < bounds.Max.Y {
-					output.Set(x1+t, y, col)
+					output.Set(x1+t, y, rectCol)
 				}
 			}
 			// Right edge
 			for y := y1; y <= y2; y++ {
 				if x2-t >= bounds.Min.X && x2-t < bounds.Max.X && y >= bounds.Min.Y && y < bounds.Max.Y {
-					output.Set(x2-t, y, col)
+					output.Set(x2-t, y, rectCol)
 				}
 			}
 		}

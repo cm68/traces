@@ -50,6 +50,7 @@ type OverlayRect struct {
 	Label               string      // Optional label to draw centered in the rectangle
 	Fill                FillPattern // Fill pattern for the rectangle
 	StripeInterval      int         // Interval for stripe/crosshatch patterns (0 = use width)
+	Color               *color.RGBA // Per-rect color override (nil = use overlay Color)
 }
 
 // OverlayPolygon represents a polygon to draw on the overlay.

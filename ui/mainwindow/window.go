@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"pcb-tracer/internal/app"
+	"pcb-tracer/internal/board"
 	"pcb-tracer/internal/version"
 	"pcb-tracer/ui/canvas"
 	"pcb-tracer/ui/panels"
@@ -69,6 +70,7 @@ func New(state *app.State, p *prefs.Prefs) *MainWindow {
 
 	mw.setupUI()
 	mw.setupMenus()
+	mw.syncViewMenuSensitivity()
 	mw.setupEventHandlers()
 	mw.setupKeyboard()
 
@@ -262,18 +264,62 @@ func (mw *MainWindow) setupMenus() {
 	viewMenu, _ := gtk.MenuNew()
 	viewMenuItem.SetSubmenu(viewMenu)
 	menuBar.Append(viewMenuItem)
-	// TODO: Add panel switching radio items once panels are ported
 
-	// Board menu
-	boardMenu := mw.createMenu("Board",
-		menuEntry{"S-100 (IEEE 696)", func() { mw.onSelectBoard("S-100 (IEEE 696)") }},
-		menuEntry{"8-bit ISA", func() { mw.onSelectBoard("8-bit ISA") }},
-		menuEntry{"16-bit ISA", func() { mw.onSelectBoard("16-bit ISA") }},
-		menuEntry{"Multibus I (P1)", func() { mw.onSelectBoard("Multibus I (P1)") }},
-		menuEntry{}, // separator
-		menuEntry{"Custom Board...", mw.onCustomBoard},
-	)
-	menuBar.Append(boardMenu)
+	// Radio group for panel switching
+	mw.viewImportItem, _ = gtk.RadioMenuItemNewWithLabel(nil, "Import")
+	viewMenu.Append(mw.viewImportItem)
+
+	mw.viewComponentsItem, _ = gtk.RadioMenuItemNewWithLabelFromWidget(mw.viewImportItem, "Components")
+	viewMenu.Append(mw.viewComponentsItem)
+
+	mw.viewTracesItem, _ = gtk.RadioMenuItemNewWithLabelFromWidget(mw.viewImportItem, "Traces")
+	viewMenu.Append(mw.viewTracesItem)
+
+	mw.viewPropertiesItem, _ = gtk.RadioMenuItemNewWithLabelFromWidget(mw.viewImportItem, "Properties")
+	viewMenu.Append(mw.viewPropertiesItem)
+
+	mw.viewLogosItem, _ = gtk.RadioMenuItemNewWithLabelFromWidget(mw.viewImportItem, "Logos")
+	viewMenu.Append(mw.viewLogosItem)
+
+	mw.viewImportItem.SetActive(true)
+
+	mw.viewImportItem.Connect("toggled", func() {
+		if mw.viewImportItem.GetActive() {
+			mw.sidePanel.ShowPanel(panels.PanelImport)
+		}
+	})
+	mw.viewComponentsItem.Connect("toggled", func() {
+		if mw.viewComponentsItem.GetActive() {
+			mw.sidePanel.ShowPanel(panels.PanelComponents)
+		}
+	})
+	mw.viewTracesItem.Connect("toggled", func() {
+		if mw.viewTracesItem.GetActive() {
+			mw.sidePanel.ShowPanel(panels.PanelTraces)
+		}
+	})
+	mw.viewPropertiesItem.Connect("toggled", func() {
+		if mw.viewPropertiesItem.GetActive() {
+			mw.sidePanel.ShowPanel(panels.PanelProperties)
+		}
+	})
+	mw.viewLogosItem.Connect("toggled", func() {
+		if mw.viewLogosItem.GetActive() {
+			mw.sidePanel.ShowPanel(panels.PanelLogos)
+		}
+	})
+
+	// Board menu — built dynamically from registry
+	boardMenuItem, _ := gtk.MenuItemNewWithLabel("Board")
+	boardMenu, _ := gtk.MenuNew()
+	boardMenuItem.SetSubmenu(boardMenu)
+	for _, specName := range board.ListSpecs() {
+		name := specName
+		mi, _ := gtk.MenuItemNewWithLabel(name)
+		mi.Connect("activate", func() { mw.onSelectBoard(name) })
+		boardMenu.Append(mi)
+	}
+	menuBar.Append(boardMenuItem)
 
 	// Help menu
 	helpMenu := mw.createMenu("Help",
@@ -347,6 +393,11 @@ func (mw *MainWindow) setupEventHandlers() {
 	mw.state.On(app.EventNormalizationComplete, func(data interface{}) {
 		mw.canvas.Refresh()
 		mw.updateStatus("Aligned images saved")
+		mw.syncViewMenuSensitivity()
+	})
+
+	mw.state.On(app.EventProjectLoaded, func(data interface{}) {
+		mw.syncViewMenuSensitivity()
 	})
 }
 
@@ -356,6 +407,14 @@ func (mw *MainWindow) setupKeyboard() {
 		keyEvent := gdk.EventKeyNewFromEvent(ev)
 		return mw.sidePanel.OnKeyPressed(keyEvent)
 	})
+}
+
+// syncViewMenuSensitivity updates View menu items based on panel enable state.
+func (mw *MainWindow) syncViewMenuSensitivity() {
+	mw.viewComponentsItem.SetSensitive(mw.sidePanel.IsPanelEnabled(panels.PanelComponents))
+	mw.viewTracesItem.SetSensitive(mw.sidePanel.IsPanelEnabled(panels.PanelTraces))
+	mw.viewPropertiesItem.SetSensitive(mw.sidePanel.IsPanelEnabled(panels.PanelProperties))
+	mw.viewLogosItem.SetSensitive(mw.sidePanel.IsPanelEnabled(panels.PanelLogos))
 }
 
 // syncLayers syncs the state's images to the canvas.
@@ -652,11 +711,11 @@ func (mw *MainWindow) disableFitToWindow() {
 }
 
 func (mw *MainWindow) onSelectBoard(name string) {
-	mw.updateStatus("Selected board: " + name)
-}
-
-func (mw *MainWindow) onCustomBoard() {
-	mw.updateStatus("Custom board editor not yet implemented")
+	if spec := board.GetSpec(name); spec != nil {
+		mw.state.BoardSpec = spec
+		mw.sidePanel.SyncBoardSelection()
+		mw.updateStatus("Selected board: " + name)
+	}
 }
 
 func (mw *MainWindow) onAbout() {

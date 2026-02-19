@@ -92,6 +92,7 @@ func NewSidePanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window) *S
 	state.On(app.EventProjectLoaded, func(_ interface{}) {
 		sp.updatePanelEnableState()
 		sp.importPanel.updateAlignmentUI()
+		sp.importPanel.syncBoardSelection()
 	})
 
 	return sp
@@ -216,6 +217,11 @@ func (sp *SidePanel) SetPanelEnabled(name string, enabled bool) {
 // IsPanelEnabled returns whether a panel is enabled.
 func (sp *SidePanel) IsPanelEnabled(name string) bool {
 	return !sp.disabledPanels[name]
+}
+
+// SyncBoardSelection updates the import panel's board combo to match state.
+func (sp *SidePanel) SyncBoardSelection() {
+	sp.importPanel.syncBoardSelection()
 }
 
 // OnKeyPressed dispatches key events to the active panel.

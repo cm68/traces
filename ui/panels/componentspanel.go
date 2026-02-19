@@ -382,6 +382,7 @@ func (cp *ComponentsPanel) refreshList() {
 			return false
 		})
 
+		cp.listBox.Add(row)
 		_ = sortedPos
 	}
 

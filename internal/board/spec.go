@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 )
 
 // AlignmentMethod defines how a board can be aligned.
@@ -195,12 +196,13 @@ func GetSpec(name string) Spec {
 	return nil
 }
 
-// ListSpecs returns all registered board spec names.
+// ListSpecs returns all registered board spec names in sorted order.
 func ListSpecs() []string {
 	names := make([]string, 0, len(registry))
 	for name := range registry {
 		names = append(names, name)
 	}
+	sort.Strings(names)
 	return names
 }
 

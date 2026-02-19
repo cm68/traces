@@ -87,7 +87,8 @@ func NewImportPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, 
 
 	// Board selection
 	ip.boardSelect, _ = gtk.ComboBoxTextNew()
-	for _, name := range board.ListSpecs() {
+	specNames := board.ListSpecs()
+	for _, name := range specNames {
 		ip.boardSelect.AppendText(name)
 	}
 	ip.boardSelect.Connect("changed", func() {
@@ -98,7 +99,7 @@ func NewImportPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, 
 		}
 	})
 	if state.BoardSpec != nil {
-		for i, name := range board.ListSpecs() {
+		for i, name := range specNames {
 			if name == state.BoardSpec.Name() {
 				ip.boardSelect.SetActive(i)
 				break
@@ -360,6 +361,21 @@ func (ip *ImportPanel) selectedLayer() string {
 		return "Front"
 	}
 	return "Back"
+}
+
+// syncBoardSelection updates the board combo to match state.BoardSpec.
+func (ip *ImportPanel) syncBoardSelection() {
+	if ip.state.BoardSpec == nil {
+		return
+	}
+	specName := ip.state.BoardSpec.Name()
+	for i, name := range board.ListSpecs() {
+		if name == specName {
+			ip.boardSelect.SetActive(i)
+			break
+		}
+	}
+	ip.updateBoardSpecInfo()
 }
 
 // updateAlignmentUI shows/hides alignment controls based on normalization state.

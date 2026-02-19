@@ -81,8 +81,8 @@ func NewComponentsPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Wind
 
 	// Create the list
 	cp.listBox, _ = gtk.ListBoxNew()
-	cp.listBox.SetSelectionMode(gtk.SELECTION_SINGLE)
-	cp.listBox.Connect("row-selected", func(_ *gtk.ListBox, row *gtk.ListBoxRow) {
+	cp.listBox.SetSelectionMode(gtk.SELECTION_NONE)
+	cp.listBox.Connect("row-activated", func(_ *gtk.ListBox, row *gtk.ListBoxRow) {
 		if row == nil {
 			return
 		}
@@ -1252,6 +1252,17 @@ func (cp *ComponentsPanel) selectComponentByIndex(index int) {
 			break
 		}
 	}
+}
+
+// DeselectComponent clears the current component selection.
+func (cp *ComponentsPanel) DeselectComponent() {
+	if cp.editingIndex < 0 {
+		return
+	}
+	cp.editingIndex = -1
+	cp.editingComp = nil
+	cp.listBox.UnselectAll()
+	cp.updateComponentOverlay()
 }
 
 // OnMiddleClickFloodFill handles middle-click for flood fill component detection.

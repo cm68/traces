@@ -113,6 +113,11 @@ func (sp *SidePanel) ShowPanel(name string) {
 		return
 	}
 
+	// Deselect component when leaving components panel
+	if sp.currentPanel == PanelComponents {
+		sp.componentsPanel.DeselectComponent()
+	}
+
 	sp.currentPanel = name
 	sp.stack.SetVisibleChildName(name)
 

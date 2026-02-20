@@ -115,7 +115,7 @@ func (mw *MainWindow) setupUI() {
 	toolbar := mw.createToolbar()
 
 	// Side panel
-	mw.sidePanel = panels.NewSidePanel(mw.state, mw.canvas, mw.win)
+	mw.sidePanel = panels.NewSidePanel(mw.state, mw.canvas, mw.win, mw.prefs)
 
 	// Wrap side panel in scrolled window
 	sidePanelScroll, _ := gtk.ScrolledWindowNew(nil, nil)
@@ -266,7 +266,7 @@ func (mw *MainWindow) setupMenus() {
 	menuBar.Append(viewMenuItem)
 
 	// Radio group for panel switching
-	mw.viewImportItem, _ = gtk.RadioMenuItemNewWithLabel(nil, "Import")
+	mw.viewImportItem, _ = gtk.RadioMenuItemNewWithLabel(nil, "Align")
 	viewMenu.Append(mw.viewImportItem)
 
 	mw.viewComponentsItem, _ = gtk.RadioMenuItemNewWithLabelFromWidget(mw.viewImportItem, "Components")

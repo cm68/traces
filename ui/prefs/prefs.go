@@ -110,3 +110,23 @@ func (p *Prefs) SetString(key string, val string) {
 	p.values[key] = val
 	p.mu.Unlock()
 }
+
+// Bool returns a bool preference, or fallback if not set.
+func (p *Prefs) Bool(key string, fallback bool) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if v, ok := p.values[key]; ok {
+		switch b := v.(type) {
+		case bool:
+			return b
+		}
+	}
+	return fallback
+}
+
+// SetBool stores a bool preference.
+func (p *Prefs) SetBool(key string, val bool) {
+	p.mu.Lock()
+	p.values[key] = val
+	p.mu.Unlock()
+}

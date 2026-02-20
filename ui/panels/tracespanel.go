@@ -19,6 +19,7 @@ import (
 	"pcb-tracer/pkg/colorutil"
 	"pcb-tracer/pkg/geometry"
 	"pcb-tracer/ui/canvas"
+	"pcb-tracer/ui/prefs"
 
 	"github.com/gotk3/gotk3/gdk"
 	"github.com/gotk3/gotk3/glib"
@@ -58,6 +59,8 @@ type TracesPanel struct {
 	traceMode          bool
 	traceStartVia      *via.ConfirmedVia
 	traceStartConn     *connector.Connector
+	traceEndVia        *via.ConfirmedVia
+	traceEndConn       *connector.Connector
 	tracePoints        []geometry.Point2D
 	traceLayer         pcbtrace.TraceLayer
 
@@ -77,15 +80,26 @@ type TracesPanel struct {
 
 	// Default via radius for manual addition
 	defaultViaRadius float64
+
+	// Hover state for net info display
+	hoverNetID string
+
+	// Preferences
+	prefs          *prefs.Prefs
+	showViaNumbers bool
 }
 
 // NewTracesPanel creates a new traces panel.
-func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window) *TracesPanel {
+const prefKeyShowViaNumbers = "showViaNumbers"
+
+func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, p *prefs.Prefs) *TracesPanel {
 	tp := &TracesPanel{
 		state:            state,
 		canvas:           cvs,
 		win:              win,
 		defaultViaRadius: 15,
+		prefs:            p,
+		showViaNumbers:   p.Bool(prefKeyShowViaNumbers, true),
 	}
 
 	tp.box, _ = gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 4)
@@ -138,6 +152,17 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window) 
 	tp.matchViasBtn, _ = gtk.ButtonNewWithLabel("Match Vias")
 	tp.matchViasBtn.Connect("clicked", func() { tp.tryMatchVias() })
 	viaBox.PackStart(tp.matchViasBtn, false, false, 0)
+
+	showViaNumCheck, _ := gtk.CheckButtonNewWithLabel("Show via numbers")
+	showViaNumCheck.SetActive(tp.showViaNumbers)
+	showViaNumCheck.Connect("toggled", func() {
+		tp.showViaNumbers = showViaNumCheck.GetActive()
+		tp.prefs.SetBool(prefKeyShowViaNumbers, tp.showViaNumbers)
+		tp.prefs.Save()
+		tp.rebuildFeaturesOverlay()
+		tp.canvas.Refresh()
+	})
+	viaBox.PackStart(showViaNumCheck, false, false, 0)
 
 	tp.addConnectorsBtn, _ = gtk.ButtonNewWithLabel("Add Connectors")
 	tp.addConnectorsBtn.Connect("clicked", func() { tp.onAddConnectors() })
@@ -194,6 +219,8 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window) 
 		tp.traceMode = false
 		tp.traceStartVia = nil
 		tp.traceStartConn = nil
+		tp.traceEndVia = nil
+		tp.traceEndConn = nil
 		tp.tracePoints = nil
 		tp.draggingVertex = false
 		tp.canvas.OnMouseMove(nil)
@@ -371,6 +398,8 @@ func (tp *TracesPanel) cancelTrace() {
 	tp.traceMode = false
 	tp.traceStartVia = nil
 	tp.traceStartConn = nil
+	tp.traceEndVia = nil
+	tp.traceEndConn = nil
 	tp.tracePoints = nil
 	tp.traceStatusLabel.SetText("Trace cancelled")
 	tp.canvas.Refresh()
@@ -531,10 +560,16 @@ func (tp *TracesPanel) rebuildFeaturesOverlay() {
 
 	// 2. Confirmed vias: blue, filled, labeled — always visible
 	for _, cv := range tp.state.FeaturesLayer.GetConfirmedVias() {
-		label := cv.ID
-		var viaNum int
-		if _, err := fmt.Sscanf(cv.ID, "cvia-%d", &viaNum); err == nil {
-			label = fmt.Sprintf("%d", viaNum)
+		label := ""
+		if cv.ComponentID != "" && cv.PinNumber != "" {
+			label = fmt.Sprintf("%s-%s", cv.ComponentID, cv.PinNumber)
+		} else if tp.showViaNumbers {
+			var viaNum int
+			if _, err := fmt.Sscanf(cv.ID, "cvia-%d", &viaNum); err == nil {
+				label = fmt.Sprintf("%d", viaNum)
+			} else {
+				label = cv.ID
+			}
 		}
 		if len(cv.IntersectionBoundary) >= 3 {
 			viasOverlay.Polygons = append(viasOverlay.Polygons, canvas.OverlayPolygon{
@@ -1314,6 +1349,8 @@ func (tp *TracesPanel) namePin(cv *via.ConfirmedVia) {
 			tp.viaStatusLabel.SetText(fmt.Sprintf("%s -> pin %s", cv.ID, label))
 			fmt.Printf("Via %s associated with pin %s\n", cv.ID, label)
 		}
+		tp.rebuildFeaturesOverlay()
+		tp.canvas.Refresh()
 		tp.state.Emit(app.EventConfirmedViasChanged, nil)
 	}
 	dlg.Destroy()
@@ -1407,56 +1444,132 @@ func (tp *TracesPanel) guessPin(cv *via.ConfirmedVia, componentID string) string
 	return ""
 }
 
-// getOrCreateNetForVia returns the net a via belongs to, or creates a new unnamed one.
-func (tp *TracesPanel) getOrCreateNetForVia(cv *via.ConfirmedVia) *netlist.ElectricalNet {
-	net := tp.state.FeaturesLayer.GetNetForElement(cv.ID)
-	if net != nil {
-		return net
-	}
-	netNum := tp.state.FeaturesLayer.NetCount() + 1
-	id := fmt.Sprintf("net-%03d", netNum)
-	net = netlist.NewElectricalNetWithName(id, id)
-	net.AddVia(cv)
-	tp.state.FeaturesLayer.AddNet(net)
-	return net
-}
+// associateTraceEndpoints ensures both endpoints of a completed trace share the same
+// electrical net. Handles all 4 endpoint combinations: via↔via, via↔connector,
+// connector↔via, connector↔connector.
+func (tp *TracesPanel) associateTraceEndpoints() {
+	startVia := tp.traceStartVia
+	startConn := tp.traceStartConn
 
-// associateTraceVias ensures both vias of a completed trace share the same netlist.
-func (tp *TracesPanel) associateTraceVias(startVia, endVia *via.ConfirmedVia) {
-	startNet := tp.state.FeaturesLayer.GetNetForElement(startVia.ID)
-	endNet := tp.state.FeaturesLayer.GetNetForElement(endVia.ID)
+	// Look up existing nets for each endpoint
+	var startNet, endNet *netlist.ElectricalNet
+	var startID, endID string
+
+	if startVia != nil {
+		startID = startVia.ID
+		startNet = tp.state.FeaturesLayer.GetNetForElement(startVia.ID)
+	} else if startConn != nil {
+		startID = startConn.ID
+		startNet = tp.state.FeaturesLayer.GetNetForElement(startConn.ID)
+	}
+
+	if tp.traceEndVia != nil {
+		endID = tp.traceEndVia.ID
+		endNet = tp.state.FeaturesLayer.GetNetForElement(tp.traceEndVia.ID)
+	} else if tp.traceEndConn != nil {
+		endID = tp.traceEndConn.ID
+		endNet = tp.state.FeaturesLayer.GetNetForElement(tp.traceEndConn.ID)
+	}
+
+	// For connector endpoints with no existing net, create one from the connector's signal name
+	if startConn != nil && startNet == nil {
+		startNet = netlist.NewElectricalNet(startConn)
+		tp.state.FeaturesLayer.AddNet(startNet)
+		fmt.Printf("Created net %q from connector %s\n", startNet.Name, startConn.ID)
+	}
+	if tp.traceEndConn != nil && endNet == nil {
+		endNet = netlist.NewElectricalNet(tp.traceEndConn)
+		tp.state.FeaturesLayer.AddNet(endNet)
+		fmt.Printf("Created net %q from connector %s\n", endNet.Name, tp.traceEndConn.ID)
+	}
 
 	if startNet != nil && endNet != nil {
+		// Both have nets
 		if startNet.ID == endNet.ID {
-			return
+			return // already in the same net
 		}
-		for _, vid := range endNet.ViaIDs {
-			if !startNet.ContainsVia(vid) {
-				startNet.ViaIDs = append(startNet.ViaIDs, vid)
-				startNet.Elements = append(startNet.Elements, netlist.NetElement{
-					Type: netlist.ElementVia,
-					ID:   vid,
+		// Merge: keep the net with the better name
+		keepNet, absorbNet := startNet, endNet
+		if netlist.BetterNetName(endNet.Name, startNet.Name) == endNet.Name &&
+			netlist.BetterNetName(endNet.Name, startNet.Name) != startNet.Name {
+			keepNet, absorbNet = endNet, startNet
+		}
+		// Absorb all elements from the losing net
+		for _, vid := range absorbNet.ViaIDs {
+			if !keepNet.ContainsVia(vid) {
+				keepNet.ViaIDs = append(keepNet.ViaIDs, vid)
+				keepNet.Elements = append(keepNet.Elements, netlist.NetElement{
+					Type: netlist.ElementVia, ID: vid,
 				})
 			}
 		}
-		tp.state.FeaturesLayer.RemoveNet(endNet.ID)
-		fmt.Printf("Merged net %q into %q\n", endNet.Name, startNet.Name)
+		for _, cid := range absorbNet.ConnectorIDs {
+			if !keepNet.ContainsConnector(cid) {
+				keepNet.ConnectorIDs = append(keepNet.ConnectorIDs, cid)
+				keepNet.Elements = append(keepNet.Elements, netlist.NetElement{
+					Type: netlist.ElementConnector, ID: cid,
+				})
+			}
+		}
+		for _, tid := range absorbNet.TraceIDs {
+			if !keepNet.ContainsElement(tid) {
+				keepNet.TraceIDs = append(keepNet.TraceIDs, tid)
+				keepNet.Elements = append(keepNet.Elements, netlist.NetElement{
+					Type: netlist.ElementTrace, ID: tid,
+				})
+			}
+		}
+		for _, pid := range absorbNet.PadIDs {
+			if !keepNet.ContainsElement(pid) {
+				keepNet.PadIDs = append(keepNet.PadIDs, pid)
+				keepNet.Elements = append(keepNet.Elements, netlist.NetElement{
+					Type: netlist.ElementPad, ID: pid,
+				})
+			}
+		}
+		tp.state.FeaturesLayer.RemoveNet(absorbNet.ID)
+		fmt.Printf("Merged net %q into %q\n", absorbNet.Name, keepNet.Name)
 	} else if startNet != nil {
-		startNet.AddVia(endVia)
-		fmt.Printf("Added %s to net %q\n", endVia.ID, startNet.Name)
+		// Only start has a net — add end endpoint
+		tp.addEndpointToNet(startNet, tp.traceEndVia, tp.traceEndConn)
+		fmt.Printf("Added %s to net %q\n", endID, startNet.Name)
 	} else if endNet != nil {
-		endNet.AddVia(startVia)
-		fmt.Printf("Added %s to net %q\n", startVia.ID, endNet.Name)
+		// Only end has a net — add start endpoint
+		tp.addEndpointToNet(endNet, startVia, startConn)
+		fmt.Printf("Added %s to net %q\n", startID, endNet.Name)
 	} else {
+		// Neither has a net — create a new one
 		netNum := tp.state.FeaturesLayer.NetCount() + 1
 		id := fmt.Sprintf("net-%03d", netNum)
-		net := netlist.NewElectricalNetWithName(id, id)
-		net.AddVia(startVia)
-		net.AddVia(endVia)
+		name := id // default auto-generated name
+
+		// Try to derive a better name from component pin assignments
+		if startVia != nil && startVia.ComponentID != "" && startVia.PinNumber != "" {
+			name = fmt.Sprintf("%s.%s", startVia.ComponentID, startVia.PinNumber)
+		} else if tp.traceEndVia != nil && tp.traceEndVia.ComponentID != "" && tp.traceEndVia.PinNumber != "" {
+			name = fmt.Sprintf("%s.%s", tp.traceEndVia.ComponentID, tp.traceEndVia.PinNumber)
+		}
+
+		net := netlist.NewElectricalNetWithName(id, name)
+		tp.addEndpointToNet(net, startVia, startConn)
+		tp.addEndpointToNet(net, tp.traceEndVia, tp.traceEndConn)
 		tp.state.FeaturesLayer.AddNet(net)
-		fmt.Printf("Created net %q for %s and %s\n", id, startVia.ID, endVia.ID)
+		fmt.Printf("Created net %q for %s and %s\n", name, startID, endID)
 	}
 	tp.state.Emit(app.EventNetlistModified, nil)
+}
+
+// addEndpointToNet adds a via or connector endpoint to an existing net.
+func (tp *TracesPanel) addEndpointToNet(net *netlist.ElectricalNet, v *via.ConfirmedVia, conn *connector.Connector) {
+	if v != nil {
+		if !net.ContainsVia(v.ID) {
+			net.AddVia(v)
+		}
+	} else if conn != nil {
+		if !net.ContainsConnector(conn.ID) {
+			net.AddConnector(conn)
+		}
+	}
 }
 
 // onAddConnectors copies alignment connectors into the features layer as persistent connectors.
@@ -1655,26 +1768,25 @@ func (tp *TracesPanel) finishTraceCommon(endLabel string) string {
 
 // finishTraceAtVia completes the polyline trace at a confirmed via.
 func (tp *TracesPanel) finishTraceAtVia(endVia *via.ConfirmedVia) {
+	tp.traceEndVia = endVia
+	tp.traceEndConn = nil
 	tp.finishTraceCommon(endVia.ID)
 
-	// Associate vias in the netlist if both endpoints are vias
-	if tp.traceStartVia != nil {
-		tp.associateTraceVias(tp.traceStartVia, endVia)
-	}
+	tp.associateTraceEndpoints()
 
 	startLabel := tp.traceStartLabel()
+	net := tp.state.FeaturesLayer.GetNetForElement(endVia.ID)
 	netInfo := ""
-	if tp.traceStartVia != nil {
-		net := tp.state.FeaturesLayer.GetNetForElement(tp.traceStartVia.ID)
-		if net != nil {
-			netInfo = fmt.Sprintf(" [%s]", net.Name)
-		}
+	if net != nil {
+		netInfo = fmt.Sprintf(" [%s]", net.Name)
 	}
 	nSegs := len(tp.tracePoints) - 1
 	tp.traceStatusLabel.SetText(fmt.Sprintf("Trace: %s -> %s (%d segments)%s",
 		startLabel, endVia.ID, nSegs, netInfo))
 	tp.traceStartVia = nil
 	tp.traceStartConn = nil
+	tp.traceEndVia = nil
+	tp.traceEndConn = nil
 }
 
 // finishTraceAtConnector completes the polyline trace at a connector.
@@ -1683,14 +1795,25 @@ func (tp *TracesPanel) finishTraceAtConnector(conn *connector.Connector) {
 	if endLabel == "" {
 		endLabel = fmt.Sprintf("P%d", conn.PinNumber)
 	}
+	tp.traceEndVia = nil
+	tp.traceEndConn = conn
 	tp.finishTraceCommon(endLabel)
 
+	tp.associateTraceEndpoints()
+
 	startLabel := tp.traceStartLabel()
+	net := tp.state.FeaturesLayer.GetNetForElement(conn.ID)
+	netInfo := ""
+	if net != nil {
+		netInfo = fmt.Sprintf(" [%s]", net.Name)
+	}
 	nSegs := len(tp.tracePoints) - 1
-	tp.traceStatusLabel.SetText(fmt.Sprintf("Trace: %s -> %s (%d segments)",
-		startLabel, endLabel, nSegs))
+	tp.traceStatusLabel.SetText(fmt.Sprintf("Trace: %s -> %s (%d segments)%s",
+		startLabel, endLabel, nSegs, netInfo))
 	tp.traceStartVia = nil
 	tp.traceStartConn = nil
+	tp.traceEndVia = nil
+	tp.traceEndConn = nil
 }
 
 // hitTestVertex checks all completed trace vertices for a hit near (x, y).
@@ -1797,4 +1920,98 @@ func (tp *TracesPanel) cancelVertexDrag() {
 	tp.canvas.OnMouseMove(nil)
 	tp.canvas.Refresh()
 	tp.traceStatusLabel.SetText("Vertex drag cancelled")
+}
+
+// onHover handles mouse hover to display netlist membership when over a trace, via, or connector.
+func (tp *TracesPanel) onHover(x, y float64) {
+	// Don't update hover info during active operations
+	if tp.traceMode || tp.draggingVertex {
+		return
+	}
+
+	// Hit-test confirmed via
+	if cv := tp.state.FeaturesLayer.HitTestConfirmedVia(x, y); cv != nil {
+		tp.showNetInfoForElement(cv.ID, cv.ID)
+		return
+	}
+
+	// Hit-test connector
+	if conn := tp.state.FeaturesLayer.HitTestConnector(x, y); conn != nil {
+		label := conn.SignalName
+		if label == "" {
+			label = fmt.Sprintf("P%d", conn.PinNumber)
+		}
+		tp.showNetInfoForElement(conn.ID, label)
+		return
+	}
+
+	// Hit-test trace segment
+	if hit := tp.hitTestTraceSegment(x, y); hit != nil {
+		tp.showNetInfoForElement(hit.traceID, hit.traceID)
+		return
+	}
+
+	// Hit-test trace vertex
+	if traceID, _, ok := tp.hitTestVertex(x, y); ok {
+		tp.showNetInfoForElement(traceID, traceID)
+		return
+	}
+
+	// Nothing hovered — clear if we were showing hover info
+	if tp.hoverNetID != "" {
+		tp.hoverNetID = ""
+		tp.traceStatusLabel.SetText("Click via/connector to start trace")
+	}
+}
+
+// showNetInfoForElement displays the netlist membership for the given element.
+func (tp *TracesPanel) showNetInfoForElement(elementID, displayLabel string) {
+	net := tp.state.FeaturesLayer.GetNetForElement(elementID)
+	if net == nil {
+		if tp.hoverNetID != "" {
+			tp.hoverNetID = ""
+		}
+		tp.traceStatusLabel.SetText(fmt.Sprintf("%s (no net)", displayLabel))
+		return
+	}
+
+	// Avoid redundant updates
+	if tp.hoverNetID == net.ID {
+		return
+	}
+	tp.hoverNetID = net.ID
+
+	// Build membership list
+	parts := []string{fmt.Sprintf("Net: %s", net.Name)}
+
+	for _, vid := range net.ViaIDs {
+		label := vid
+		cv := tp.state.FeaturesLayer.GetConfirmedViaByID(vid)
+		if cv != nil && cv.ComponentID != "" && cv.PinNumber != "" {
+			label = fmt.Sprintf("%s (%s.%s)", vid, cv.ComponentID, cv.PinNumber)
+		}
+		parts = append(parts, "  via: "+label)
+	}
+	for _, cid := range net.ConnectorIDs {
+		label := cid
+		conn := tp.state.FeaturesLayer.GetConnectorByID(cid)
+		if conn != nil && conn.SignalName != "" {
+			label = fmt.Sprintf("%s (%s)", cid, conn.SignalName)
+		}
+		parts = append(parts, "  conn: "+label)
+	}
+
+	var info string
+	if len(parts) <= 6 {
+		info = ""
+		for i, p := range parts {
+			if i > 0 {
+				info += "\n"
+			}
+			info += p
+		}
+	} else {
+		info = fmt.Sprintf("%s (%d vias, %d connectors)", parts[0], len(net.ViaIDs), len(net.ConnectorIDs))
+	}
+	tp.traceStatusLabel.SetText(info)
 }

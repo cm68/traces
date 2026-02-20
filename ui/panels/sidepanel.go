@@ -8,6 +8,7 @@ import (
 	"pcb-tracer/internal/app"
 	pcbimage "pcb-tracer/internal/image"
 	"pcb-tracer/ui/canvas"
+	"pcb-tracer/ui/prefs"
 
 	"github.com/gotk3/gotk3/gdk"
 	"github.com/gotk3/gotk3/gtk"
@@ -44,7 +45,7 @@ type SidePanel struct {
 }
 
 // NewSidePanel creates a new side panel.
-func NewSidePanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window) *SidePanel {
+func NewSidePanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, p *prefs.Prefs) *SidePanel {
 	sp := &SidePanel{
 		state:          state,
 		canvas:         cvs,
@@ -67,7 +68,7 @@ func NewSidePanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window) *S
 	stack.AddNamed(sp.componentsPanel.Widget(), PanelComponents)
 
 	// Create traces panel
-	sp.tracesPanel = NewTracesPanel(state, cvs, win)
+	sp.tracesPanel = NewTracesPanel(state, cvs, win, p)
 	stack.AddNamed(sp.tracesPanel.Widget(), PanelTraces)
 
 	// Create property sheet
@@ -124,6 +125,7 @@ func (sp *SidePanel) ShowPanel(name string) {
 	// Set up appropriate click/key handlers based on active panel
 	switch name {
 	case PanelComponents:
+		sp.canvas.OnHover(nil)
 		sp.canvas.OnMiddleClick(sp.componentsPanel.OnMiddleClickFloodFill)
 		sp.canvas.OnLeftClick(func(x, y float64) { sp.componentsPanel.OnLeftClick(x, y) })
 		sp.canvas.OnRightClick(func(x, y float64) { sp.componentsPanel.onRightClickDeleteComponent(x, y) })
@@ -131,11 +133,14 @@ func (sp *SidePanel) ShowPanel(name string) {
 		sp.canvas.OnMiddleClick(nil)
 		sp.canvas.OnLeftClick(func(x, y float64) { sp.tracesPanel.onLeftClick(x, y) })
 		sp.canvas.OnRightClick(func(x, y float64) { sp.tracesPanel.onRightClickVia(x, y) })
+		sp.canvas.OnHover(func(x, y float64) { sp.tracesPanel.onHover(x, y) })
 	case PanelLogos:
+		sp.canvas.OnHover(nil)
 		sp.canvas.OnMiddleClick(func(x, y float64) { sp.logosPanel.OnMiddleClick(x, y) })
 		sp.canvas.OnLeftClick(nil)
 		sp.canvas.OnRightClick(nil)
 	default:
+		sp.canvas.OnHover(nil)
 		sp.canvas.OnMiddleClick(nil)
 		sp.canvas.OnLeftClick(nil)
 		sp.canvas.OnRightClick(nil)

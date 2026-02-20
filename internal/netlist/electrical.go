@@ -2,12 +2,40 @@ package netlist
 
 import (
 	"fmt"
+	"regexp"
+	"strings"
 
 	"pcb-tracer/internal/connector"
 	"pcb-tracer/internal/trace"
 	"pcb-tracer/internal/via"
 	"pcb-tracer/pkg/geometry"
 )
+
+// autoNetRe matches auto-generated net names like "net-001", "net-042".
+var autoNetRe = regexp.MustCompile(`^net-\d+$`)
+
+// netNamePriority returns a priority score for a net name.
+// Higher is better: 0=auto-generated, 1=component pin, 2=signal/user name.
+func netNamePriority(name string) int {
+	if autoNetRe.MatchString(name) {
+		return 0
+	}
+	if strings.Contains(name, ".") {
+		return 1 // component pin name like "B13.1"
+	}
+	return 2 // signal name or user-assigned name
+}
+
+// BetterNetName returns the higher-priority name between a and b.
+// Priority: signal/user names > component pin names > auto-generated "net-NNN".
+func BetterNetName(a, b string) string {
+	pa := netNamePriority(a)
+	pb := netNamePriority(b)
+	if pa >= pb {
+		return a
+	}
+	return b
+}
 
 // NetElementType identifies what kind of element is in the net.
 type NetElementType int

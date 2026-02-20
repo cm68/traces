@@ -1426,32 +1426,24 @@ func (s *State) CreateConnectorsFromAlignment() {
 
 	// Create front connectors
 	if s.FrontDetectionResult != nil {
-		fmt.Printf("[Connectors] Front contacts: %d total\n", len(s.FrontDetectionResult.Contacts))
 		for i, contact := range s.FrontDetectionResult.Contacts {
 			pin := bd.GetPinByPosition(i, true)
 			if pin != nil {
 				c := connector.NewConnectorFromContact(i, image.SideFront, &contact, pin.PinNumber)
 				c.SignalName = pin.SignalName
 				s.FeaturesLayer.AddConnector(c)
-				if i < 3 || i >= len(s.FrontDetectionResult.Contacts)-3 {
-					fmt.Printf("[Connectors] Front[%d] X=%.0f → pin %d (%s)\n", i, contact.Center.X, pin.PinNumber, pin.SignalName)
-				}
 			}
 		}
 	}
 
 	// Create back connectors
 	if s.BackDetectionResult != nil {
-		fmt.Printf("[Connectors] Back contacts: %d total\n", len(s.BackDetectionResult.Contacts))
 		for i, contact := range s.BackDetectionResult.Contacts {
 			pin := bd.GetPinByPosition(i, false)
 			if pin != nil {
 				c := connector.NewConnectorFromContact(i, image.SideBack, &contact, pin.PinNumber)
 				c.SignalName = pin.SignalName
 				s.FeaturesLayer.AddConnector(c)
-				if i < 3 || i >= len(s.BackDetectionResult.Contacts)-3 {
-					fmt.Printf("[Connectors] Back[%d] X=%.0f → pin %d (%s)\n", i, contact.Center.X, pin.PinNumber, pin.SignalName)
-				}
 			}
 		}
 	}

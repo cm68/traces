@@ -6,11 +6,11 @@ func S100Definition() *BoardDefinition {
 	bd := NewBoardDefinition("S-100 (IEEE 696)", 100)
 
 	// Component side (front): pins 1-50
-	// Pin 1 is at the left edge when viewing the component side
+	// Pin 1 is at the right edge when viewing the component side
 	addS100FrontPins(bd)
 
 	// Solder side (back): pins 51-100
-	// Pin 51 is at the right edge when viewing the solder side (mirrors front)
+	// Pin 51 is at the right edge when viewing the solder side (behind pin 1)
 	addS100BackPins(bd)
 
 	return bd

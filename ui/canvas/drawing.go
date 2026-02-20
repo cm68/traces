@@ -160,11 +160,15 @@ func (ic *ImageCanvas) drawOverlay(output *image.RGBA, overlay *Overlay) {
 			}
 		}
 
-		// Draw label if present
+		// Accumulate label for Cairo rendering
 		if rect.Label != "" {
 			centerX := (x1 + x2) / 2
 			centerY := (y1 + y2) / 2
-			ic.drawOverlayLabel(output, rect.Label, centerX, centerY)
+			ic.pendingLabels = append(ic.pendingLabels, pendingLabel{
+				text: rect.Label, x: centerX, y: centerY,
+				rotated: rect.LabelRotated, col: colorutil.Black,
+				boundW: x2 - x1, boundH: y2 - y1,
+			})
 		}
 	}
 
@@ -173,12 +177,20 @@ func (ic *ImageCanvas) drawOverlay(output *image.RGBA, overlay *Overlay) {
 		if len(poly.Points) < 3 {
 			continue
 		}
-		ic.drawPolygon(output, poly, col, offsetX, offsetY)
+		polyCol := col
+		if poly.Color != nil {
+			polyCol = *poly.Color
+		}
+		ic.drawPolygon(output, poly, polyCol, offsetX, offsetY)
 	}
 
 	// Draw circles
 	for _, circle := range overlay.Circles {
-		ic.drawCircle(output, circle, col, offsetX, offsetY)
+		circleCol := col
+		if circle.Color != nil {
+			circleCol = *circle.Color
+		}
+		ic.drawCircle(output, circle, circleCol, offsetX, offsetY)
 	}
 
 	// Draw lines
@@ -191,7 +203,11 @@ func (ic *ImageCanvas) drawOverlay(output *image.RGBA, overlay *Overlay) {
 		if thickness <= 0 {
 			thickness = 2
 		}
-		ic.drawLine(output, x1, y1, x2, y2, col, thickness)
+		lineCol := col
+		if line.Color != nil {
+			lineCol = *line.Color
+		}
+		ic.drawLine(output, x1, y1, x2, y2, lineCol, thickness)
 	}
 }
 
@@ -323,10 +339,13 @@ func (ic *ImageCanvas) drawPolygon(output *image.RGBA, poly OverlayPolygon, col 
 		ic.drawLine(output, int(p1.X), int(p1.Y), int(p2.X), int(p2.Y), col, thickness)
 	}
 
-	// Draw label if present
+	// Accumulate label for Cairo rendering
 	if poly.Label != "" {
 		center := geometry.Centroid(scaledPoints)
-		ic.drawOverlayLabel(output, poly.Label, int(center.X), int(center.Y))
+		ic.pendingLabels = append(ic.pendingLabels, pendingLabel{
+			text: poly.Label, x: int(center.X), y: int(center.Y),
+			col: colorutil.Black,
+		})
 	}
 }
 
@@ -527,7 +546,7 @@ func (ic *ImageCanvas) drawLabel(output *image.RGBA, label string, x1, y1, x2, y
 		scale = 6
 	}
 
-	// Calculate total width of label (3 pixels per digit + 1 pixel spacing)
+	// Calculate total width of label (3 pixels per char + 1 pixel spacing)
 	charWidth := 3 * scale
 	charHeight := 5 * scale
 	spacing := scale
@@ -545,15 +564,11 @@ func (ic *ImageCanvas) drawLabel(output *image.RGBA, label string, x1, y1, x2, y
 
 	// Draw each character
 	for i, ch := range label {
-		if ch < '0' || ch > '9' {
-			continue
-		}
-		digit := int(ch - '0')
-		pattern := digitPatterns[digit]
+		pattern := getCharPattern(ch)
 
 		charX := startX + i*(charWidth+spacing)
 
-		// Draw the digit pattern
+		// Draw the character pattern
 		for row := 0; row < 5; row++ {
 			for c := 0; c < 3; c++ {
 				if (pattern[row] & (1 << (2 - c))) != 0 {

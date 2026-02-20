@@ -25,12 +25,11 @@ import (
 	"github.com/gotk3/gotk3/gtk"
 )
 
-// Overlay name constants for via and connector overlays.
+// Overlay names for persistent board features, split by visibility.
 const (
-	OverlayFrontVias     = "front_vias"
-	OverlayBackVias      = "back_vias"
-	OverlayConfirmedVias = "confirmed_vias"
-	OverlayConnectors    = "connectors"
+	OverlayFeaturesFront = "features_front" // Front-side connectors + traces (visible when front raised)
+	OverlayFeaturesBack  = "features_back"  // Back-side connectors + traces (visible when back raised)
+	OverlayFeaturesVias  = "features_vias"  // Confirmed + detected vias (always visible)
 )
 
 // TracesPanel displays and manages detected vias and traces.
@@ -56,13 +55,25 @@ type TracesPanel struct {
 	traceStatusLabel *gtk.Label
 
 	// Trace drawing state (polyline mode)
-	traceMode     bool
-	traceStartVia *via.ConfirmedVia
-	tracePoints   []geometry.Point2D
-	traceLayer    pcbtrace.TraceLayer
+	traceMode          bool
+	traceStartVia      *via.ConfirmedVia
+	traceStartConn     *connector.Connector
+	tracePoints        []geometry.Point2D
+	traceLayer         pcbtrace.TraceLayer
+
+	// Vertex drag state
+	draggingVertex bool
+	dragTraceID    string
+	dragPointIndex int
 
 	// Selected via for arrow-key nudging
 	selectedVia *via.ConfirmedVia
+
+	// Selected connector for arrow-key nudging
+	selectedConnector *connector.Connector
+
+	// Add connectors button
+	addConnectorsBtn *gtk.Button
 
 	// Default via radius for manual addition
 	defaultViaRadius float64
@@ -128,6 +139,10 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window) 
 	tp.matchViasBtn.Connect("clicked", func() { tp.tryMatchVias() })
 	viaBox.PackStart(tp.matchViasBtn, false, false, 0)
 
+	tp.addConnectorsBtn, _ = gtk.ButtonNewWithLabel("Add Connectors")
+	tp.addConnectorsBtn.Connect("clicked", func() { tp.onAddConnectors() })
+	viaBox.PackStart(tp.addConnectorsBtn, false, false, 0)
+
 	tp.viaStatusLabel, _ = gtk.LabelNew("")
 	tp.viaStatusLabel.SetLineWrap(true)
 	tp.viaStatusLabel.SetHAlign(gtk.ALIGN_START)
@@ -150,9 +165,9 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window) 
 
 	helpTexts := []string{
 		"Cyan=front  Magenta=back  Blue=both",
-		"Left-click: select via  Right-click: menu",
-		"Arrow keys: nudge selected via",
-		"Middle-click: draw trace between vias",
+		"Click via/conn: start trace  Click empty: add via",
+		"While drawing: click waypoints, end on via/conn",
+		"Right-click: menu  Arrow keys: nudge selected via",
 	}
 	for _, t := range helpTexts {
 		lbl, _ := gtk.LabelNew(t)
@@ -174,17 +189,20 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window) 
 	tp.detectTracesBtn, _ = gtk.ButtonNewWithLabel("Clear Traces")
 	tp.detectTracesBtn.Connect("clicked", func() {
 		tp.canvas.ClearOverlay("trace_segments")
+		tp.canvas.ClearOverlay("vertex_drag")
 		tp.canvas.HideRubberBand()
 		tp.traceMode = false
 		tp.traceStartVia = nil
+		tp.traceStartConn = nil
 		tp.tracePoints = nil
+		tp.draggingVertex = false
 		tp.canvas.OnMouseMove(nil)
 		tp.traceStatusLabel.SetText("Cleared")
 		tp.canvas.Refresh()
 	})
 	traceBox.PackStart(tp.detectTracesBtn, false, false, 0)
 
-	tp.traceStatusLabel, _ = gtk.LabelNew("Click a via twice to start trace")
+	tp.traceStatusLabel, _ = gtk.LabelNew("Click via/connector to start trace")
 	tp.traceStatusLabel.SetLineWrap(true)
 	tp.traceStatusLabel.SetHAlign(gtk.ALIGN_START)
 	traceBox.PackStart(tp.traceStatusLabel, false, false, 0)
@@ -196,11 +214,14 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window) 
 	tp.loadTrainingSet()
 	tp.updateTrainingLabel()
 
+	// Redraw features overlay when connectors are created/rebuilt
+	state.On(app.EventConnectorsCreated, func(_ interface{}) {
+		tp.rebuildFeaturesOverlay()
+	})
+
 	// Auto-match vias when alignment completes
 	state.On(app.EventAlignmentComplete, func(data interface{}) {
-		tp.state.CreateConnectorsFromAlignment()
-		connCount := tp.state.FeaturesLayer.ConnectorCount()
-		fmt.Printf("Created %d connectors from alignment contacts\n", connCount)
+		tp.refreshConnectors()
 
 		frontVias := tp.state.FeaturesLayer.GetViasBySide(pcbimage.SideFront)
 		backVias := tp.state.FeaturesLayer.GetViasBySide(pcbimage.SideBack)
@@ -210,10 +231,10 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window) 
 		}
 	})
 
-	// Restore via overlays on project load
+	// Restore overlays on project load
 	state.On(app.EventProjectLoaded, func(_ interface{}) {
 		glib.IdleAdd(func() {
-			tp.refreshAllViaOverlays()
+			tp.rebuildFeaturesOverlay()
 			front, back := tp.state.FeaturesLayer.ViaCountBySide()
 			if front+back > 0 {
 				tp.viaCountLabel.SetText(fmt.Sprintf("Vias: %d front, %d back", front, back))
@@ -246,46 +267,113 @@ func (tp *TracesPanel) SetEnabled(enabled bool) {
 	tp.detectViasBtn.SetSensitive(enabled)
 	tp.clearViasBtn.SetSensitive(enabled)
 	tp.matchViasBtn.SetSensitive(enabled)
+	tp.addConnectorsBtn.SetSensitive(enabled)
 	tp.detectTracesBtn.SetSensitive(enabled)
 }
 
-// OnKeyPressed handles keyboard input for arrow-key via nudging.
+// OnKeyPressed handles keyboard input for arrow-key via nudging and Escape cancellation.
 // Called from the window-level key-press-event.
 func (tp *TracesPanel) OnKeyPressed(ev *gdk.EventKey) bool {
-	if tp.selectedVia == nil {
-		return false
-	}
-
-	step := 1.0
-	if ev.State()&uint(gdk.SHIFT_MASK) != 0 {
-		step = 5.0
-	}
-
-	cv := tp.selectedVia
 	keyval := ev.KeyVal()
-	switch keyval {
-	case gdk.KEY_Up:
-		cv.Center.Y -= step
-	case gdk.KEY_Down:
-		cv.Center.Y += step
-	case gdk.KEY_Left:
-		cv.Center.X -= step
-	case gdk.KEY_Right:
-		cv.Center.X += step
-	case gdk.KEY_Escape:
-		tp.deselectVia()
-		return true
-	default:
+
+	// Escape cancels active operations
+	if keyval == gdk.KEY_Escape {
+		if tp.draggingVertex {
+			tp.cancelVertexDrag()
+			return true
+		}
+		if tp.traceMode {
+			tp.cancelTrace()
+			return true
+		}
+		if tp.selectedVia != nil {
+			tp.deselectVia()
+			return true
+		}
+		if tp.selectedConnector != nil {
+			tp.deselectConnector()
+			return true
+		}
 		return false
 	}
 
-	cv.IntersectionBoundary = geometry.GenerateCirclePoints(cv.Center.X, cv.Center.Y, cv.Radius, 32)
-	tp.refreshConfirmedViaOverlay()
-	tp.updateSelectedViaOverlay()
+	// Arrow-key nudging for selected via
+	if tp.selectedVia != nil {
+		step := 1.0
+		if ev.State()&uint(gdk.SHIFT_MASK) != 0 {
+			step = 5.0
+		}
+
+		cv := tp.selectedVia
+		switch keyval {
+		case gdk.KEY_Up:
+			cv.Center.Y -= step
+		case gdk.KEY_Down:
+			cv.Center.Y += step
+		case gdk.KEY_Left:
+			cv.Center.X -= step
+		case gdk.KEY_Right:
+			cv.Center.X += step
+		default:
+			return false
+		}
+
+		cv.IntersectionBoundary = geometry.GenerateCirclePoints(cv.Center.X, cv.Center.Y, cv.Radius, 32)
+		tp.rebuildFeaturesOverlay()
+		tp.updateSelectedViaOverlay()
+		tp.canvas.Refresh()
+		tp.viaStatusLabel.SetText(fmt.Sprintf("%s center: (%.0f, %.0f)", cv.ID, cv.Center.X, cv.Center.Y))
+		tp.state.Emit(app.EventConfirmedViasChanged, nil)
+		return true
+	}
+
+	// Arrow-key nudging for selected connector
+	if tp.selectedConnector != nil {
+		step := 1.0
+		if ev.State()&uint(gdk.SHIFT_MASK) != 0 {
+			step = 5.0
+		}
+
+		conn := tp.selectedConnector
+		switch keyval {
+		case gdk.KEY_Up:
+			conn.Center.Y -= step
+			conn.Bounds.Y -= int(step)
+		case gdk.KEY_Down:
+			conn.Center.Y += step
+			conn.Bounds.Y += int(step)
+		case gdk.KEY_Left:
+			conn.Center.X -= step
+			conn.Bounds.X -= int(step)
+		case gdk.KEY_Right:
+			conn.Center.X += step
+			conn.Bounds.X += int(step)
+		default:
+			return false
+		}
+
+		tp.rebuildFeaturesOverlay()
+		tp.updateSelectedConnectorOverlay()
+		tp.canvas.Refresh()
+		tp.viaStatusLabel.SetText(fmt.Sprintf("%s center: (%.0f, %.0f)", conn.ID, conn.Center.X, conn.Center.Y))
+		tp.state.Emit(app.EventConnectorsChanged, nil)
+		return true
+	}
+
+	return false
+}
+
+// cancelTrace cancels the in-progress trace drawing.
+func (tp *TracesPanel) cancelTrace() {
+	tp.canvas.HideRubberBand()
+	tp.canvas.ClearOverlay("trace_segments")
+	tp.canvas.OnMouseMove(nil)
+	tp.traceMode = false
+	tp.traceStartVia = nil
+	tp.traceStartConn = nil
+	tp.tracePoints = nil
+	tp.traceStatusLabel.SetText("Trace cancelled")
 	tp.canvas.Refresh()
-	tp.viaStatusLabel.SetText(fmt.Sprintf("%s center: (%.0f, %.0f)", cv.ID, cv.Center.X, cv.Center.Y))
-	tp.state.Emit(app.EventConfirmedViasChanged, nil)
-	return true
 }
 
 // onDetectVias runs via detection on the selected layer.
@@ -390,7 +478,7 @@ func (tp *TracesPanel) onDetectVias() {
 		}
 
 		glib.IdleAdd(func() {
-			tp.createViaOverlay(result.Vias, side, false)
+			tp.rebuildFeaturesOverlay()
 			front, back := tp.state.FeaturesLayer.ViaCountBySide()
 			tp.viaCountLabel.SetText(fmt.Sprintf("Vias: %d front, %d back", front, back))
 			tp.viaStatusLabel.SetText(fmt.Sprintf("%s: %d vias (%d Hough, %d contour)",
@@ -400,55 +488,141 @@ func (tp *TracesPanel) onDetectVias() {
 	}()
 }
 
-// createViaOverlay creates a canvas overlay to visualize detected vias.
-func (tp *TracesPanel) createViaOverlay(vias []via.Via, side pcbimage.Side, skipMatched bool) {
-	fmt.Printf("  createViaOverlay: %d vias for side=%v skipMatched=%v\n", len(vias), side, skipMatched)
-	var overlayName string
-	var overlayColor color.RGBA
+// rebuildFeaturesOverlay rebuilds the three feature overlays from all model data.
+// Front/back overlays track their respective image layers for visibility;
+// the vias overlay is always visible (vias penetrate both sides).
+func (tp *TracesPanel) rebuildFeaturesOverlay() {
+	// Clear import panel diagnostic overlays so they don't cover features
+	tp.canvas.ClearOverlay("front_contacts")
+	tp.canvas.ClearOverlay("back_contacts")
 
-	if side == pcbimage.SideFront {
-		overlayName = OverlayFrontVias
-		overlayColor = colorutil.Cyan
-	} else {
-		overlayName = OverlayBackVias
-		overlayColor = colorutil.Magenta
-	}
+	frontOverlay := &canvas.Overlay{Layer: canvas.LayerFront}
+	backOverlay := &canvas.Overlay{Layer: canvas.LayerBack}
+	viasOverlay := &canvas.Overlay{}
 
-	overlay := &canvas.Overlay{
-		Color:      overlayColor,
-		Rectangles: make([]canvas.OverlayRect, 0),
-		Polygons:   make([]canvas.OverlayPolygon, 0),
-	}
+	cyan := &colorutil.Cyan
+	magenta := &colorutil.Magenta
+	blue := &colorutil.Blue
+	green := &color.RGBA{R: 0, G: 255, B: 0, A: 255}
 
-	for _, v := range vias {
-		if skipMatched && v.BothSidesConfirmed {
-			continue
+	// 1. Connectors: split by side
+	for _, c := range tp.state.FeaturesLayer.GetConnectors() {
+		label := c.SignalName
+		if label == "" {
+			label = fmt.Sprintf("P%d", c.PinNumber)
 		}
-		if len(v.PadBoundary) >= 3 {
-			overlay.Polygons = append(overlay.Polygons, canvas.OverlayPolygon{
-				Points: v.PadBoundary,
-				Filled: false,
+		var col *color.RGBA
+		var target *canvas.Overlay
+		if c.Side == pcbimage.SideFront {
+			col = cyan
+			target = frontOverlay
+		} else {
+			col = magenta
+			target = backOverlay
+		}
+		target.Rectangles = append(target.Rectangles, canvas.OverlayRect{
+			X: c.Bounds.X, Y: c.Bounds.Y, Width: c.Bounds.Width, Height: c.Bounds.Height,
+			Fill:         canvas.FillSolid,
+			Label:        label,
+			LabelRotated: true,
+			Color:        col,
+		})
+	}
+
+	// 2. Confirmed vias: blue, filled, labeled — always visible
+	for _, cv := range tp.state.FeaturesLayer.GetConfirmedVias() {
+		label := cv.ID
+		var viaNum int
+		if _, err := fmt.Sscanf(cv.ID, "cvia-%d", &viaNum); err == nil {
+			label = fmt.Sprintf("%d", viaNum)
+		}
+		if len(cv.IntersectionBoundary) >= 3 {
+			viasOverlay.Polygons = append(viasOverlay.Polygons, canvas.OverlayPolygon{
+				Points: cv.IntersectionBoundary,
+				Label:  label,
+				Filled: true,
+				Color:  blue,
 			})
 		} else {
-			bounds := v.Bounds()
-			overlay.Rectangles = append(overlay.Rectangles, canvas.OverlayRect{
+			bounds := cv.Bounds()
+			viasOverlay.Rectangles = append(viasOverlay.Rectangles, canvas.OverlayRect{
 				X: bounds.X, Y: bounds.Y, Width: bounds.Width, Height: bounds.Height,
-				Fill: canvas.FillNone,
+				Fill: canvas.FillSolid, Label: label,
+				Color: blue,
 			})
 		}
 	}
 
-	fmt.Printf("  Setting overlay '%s': %d rects, %d polygons\n", overlayName, len(overlay.Rectangles), len(overlay.Polygons))
-	tp.canvas.SetOverlay(overlayName, overlay)
+	// 3. Detected vias: cyan (front) / magenta (back) outline — always visible
+	skipMatched := tp.state.FeaturesLayer.ConfirmedViaCount() > 0
+	for _, side := range []pcbimage.Side{pcbimage.SideFront, pcbimage.SideBack} {
+		var col *color.RGBA
+		if side == pcbimage.SideFront {
+			col = cyan
+		} else {
+			col = magenta
+		}
+		for _, v := range tp.state.FeaturesLayer.GetViasBySide(side) {
+			if skipMatched && v.BothSidesConfirmed {
+				continue
+			}
+			if len(v.PadBoundary) >= 3 {
+				viasOverlay.Polygons = append(viasOverlay.Polygons, canvas.OverlayPolygon{
+					Points: v.PadBoundary,
+					Filled: false,
+					Color:  col,
+				})
+			} else {
+				bounds := v.Bounds()
+				viasOverlay.Rectangles = append(viasOverlay.Rectangles, canvas.OverlayRect{
+					X: bounds.X, Y: bounds.Y, Width: bounds.Width, Height: bounds.Height,
+					Fill:  canvas.FillNone,
+					Color: col,
+				})
+			}
+		}
+	}
+
+	// 4. Completed traces: split by layer
+	for _, tid := range tp.state.FeaturesLayer.GetTraces() {
+		tf := tp.state.FeaturesLayer.GetTraceFeature(tid)
+		if tf == nil || len(tf.Points) < 2 {
+			continue
+		}
+		var target *canvas.Overlay
+		if tf.Layer == pcbtrace.LayerBack {
+			target = backOverlay
+		} else {
+			target = frontOverlay
+		}
+		for i := 1; i < len(tf.Points); i++ {
+			target.Lines = append(target.Lines, canvas.OverlayLine{
+				X1: tf.Points[i-1].X, Y1: tf.Points[i-1].Y,
+				X2: tf.Points[i].X, Y2: tf.Points[i].Y,
+				Thickness: 1,
+				Color:     green,
+			})
+		}
+		if len(tf.Points) > 2 {
+			for _, pt := range tf.Points[1 : len(tf.Points)-1] {
+				target.Circles = append(target.Circles, canvas.OverlayCircle{
+					X: pt.X, Y: pt.Y, Radius: 2, Filled: true,
+					Color: green,
+				})
+			}
+		}
+	}
+
+	tp.canvas.SetOverlay(OverlayFeaturesFront, frontOverlay)
+	tp.canvas.SetOverlay(OverlayFeaturesBack, backOverlay)
+	tp.canvas.SetOverlay(OverlayFeaturesVias, viasOverlay)
 }
 
 // onClearVias clears all detected vias.
 func (tp *TracesPanel) onClearVias() {
 	tp.state.FeaturesLayer.ClearVias()
 	tp.state.FeaturesLayer.ClearConfirmedVias()
-	tp.canvas.ClearOverlay(OverlayFrontVias)
-	tp.canvas.ClearOverlay(OverlayBackVias)
-	tp.canvas.ClearOverlay(OverlayConfirmedVias)
+	tp.rebuildFeaturesOverlay()
 	tp.viaCountLabel.SetText("No vias detected")
 	tp.confirmedCountLabel.SetText("Confirmed: 0")
 	tp.viaStatusLabel.SetText("Cleared")
@@ -481,46 +655,130 @@ func (tp *TracesPanel) updateTrainingLabel() {
 	tp.trainingLabel.SetText(fmt.Sprintf("Training: %d pos, %d neg", pos, neg))
 }
 
-// onLeftClick handles left-click for polyline trace drawing and via selection.
+// onLeftClick handles left-click for polyline trace drawing, vertex dragging, and via/connector interaction.
 func (tp *TracesPanel) onLeftClick(x, y float64) {
-	if tp.traceMode {
-		cv := tp.state.FeaturesLayer.HitTestConfirmedVia(x, y)
-		if cv != nil && cv.ID != tp.traceStartVia.ID {
-			tp.tracePoints = append(tp.tracePoints, cv.Center)
-			tp.finishTrace(cv)
-			return
-		}
-		tp.tracePoints = append(tp.tracePoints, geometry.Point2D{X: x, Y: y})
-		tp.canvas.ShowRubberBand(x, y)
-		tp.updateTraceOverlay()
-		tp.traceStatusLabel.SetText(fmt.Sprintf("Trace from %s — %d segments — click waypoints, end on a via",
-			tp.traceStartVia.ID, len(tp.tracePoints)-1))
+	// If dragging a vertex, place it
+	if tp.draggingVertex {
+		tp.finishVertexDrag(x, y)
 		return
 	}
 
+	// If in trace drawing mode
+	if tp.traceMode {
+		// Hit-test confirmed via (not the start via) → finish trace
+		cv := tp.state.FeaturesLayer.HitTestConfirmedVia(x, y)
+		if cv != nil {
+			startID := ""
+			if tp.traceStartVia != nil {
+				startID = tp.traceStartVia.ID
+			}
+			if cv.ID != startID {
+				tp.tracePoints = append(tp.tracePoints, cv.Center)
+				tp.finishTraceAtVia(cv)
+				return
+			}
+		}
+
+		// Hit-test connector → finish trace at connector center
+		conn := tp.state.FeaturesLayer.HitTestConnector(x, y)
+		if conn != nil {
+			startConnID := ""
+			if tp.traceStartConn != nil {
+				startConnID = tp.traceStartConn.ID
+			}
+			if conn.ID != startConnID {
+				tp.tracePoints = append(tp.tracePoints, conn.Center)
+				tp.finishTraceAtConnector(conn)
+				return
+			}
+		}
+
+		// Otherwise add waypoint
+		tp.tracePoints = append(tp.tracePoints, geometry.Point2D{X: x, Y: y})
+		tp.canvas.ShowRubberBand(x, y)
+		tp.updateTraceOverlay()
+		startLabel := tp.traceStartLabel()
+		tp.traceStatusLabel.SetText(fmt.Sprintf("Trace from %s — %d segments — click waypoints, end on via/connector",
+			startLabel, len(tp.tracePoints)-1))
+		return
+	}
+
+	// Not drawing — hit-test existing vertex on completed traces for drag
+	if traceID, pointIdx, ok := tp.hitTestVertex(x, y); ok {
+		tp.startVertexDrag(traceID, pointIdx)
+		return
+	}
+
+	// Hit-test confirmed via → start trace
 	cv := tp.state.FeaturesLayer.HitTestConfirmedVia(x, y)
 	if cv != nil {
-		if tp.selectedVia != nil && tp.selectedVia.ID == cv.ID {
-			tp.traceMode = true
-			tp.traceStartVia = cv
-			tp.tracePoints = []geometry.Point2D{cv.Center}
-			if tp.selectedLayer() == "Front" {
-				tp.traceLayer = pcbtrace.LayerFront
-			} else {
-				tp.traceLayer = pcbtrace.LayerBack
-			}
-			tp.setupTraceRubberBand()
-			tp.traceStatusLabel.SetText(fmt.Sprintf("Trace from %s — click waypoints, end on a via", cv.ID))
-			return
-		}
-		tp.selectVia(cv)
-	} else {
-		tp.deselectVia()
+		tp.startTraceFromVia(cv)
+		return
 	}
+
+	// Hit-test connector → start trace
+	conn := tp.state.FeaturesLayer.HitTestConnector(x, y)
+	if conn != nil {
+		tp.startTraceFromConnector(conn)
+		return
+	}
+
+	// Empty space → add confirmed via
+	tp.addConfirmedViaAt(x, y)
+}
+
+// traceStartLabel returns a display label for the trace start point.
+func (tp *TracesPanel) traceStartLabel() string {
+	if tp.traceStartVia != nil {
+		return tp.traceStartVia.ID
+	}
+	if tp.traceStartConn != nil {
+		name := tp.traceStartConn.SignalName
+		if name == "" {
+			name = fmt.Sprintf("P%d", tp.traceStartConn.PinNumber)
+		}
+		return name
+	}
+	return "?"
+}
+
+// startTraceFromVia enters trace drawing mode starting from a confirmed via.
+func (tp *TracesPanel) startTraceFromVia(cv *via.ConfirmedVia) {
+	tp.traceMode = true
+	tp.traceStartVia = cv
+	tp.traceStartConn = nil
+	tp.tracePoints = []geometry.Point2D{cv.Center}
+	if tp.selectedLayer() == "Front" {
+		tp.traceLayer = pcbtrace.LayerFront
+	} else {
+		tp.traceLayer = pcbtrace.LayerBack
+	}
+	tp.setupTraceRubberBand()
+	tp.traceStatusLabel.SetText(fmt.Sprintf("Trace from %s — click waypoints, end on via/connector", cv.ID))
+}
+
+// startTraceFromConnector enters trace drawing mode starting from a connector.
+func (tp *TracesPanel) startTraceFromConnector(conn *connector.Connector) {
+	tp.traceMode = true
+	tp.traceStartVia = nil
+	tp.traceStartConn = conn
+	tp.tracePoints = []geometry.Point2D{conn.Center}
+	if tp.selectedLayer() == "Front" {
+		tp.traceLayer = pcbtrace.LayerFront
+	} else {
+		tp.traceLayer = pcbtrace.LayerBack
+	}
+	tp.setupTraceRubberBand()
+	name := conn.SignalName
+	if name == "" {
+		name = fmt.Sprintf("P%d", conn.PinNumber)
+	}
+	tp.traceStatusLabel.SetText(fmt.Sprintf("Trace from connector %s — click waypoints, end on via/connector", name))
 }
 
 // selectVia makes a confirmed via the selected via for nudging.
 func (tp *TracesPanel) selectVia(cv *via.ConfirmedVia) {
+	tp.deselectConnector()
 	tp.selectedVia = cv
 	tp.viaStatusLabel.SetText(fmt.Sprintf("Selected %s — arrow keys to nudge, Shift for 5px", cv.ID))
 	tp.updateSelectedViaOverlay()
@@ -552,13 +810,73 @@ func (tp *TracesPanel) updateSelectedViaOverlay() {
 	})
 }
 
+// selectConnector makes a connector the selected connector for nudging.
+func (tp *TracesPanel) selectConnector(conn *connector.Connector) {
+	tp.deselectVia()
+	tp.selectedConnector = conn
+	label := conn.SignalName
+	if label == "" {
+		label = fmt.Sprintf("P%d", conn.PinNumber)
+	}
+	tp.viaStatusLabel.SetText(fmt.Sprintf("Selected %s (%s) — arrow keys to nudge, Shift for 5px", conn.ID, label))
+	tp.updateSelectedConnectorOverlay()
+}
+
+// deselectConnector clears the selected connector.
+func (tp *TracesPanel) deselectConnector() {
+	if tp.selectedConnector == nil {
+		return
+	}
+	tp.selectedConnector = nil
+	tp.canvas.ClearOverlay("selected_connector")
+	tp.viaStatusLabel.SetText("")
+	tp.canvas.Refresh()
+}
+
+// updateSelectedConnectorOverlay draws a highlight rect around the selected connector.
+func (tp *TracesPanel) updateSelectedConnectorOverlay() {
+	if tp.selectedConnector == nil {
+		tp.canvas.ClearOverlay("selected_connector")
+		return
+	}
+	c := tp.selectedConnector
+	pad := 2
+	tp.canvas.SetOverlay("selected_connector", &canvas.Overlay{
+		Rectangles: []canvas.OverlayRect{
+			{
+				X: c.Bounds.X - pad, Y: c.Bounds.Y - pad,
+				Width: c.Bounds.Width + 2*pad, Height: c.Bounds.Height + 2*pad,
+				Fill: canvas.FillNone,
+			},
+		},
+		Color: color.RGBA{R: 255, G: 255, B: 255, A: 255},
+	})
+}
+
 // onRightClickVia handles right-click on the canvas.
 func (tp *TracesPanel) onRightClickVia(x, y float64) {
+	// Cancel active operations on right-click
+	if tp.draggingVertex {
+		tp.cancelVertexDrag()
+	}
+	if tp.traceMode {
+		tp.cancelTrace()
+	}
+
 	cv := tp.state.FeaturesLayer.HitTestConfirmedVia(x, y)
 	if cv != nil {
+		tp.selectVia(cv)
 		tp.showConfirmedViaMenu(cv)
 		return
 	}
+
+	conn := tp.state.FeaturesLayer.HitTestConnector(x, y)
+	if conn != nil {
+		tp.selectConnector(conn)
+		tp.showConnectorMenu(conn)
+		return
+	}
+
 	tp.showGeneralViaMenu(x, y)
 }
 
@@ -701,7 +1019,6 @@ func (tp *TracesPanel) deleteTraceSegment(hit *traceHit) {
 	nSegs := len(tf.Points) - 1
 	if nSegs <= 1 {
 		tp.state.FeaturesLayer.RemoveTrace(hit.traceID)
-		tp.canvas.ClearOverlay(hit.traceID)
 		tp.traceStatusLabel.SetText(fmt.Sprintf("Deleted %s", hit.traceID))
 	} else {
 		removeIdx := hit.segIndex + 1
@@ -712,10 +1029,6 @@ func (tp *TracesPanel) deleteTraceSegment(hit *traceHit) {
 		newPoints = append(newPoints, tf.Points[:removeIdx]...)
 		newPoints = append(newPoints, tf.Points[removeIdx+1:]...)
 
-		layerRef := canvas.LayerFront
-		if tf.Layer == pcbtrace.LayerBack {
-			layerRef = canvas.LayerBack
-		}
 		tp.state.FeaturesLayer.RemoveTrace(hit.traceID)
 		et := pcbtrace.ExtendedTrace{
 			Trace: pcbtrace.Trace{
@@ -726,9 +1039,9 @@ func (tp *TracesPanel) deleteTraceSegment(hit *traceHit) {
 			Source: pcbtrace.SourceManual,
 		}
 		tp.state.FeaturesLayer.AddTrace(et)
-		tp.renderTraceOverlay(hit.traceID, newPoints, layerRef)
 		tp.traceStatusLabel.SetText(fmt.Sprintf("%s: %d segments", hit.traceID, len(newPoints)-1))
 	}
+	tp.rebuildFeaturesOverlay()
 	tp.canvas.Refresh()
 }
 
@@ -768,7 +1081,7 @@ func (tp *TracesPanel) addConfirmedViaAt(x, y float64) {
 
 	fmt.Printf("Added confirmed via %s at (%.0f, %.0f) r=%.0f\n", cvID, x, y, radius)
 
-	tp.refreshAllViaOverlays()
+	tp.rebuildFeaturesOverlay()
 	tp.updateViaCounts()
 	tp.selectVia(cv)
 
@@ -804,7 +1117,7 @@ func (tp *TracesPanel) deleteNearestVia(x, y float64, side pcbimage.Side) {
 	}
 
 	tp.state.FeaturesLayer.RemoveVia(closestVia.ID)
-	tp.refreshViaOverlay(side)
+	tp.rebuildFeaturesOverlay()
 	tp.updateViaCounts()
 	tp.viaStatusLabel.SetText(fmt.Sprintf("Removed %s via %s", side.String(), closestVia.ID))
 	tp.state.Emit(app.EventFeaturesChanged, nil)
@@ -816,7 +1129,7 @@ func (tp *TracesPanel) deleteConfirmedVia(cv *via.ConfirmedVia) {
 	tp.state.FeaturesLayer.RemoveVia(cv.FrontViaID)
 	tp.state.FeaturesLayer.RemoveVia(cv.BackViaID)
 	tp.state.FeaturesLayer.RemoveConfirmedVia(cv.ID)
-	tp.refreshAllViaOverlays()
+	tp.rebuildFeaturesOverlay()
 	tp.updateViaCounts()
 	tp.viaStatusLabel.SetText(fmt.Sprintf("Deleted %s", cv.ID))
 	tp.state.Emit(app.EventFeaturesChanged, nil)
@@ -833,7 +1146,7 @@ func (tp *TracesPanel) deleteConfirmedViaSide(cv *via.ConfirmedVia, side pcbimag
 	}
 	tp.state.FeaturesLayer.RemoveVia(removeID)
 	tp.state.FeaturesLayer.RemoveConfirmedVia(cv.ID)
-	tp.refreshAllViaOverlays()
+	tp.rebuildFeaturesOverlay()
 	tp.updateViaCounts()
 	tp.viaStatusLabel.SetText(fmt.Sprintf("Deleted %s side of %s", side.String(), cv.ID))
 	tp.state.Emit(app.EventFeaturesChanged, nil)
@@ -855,10 +1168,10 @@ func (tp *TracesPanel) deleteConnectedTrace(cv *via.ConfirmedVia) {
 		endDist := math.Sqrt((end.X-cv.Center.X)*(end.X-cv.Center.X) + (end.Y-cv.Center.Y)*(end.Y-cv.Center.Y))
 		if startDist <= tolerance || endDist <= tolerance {
 			tp.state.FeaturesLayer.RemoveTrace(tid)
-			tp.canvas.ClearOverlay(tid)
 			removed++
 		}
 	}
+	tp.rebuildFeaturesOverlay()
 	tp.traceStatusLabel.SetText(fmt.Sprintf("Deleted %d trace(s) from %s", removed, cv.ID))
 	tp.canvas.Refresh()
 }
@@ -872,7 +1185,7 @@ func (tp *TracesPanel) adjustConfirmedViaRadius(cv *via.ConfirmedVia, delta floa
 	fmt.Printf("Adjust %s radius: %.1f -> %.1f\n", cv.ID, cv.Radius, newRadius)
 	cv.Radius = newRadius
 	cv.IntersectionBoundary = geometry.GenerateCirclePoints(cv.Center.X, cv.Center.Y, newRadius, 32)
-	tp.refreshConfirmedViaOverlay()
+	tp.rebuildFeaturesOverlay()
 	tp.canvas.Refresh()
 	tp.viaStatusLabel.SetText(fmt.Sprintf("%s radius: %.0f px", cv.ID, newRadius))
 	tp.state.Emit(app.EventConfirmedViasChanged, nil)
@@ -1146,100 +1459,94 @@ func (tp *TracesPanel) associateTraceVias(startVia, endVia *via.ConfirmedVia) {
 	tp.state.Emit(app.EventNetlistModified, nil)
 }
 
-// refreshViaOverlay recreates the via overlay for the specified side.
-func (tp *TracesPanel) refreshViaOverlay(side pcbimage.Side) {
-	vias := tp.state.FeaturesLayer.GetViasBySide(side)
-	skipMatched := tp.state.FeaturesLayer.ConfirmedViaCount() > 0
-	tp.createViaOverlay(vias, side, skipMatched)
-}
-
-// refreshConfirmedViaOverlay recreates just the confirmed via overlay.
-func (tp *TracesPanel) refreshConfirmedViaOverlay() {
-	confirmedVias := tp.state.FeaturesLayer.GetConfirmedVias()
-	tp.createConfirmedViaOverlay(confirmedVias)
-	tp.confirmedCountLabel.SetText(fmt.Sprintf("Confirmed: %d", len(confirmedVias)))
-}
-
-// refreshAllViaOverlays recreates all via overlays.
-func (tp *TracesPanel) refreshAllViaOverlays() {
-	confirmedVias := tp.state.FeaturesLayer.GetConfirmedVias()
-	tp.createConfirmedViaOverlay(confirmedVias)
-
-	skipMatched := len(confirmedVias) > 0
-	frontVias := tp.state.FeaturesLayer.GetViasBySide(pcbimage.SideFront)
-	tp.createViaOverlay(frontVias, pcbimage.SideFront, skipMatched)
-
-	backVias := tp.state.FeaturesLayer.GetViasBySide(pcbimage.SideBack)
-	tp.createViaOverlay(backVias, pcbimage.SideBack, skipMatched)
-
-	front, back := tp.state.FeaturesLayer.ViaCountBySide()
-	tp.viaCountLabel.SetText(fmt.Sprintf("Vias: %d front, %d back", front, back))
-	tp.confirmedCountLabel.SetText(fmt.Sprintf("Confirmed: %d", len(confirmedVias)))
-}
-
-// createConfirmedViaOverlay creates a canvas overlay for confirmed vias (blue).
-func (tp *TracesPanel) createConfirmedViaOverlay(confirmedVias []*via.ConfirmedVia) {
-	overlay := &canvas.Overlay{
-		Color:      colorutil.Blue,
-		Rectangles: make([]canvas.OverlayRect, 0),
-		Polygons:   make([]canvas.OverlayPolygon, 0),
+// onAddConnectors copies alignment connectors into the features layer as persistent connectors.
+func (tp *TracesPanel) onAddConnectors() {
+	tp.state.CreateConnectorsFromAlignment()
+	conns := tp.state.FeaturesLayer.GetConnectors()
+	if len(conns) == 0 {
+		tp.viaStatusLabel.SetText("No connectors — run contact detection + alignment first")
+		return
 	}
-
-	for _, cv := range confirmedVias {
-		label := cv.ID
-		var viaNum int
-		if _, err := fmt.Sscanf(cv.ID, "cvia-%d", &viaNum); err == nil {
-			label = fmt.Sprintf("%d", viaNum)
-		}
-
-		if len(cv.IntersectionBoundary) >= 3 {
-			overlay.Polygons = append(overlay.Polygons, canvas.OverlayPolygon{
-				Points: cv.IntersectionBoundary,
-				Label:  label,
-				Filled: true,
-			})
+	tp.rebuildFeaturesOverlay()
+	tp.canvas.Refresh()
+	front, back := 0, 0
+	for _, c := range conns {
+		if c.Side == pcbimage.SideFront {
+			front++
 		} else {
-			bounds := cv.Bounds()
-			overlay.Rectangles = append(overlay.Rectangles, canvas.OverlayRect{
-				X: bounds.X, Y: bounds.Y, Width: bounds.Width, Height: bounds.Height,
-				Fill: canvas.FillSolid, Label: label,
-			})
+			back++
 		}
 	}
-
-	tp.canvas.SetOverlay(OverlayConfirmedVias, overlay)
+	tp.viaStatusLabel.SetText(fmt.Sprintf("Added %d connectors (%d front, %d back)", len(conns), front, back))
+	tp.state.SetModified(true)
 }
 
-// createConnectorOverlay creates a canvas overlay for board edge connectors.
-func (tp *TracesPanel) createConnectorOverlay() {
-	connectors := tp.state.FeaturesLayer.GetConnectors()
-	fmt.Printf("  createConnectorOverlay: %d connectors\n", len(connectors))
+// showConnectorMenu shows the context menu for a connector.
+func (tp *TracesPanel) showConnectorMenu(conn *connector.Connector) {
+	menu, _ := gtk.MenuNew()
 
-	overlay := &canvas.Overlay{
-		Color:      colorutil.Green,
-		Rectangles: make([]canvas.OverlayRect, 0, len(connectors)),
-		Polygons:   make([]canvas.OverlayPolygon, 0),
+	addItem := func(label string, cb func()) {
+		item, _ := gtk.MenuItemNewWithLabel(label)
+		item.Connect("activate", cb)
+		menu.Append(item)
 	}
 
-	labels := make([]canvas.ConnectorLabel, 0, len(connectors))
-
-	for _, c := range connectors {
-		label := c.SignalName
-		if label == "" {
-			label = fmt.Sprintf("P%d", c.PinNumber)
-		}
-
-		overlay.Rectangles = append(overlay.Rectangles, canvas.OverlayRect{
-			X: c.Bounds.X, Y: c.Bounds.Y, Width: c.Bounds.Width, Height: c.Bounds.Height,
-			Fill: canvas.FillNone,
-		})
-		labels = append(labels, canvas.ConnectorLabel{
-			Label: label, CenterX: c.Center.X, CenterY: c.Center.Y, Side: c.Side,
-		})
+	signalLabel := "Rename Signal..."
+	if conn.SignalName != "" {
+		signalLabel = fmt.Sprintf("Rename Signal (%s)...", conn.SignalName)
 	}
 
-	tp.canvas.SetOverlay(OverlayConnectors, overlay)
-	tp.canvas.SetConnectorLabels(labels)
+	addItem(signalLabel, func() { tp.renameConnectorSignal(conn) })
+	addItem("Delete Connector", func() { tp.deleteConnector(conn) })
+
+	menu.ShowAll()
+	menu.PopupAtPointer(nil)
+}
+
+// renameConnectorSignal opens a dialog to edit a connector's signal name.
+func (tp *TracesPanel) renameConnectorSignal(conn *connector.Connector) {
+	dlg, _ := gtk.DialogNewWithButtons("Rename Signal", tp.win,
+		gtk.DIALOG_MODAL|gtk.DIALOG_DESTROY_WITH_PARENT,
+		[]interface{}{"Cancel", gtk.RESPONSE_CANCEL, "OK", gtk.RESPONSE_OK})
+	dlg.SetDefaultSize(300, 150)
+
+	contentArea, _ := dlg.GetContentArea()
+	entry, _ := gtk.EntryNew()
+	entry.SetText(conn.SignalName)
+	entry.SetPlaceholderText("e.g. A0, D7, CLOCK")
+
+	lbl, _ := gtk.LabelNew("Signal name:")
+	lbl.SetHAlign(gtk.ALIGN_START)
+	contentArea.PackStart(lbl, false, false, 4)
+	contentArea.PackStart(entry, false, false, 4)
+	dlg.ShowAll()
+
+	response := dlg.Run()
+	if response == gtk.RESPONSE_OK {
+		name, _ := entry.GetText()
+		conn.SignalName = name
+		tp.rebuildFeaturesOverlay()
+		tp.canvas.Refresh()
+		tp.viaStatusLabel.SetText(fmt.Sprintf("%s signal: %s", conn.ID, name))
+		tp.state.SetModified(true)
+	}
+	dlg.Destroy()
+}
+
+// deleteConnector removes a connector from the features layer.
+func (tp *TracesPanel) deleteConnector(conn *connector.Connector) {
+	tp.state.FeaturesLayer.RemoveConnector(conn.ID)
+	tp.deselectConnector()
+	tp.rebuildFeaturesOverlay()
+	tp.canvas.Refresh()
+	tp.viaStatusLabel.SetText(fmt.Sprintf("Deleted connector %s", conn.ID))
+	tp.state.SetModified(true)
+}
+
+// refreshConnectors rebuilds connectors from detection results.
+// The EventConnectorsCreated listener will update the overlay.
+func (tp *TracesPanel) refreshConnectors() {
+	tp.state.CreateConnectorsFromAlignment()
 }
 
 // tryMatchVias attempts to match front and back vias to create confirmed vias.
@@ -1274,7 +1581,8 @@ func (tp *TracesPanel) tryMatchVias() {
 		tp.state.FeaturesLayer.UpdateVia(v)
 	}
 
-	tp.refreshAllViaOverlays()
+	tp.rebuildFeaturesOverlay()
+	tp.updateViaCounts()
 	tp.viaStatusLabel.SetText(fmt.Sprintf("Matched %d vias (avg err: %.1f px)", result.Matched, result.AvgError))
 	tp.state.Emit(app.EventConfirmedViasChanged, nil)
 }
@@ -1290,12 +1598,20 @@ func (tp *TracesPanel) updateTraceOverlay() {
 		lines = append(lines, canvas.OverlayLine{
 			X1: tp.tracePoints[i-1].X, Y1: tp.tracePoints[i-1].Y,
 			X2: tp.tracePoints[i].X, Y2: tp.tracePoints[i].Y,
-			Thickness: 2,
+			Thickness: 1,
+		})
+	}
+	// Vertex dots at each waypoint
+	circles := make([]canvas.OverlayCircle, 0, len(tp.tracePoints))
+	for _, pt := range tp.tracePoints {
+		circles = append(circles, canvas.OverlayCircle{
+			X: pt.X, Y: pt.Y, Radius: 2, Filled: true,
 		})
 	}
 	tp.canvas.SetOverlay("trace_segments", &canvas.Overlay{
-		Lines: lines,
-		Color: color.RGBA{R: 0, G: 255, B: 0, A: 255},
+		Lines:   lines,
+		Circles: circles,
+		Color:   color.RGBA{R: 0, G: 255, B: 0, A: 255},
 	})
 }
 
@@ -1305,19 +1621,22 @@ func (tp *TracesPanel) setupTraceRubberBand() {
 		last := tp.tracePoints[len(tp.tracePoints)-1]
 		tp.canvas.ShowRubberBand(last.X, last.Y)
 	}
-	tp.canvas.OnMouseMove(nil)
+	tp.canvas.OnMouseMove(func(x, y float64) {
+		tp.canvas.UpdateRubberBand(x, y)
+	})
 }
 
-// finishTrace is called when the polyline terminates at a confirmed via.
-func (tp *TracesPanel) finishTrace(endVia *via.ConfirmedVia) {
+// finishTraceCommon contains the shared logic for completing a trace.
+func (tp *TracesPanel) finishTraceCommon(endLabel string) string {
 	tp.canvas.HideRubberBand()
 	tp.canvas.ClearOverlay("trace_segments")
 	tp.canvas.OnMouseMove(nil)
 	tp.traceMode = false
 
 	nSegs := len(tp.tracePoints) - 1
+	startLabel := tp.traceStartLabel()
 	fmt.Printf("Trace complete: %s -> %s (%d segments, %d points)\n",
-		tp.traceStartVia.ID, endVia.ID, nSegs, len(tp.tracePoints))
+		startLabel, endLabel, nSegs, len(tp.tracePoints))
 
 	traceID := fmt.Sprintf("trace-%03d", tp.state.FeaturesLayer.TraceCount()+1)
 	points := make([]geometry.Point2D, len(tp.tracePoints))
@@ -1329,44 +1648,153 @@ func (tp *TracesPanel) finishTrace(endVia *via.ConfirmedVia) {
 		Source: pcbtrace.SourceManual,
 	}
 	tp.state.FeaturesLayer.AddTrace(et)
+	tp.rebuildFeaturesOverlay()
 
-	layerRef := canvas.LayerFront
-	if tp.traceLayer == pcbtrace.LayerBack {
-		layerRef = canvas.LayerBack
-	}
-	tp.renderTraceOverlay(traceID, points, layerRef)
-
-	tp.associateTraceVias(tp.traceStartVia, endVia)
-
-	net := tp.state.FeaturesLayer.GetNetForElement(tp.traceStartVia.ID)
-	netInfo := ""
-	if net != nil {
-		netInfo = fmt.Sprintf(" [%s]", net.Name)
-	}
-	tp.traceStatusLabel.SetText(fmt.Sprintf("Trace: %s -> %s (%d segments)%s",
-		tp.traceStartVia.ID, endVia.ID, nSegs, netInfo))
-	tp.traceStartVia = nil
+	return traceID
 }
 
-// renderTraceOverlay draws a completed trace as a persistent overlay.
-func (tp *TracesPanel) renderTraceOverlay(id string, points []geometry.Point2D, layer canvas.LayerRef) {
-	if len(points) < 2 {
+// finishTraceAtVia completes the polyline trace at a confirmed via.
+func (tp *TracesPanel) finishTraceAtVia(endVia *via.ConfirmedVia) {
+	tp.finishTraceCommon(endVia.ID)
+
+	// Associate vias in the netlist if both endpoints are vias
+	if tp.traceStartVia != nil {
+		tp.associateTraceVias(tp.traceStartVia, endVia)
+	}
+
+	startLabel := tp.traceStartLabel()
+	netInfo := ""
+	if tp.traceStartVia != nil {
+		net := tp.state.FeaturesLayer.GetNetForElement(tp.traceStartVia.ID)
+		if net != nil {
+			netInfo = fmt.Sprintf(" [%s]", net.Name)
+		}
+	}
+	nSegs := len(tp.tracePoints) - 1
+	tp.traceStatusLabel.SetText(fmt.Sprintf("Trace: %s -> %s (%d segments)%s",
+		startLabel, endVia.ID, nSegs, netInfo))
+	tp.traceStartVia = nil
+	tp.traceStartConn = nil
+}
+
+// finishTraceAtConnector completes the polyline trace at a connector.
+func (tp *TracesPanel) finishTraceAtConnector(conn *connector.Connector) {
+	endLabel := conn.SignalName
+	if endLabel == "" {
+		endLabel = fmt.Sprintf("P%d", conn.PinNumber)
+	}
+	tp.finishTraceCommon(endLabel)
+
+	startLabel := tp.traceStartLabel()
+	nSegs := len(tp.tracePoints) - 1
+	tp.traceStatusLabel.SetText(fmt.Sprintf("Trace: %s -> %s (%d segments)",
+		startLabel, endLabel, nSegs))
+	tp.traceStartVia = nil
+	tp.traceStartConn = nil
+}
+
+// hitTestVertex checks all completed trace vertices for a hit near (x, y).
+func (tp *TracesPanel) hitTestVertex(x, y float64) (traceID string, pointIdx int, ok bool) {
+	tolerance := 5.0
+	if tp.state.DPI > 0 {
+		tolerance = 0.008 * tp.state.DPI
+	}
+	bestDist := tolerance
+	for _, tid := range tp.state.FeaturesLayer.GetTraces() {
+		tf := tp.state.FeaturesLayer.GetTraceFeature(tid)
+		if tf == nil {
+			continue
+		}
+		for i, pt := range tf.Points {
+			d := math.Hypot(pt.X-x, pt.Y-y)
+			if d < bestDist {
+				bestDist = d
+				traceID = tid
+				pointIdx = i
+				ok = true
+			}
+		}
+	}
+	return
+}
+
+// startVertexDrag begins dragging a trace vertex.
+func (tp *TracesPanel) startVertexDrag(traceID string, pointIdx int) {
+	tp.draggingVertex = true
+	tp.dragTraceID = traceID
+	tp.dragPointIndex = pointIdx
+
+	tf := tp.state.FeaturesLayer.GetTraceFeature(traceID)
+	if tf == nil {
 		return
 	}
-	lines := make([]canvas.OverlayLine, 0, len(points)-1)
-	for i := 1; i < len(points); i++ {
-		lines = append(lines, canvas.OverlayLine{
-			X1: points[i-1].X, Y1: points[i-1].Y,
-			X2: points[i].X, Y2: points[i].Y,
-			Thickness: 2,
-		})
-	}
-	tp.canvas.SetOverlay(id, &canvas.Overlay{
-		Lines: lines,
-		Color: color.RGBA{R: 0, G: 255, B: 0, A: 255},
-		Layer: layer,
+
+	// Show drag preview overlay with lines from adjacent points
+	tp.updateVertexDragOverlay(tf.Points, pointIdx, tf.Points[pointIdx])
+	tp.traceStatusLabel.SetText(fmt.Sprintf("Dragging vertex %d of %s — click to place", pointIdx, traceID))
+
+	// Install mouse-move handler to update drag preview
+	tp.canvas.OnMouseMove(func(x, y float64) {
+		tf := tp.state.FeaturesLayer.GetTraceFeature(tp.dragTraceID)
+		if tf == nil {
+			return
+		}
+		tp.updateVertexDragOverlay(tf.Points, tp.dragPointIndex, geometry.Point2D{X: x, Y: y})
+		tp.canvas.Refresh()
 	})
 }
 
-// Ensure connector import is used (referenced in createConnectorOverlay).
-var _ = (*connector.Connector)(nil)
+// updateVertexDragOverlay draws temporary lines from adjacent vertices to the cursor position.
+func (tp *TracesPanel) updateVertexDragOverlay(points []geometry.Point2D, idx int, cursor geometry.Point2D) {
+	var lines []canvas.OverlayLine
+	if idx > 0 {
+		prev := points[idx-1]
+		lines = append(lines, canvas.OverlayLine{
+			X1: prev.X, Y1: prev.Y, X2: cursor.X, Y2: cursor.Y, Thickness: 1,
+		})
+	}
+	if idx < len(points)-1 {
+		next := points[idx+1]
+		lines = append(lines, canvas.OverlayLine{
+			X1: cursor.X, Y1: cursor.Y, X2: next.X, Y2: next.Y, Thickness: 1,
+		})
+	}
+	circles := []canvas.OverlayCircle{
+		{X: cursor.X, Y: cursor.Y, Radius: 3, Filled: true},
+	}
+	tp.canvas.SetOverlay("vertex_drag", &canvas.Overlay{
+		Lines:   lines,
+		Circles: circles,
+		Color:   color.RGBA{R: 255, G: 255, B: 0, A: 255},
+	})
+}
+
+// finishVertexDrag places the dragged vertex at (x, y) and updates the trace.
+func (tp *TracesPanel) finishVertexDrag(x, y float64) {
+	tp.draggingVertex = false
+	tp.canvas.ClearOverlay("vertex_drag")
+	tp.canvas.OnMouseMove(nil)
+
+	tf := tp.state.FeaturesLayer.GetTraceFeature(tp.dragTraceID)
+	if tf == nil {
+		return
+	}
+
+	newPoints := make([]geometry.Point2D, len(tf.Points))
+	copy(newPoints, tf.Points)
+	newPoints[tp.dragPointIndex] = geometry.Point2D{X: x, Y: y}
+
+	tp.state.FeaturesLayer.UpdateTracePoints(tp.dragTraceID, newPoints)
+	tp.rebuildFeaturesOverlay()
+	tp.canvas.Refresh()
+	tp.traceStatusLabel.SetText(fmt.Sprintf("Moved vertex %d of %s", tp.dragPointIndex, tp.dragTraceID))
+}
+
+// cancelVertexDrag cancels an in-progress vertex drag.
+func (tp *TracesPanel) cancelVertexDrag() {
+	tp.draggingVertex = false
+	tp.canvas.ClearOverlay("vertex_drag")
+	tp.canvas.OnMouseMove(nil)
+	tp.canvas.Refresh()
+	tp.traceStatusLabel.SetText("Vertex drag cancelled")
+}

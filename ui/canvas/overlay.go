@@ -31,6 +31,7 @@ type OverlayCircle struct {
 	X, Y   float64 // Center position in image coordinates
 	Radius float64 // Radius in pixels (image coordinates)
 	Filled bool    // If true, fill the circle; otherwise just outline
+	Color  *color.RGBA // Per-circle color override (nil = use overlay Color)
 }
 
 // FillPattern indicates how to fill a rectangle.
@@ -48,6 +49,7 @@ const (
 type OverlayRect struct {
 	X, Y, Width, Height int
 	Label               string      // Optional label to draw centered in the rectangle
+	LabelRotated        bool        // If true, draw label rotated -90 degrees
 	Fill                FillPattern // Fill pattern for the rectangle
 	StripeInterval      int         // Interval for stripe/crosshatch patterns (0 = use width)
 	Color               *color.RGBA // Per-rect color override (nil = use overlay Color)
@@ -58,10 +60,12 @@ type OverlayPolygon struct {
 	Points []geometry.Point2D // Polygon vertices in image coordinates
 	Label  string             // Optional label to draw at center
 	Filled bool               // If true, fill the polygon; otherwise just outline
+	Color  *color.RGBA        // Per-polygon color override (nil = use overlay Color)
 }
 
 // OverlayLine represents a line segment to draw on the overlay.
 type OverlayLine struct {
-	X1, Y1, X2, Y2 float64 // Endpoints in image coordinates
-	Thickness       int     // Line thickness in pixels (0 = default 2)
+	X1, Y1, X2, Y2 float64     // Endpoints in image coordinates
+	Thickness       int         // Line thickness in pixels (0 = default 2)
+	Color           *color.RGBA // Per-line color override (nil = use overlay Color)
 }

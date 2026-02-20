@@ -20,11 +20,11 @@ const (
 
 // Trace represents a detected copper trace.
 type Trace struct {
-	ID     string
-	Layer  TraceLayer
-	Points []geometry.Point2D  // Path vertices (centerline)
-	Width  float64             // Estimated trace width in pixels
-	Net    string              // Connected net name (if known)
+	ID     string             `json:"id"`
+	Layer  TraceLayer         `json:"layer"`
+	Points []geometry.Point2D `json:"points"`
+	Width  float64            `json:"width,omitempty"`
+	Net    string             `json:"net,omitempty"`
 }
 
 // Bounds returns the bounding rectangle for the trace.

@@ -117,6 +117,18 @@ type ImageCanvas struct {
 
 	// Left-button drag for selection
 	leftDragging bool
+
+	// Pending labels accumulated during draw(), rendered with Cairo text
+	pendingLabels []pendingLabel
+}
+
+// pendingLabel is a text label to be rendered with Cairo after the bitmap is blitted.
+type pendingLabel struct {
+	text         string
+	x, y         int
+	rotated      bool
+	col          color.RGBA
+	boundW, boundH int // available space in screen pixels (0 = no constraint)
 }
 
 // NewImageCanvas creates a new image canvas.
@@ -154,6 +166,7 @@ func NewImageCanvas() *ImageCanvas {
 			return
 		}
 		blitRGBAToCairo(cr, rgba)
+		ic.drawLabelsWithCairo(cr)
 	})
 
 	// Mouse button press
@@ -877,6 +890,7 @@ func (ic *ImageCanvas) drawConnectorLabelsForLayer(output *image.RGBA, layer *pc
 // draw is the raster drawing function.
 func (ic *ImageCanvas) draw(w, h int) image.Image {
 	output := image.NewRGBA(image.Rect(0, 0, w, h))
+	ic.pendingLabels = ic.pendingLabels[:0]
 
 	// Fill with 1mm grid background (black and white squares)
 	ic.drawGridBackground(output, w, h)
@@ -965,4 +979,109 @@ func blitRGBAToCairo(cr *cairo.Context, img *image.RGBA) {
 
 	cr.SetSourceSurface(surface, 0, 0)
 	cr.Paint()
+}
+
+// drawLabelsWithCairo renders accumulated text labels using Cairo's font engine.
+// Labels with bounds get a best-fit font size: the largest size where every
+// bounded label fits inside its rect with 20% margin.
+func (ic *ImageCanvas) drawLabelsWithCairo(cr *cairo.Context) {
+	if len(ic.pendingLabels) == 0 {
+		return
+	}
+
+	cr.SelectFontFace("sans-serif", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+
+	// Compute best-fit font size for bounded labels (connector rects).
+	// Find the font size where the tightest label just fits with 20% margin.
+	bestFit := ic.zoom * 9 // fallback
+	if bestFit < 4 {
+		bestFit = 4
+	}
+	hasBounded := false
+	for _, lbl := range ic.pendingLabels {
+		if lbl.boundW > 0 && lbl.boundH > 0 {
+			hasBounded = true
+			break
+		}
+	}
+	if hasBounded {
+		// Binary search for the largest font size that fits all bounded labels.
+		lo, hi := 1.0, 200.0
+		for hi-lo > 0.5 {
+			mid := (lo + hi) / 2
+			cr.SetFontSize(mid)
+			fits := true
+			for _, lbl := range ic.pendingLabels {
+				if lbl.boundW <= 0 || lbl.boundH <= 0 {
+					continue
+				}
+				ext := cr.TextExtents(lbl.text)
+				// Available space with 20% margin
+				availW := float64(lbl.boundW) * 0.8
+				availH := float64(lbl.boundH) * 0.8
+				if lbl.rotated {
+					// Rotated: text width fits in rect height, text height fits in rect width
+					if ext.Width > availH || ext.Height > availW {
+						fits = false
+						break
+					}
+				} else {
+					if ext.Width > availW || ext.Height > availH {
+						fits = false
+						break
+					}
+				}
+			}
+			if fits {
+				lo = mid
+			} else {
+				hi = mid
+			}
+		}
+		bestFit = lo
+	}
+
+	cr.SetFontSize(bestFit)
+
+	for _, lbl := range ic.pendingLabels {
+		cr.Save()
+		ext := cr.TextExtents(lbl.text)
+
+		if lbl.rotated {
+			cr.Translate(float64(lbl.x), float64(lbl.y))
+			cr.Rotate(-math.Pi / 2)
+			tx := -ext.Width / 2
+			ty := ext.Height / 2
+
+			cr.SetSourceRGBA(1, 1, 1, 0.8)
+			for _, off := range [][2]float64{{-1, -1}, {1, -1}, {-1, 1}, {1, 1}} {
+				cr.MoveTo(tx+off[0], ty+off[1])
+				cr.ShowText(lbl.text)
+			}
+
+			cr.SetSourceRGBA(
+				float64(lbl.col.R)/255, float64(lbl.col.G)/255,
+				float64(lbl.col.B)/255, float64(lbl.col.A)/255,
+			)
+			cr.MoveTo(tx, ty)
+			cr.ShowText(lbl.text)
+		} else {
+			tx := float64(lbl.x) - ext.Width/2
+			ty := float64(lbl.y) + ext.Height/2
+
+			cr.SetSourceRGBA(1, 1, 1, 0.8)
+			for _, off := range [][2]float64{{-1, -1}, {1, -1}, {-1, 1}, {1, 1}} {
+				cr.MoveTo(tx+off[0], ty+off[1])
+				cr.ShowText(lbl.text)
+			}
+
+			cr.SetSourceRGBA(
+				float64(lbl.col.R)/255, float64(lbl.col.G)/255,
+				float64(lbl.col.B)/255, float64(lbl.col.A)/255,
+			)
+			cr.MoveTo(tx, ty)
+			cr.ShowText(lbl.text)
+		}
+		cr.Restore()
+	}
 }

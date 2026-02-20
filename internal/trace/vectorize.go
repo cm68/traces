@@ -41,8 +41,8 @@ func (s TraceSource) String() string {
 // ExtendedTrace adds source tracking and bounds to the basic Trace.
 type ExtendedTrace struct {
 	Trace
-	Source TraceSource    // How the trace was created
-	Bounds geometry.RectInt // Bounding box for hit testing
+	Source TraceSource      `json:"source"`
+	Bounds geometry.RectInt `json:"bounds,omitempty"`
 }
 
 // VectorizeOptions configures trace vectorization.

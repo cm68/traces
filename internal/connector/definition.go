@@ -173,14 +173,20 @@ func (bd *BoardDefinition) GetPinBySignal(signalName string) *PinDefinition {
 }
 
 // GetPinByPosition returns the pin definition for a connector index and side.
-// For S-100: front side is pins 1-50, back is 51-100.
-// Index 0 on front = pin 1, index 0 on back = pin 51.
+// Contacts are detected sorted left-to-right by X position.
+// For S-100 front (component side): pin 1 is at the right edge, so index 0
+// (leftmost) maps to pin 50 and index 49 (rightmost) maps to pin 1.
+// For S-100 back (solder side): flipping the board left-to-right puts pin 51
+// (behind pin 1) at the left edge — index 0 maps to pin 51, index 49 to pin 100.
 func (bd *BoardDefinition) GetPinByPosition(index int, front bool) *PinDefinition {
 	var pinNumber int
 	if front {
-		pinNumber = index + 1
+		// Rightmost contact is pin 1
+		pinNumber = bd.PinsPerSide - index
 	} else {
-		pinNumber = index + 1 + bd.PinsPerSide
+		// Back image is flipped to match front orientation, so same reversal:
+		// leftmost contact (same position as front pin 50) = pin 100
+		pinNumber = bd.TotalPins - index
 	}
 	return bd.byPinNumber[pinNumber]
 }

@@ -561,19 +561,14 @@ func (ip *ImportPanel) onDetectContacts() {
 	isFront := ip.selectedLayer() == "Front"
 
 	var img *pcbimage.Layer
-	var layerName, overlayName string
-	var overlayColor color.RGBA
+	var layerName string
 
 	if isFront {
 		img = ip.state.FrontImage
 		layerName = "Front"
-		overlayName = "front_contacts"
-		overlayColor = color.RGBA{R: 255, G: 0, B: 0, A: 255}
 	} else {
 		img = ip.state.BackImage
 		layerName = "Back"
-		overlayName = "back_contacts"
-		overlayColor = color.RGBA{R: 0, G: 0, B: 255, A: 255}
 	}
 
 	if img == nil || img.Image == nil {
@@ -632,74 +627,15 @@ func (ip *ImportPanel) onDetectContacts() {
 					ip.dpiLabel.SetText(fmt.Sprintf("DPI: %.1f", result.DPI))
 				}
 
-				// Create contact overlay
-				overlay := &canvas.Overlay{
-					Color:      overlayColor,
-					Rectangles: make([]canvas.OverlayRect, len(result.Contacts)),
-				}
-				for i, contact := range result.Contacts {
-					var fill canvas.FillPattern
-					switch contact.Pass {
-					case alignment.PassFirst:
-						fill = canvas.FillSolid
-					case alignment.PassBruteForce:
-						fill = canvas.FillStripe
-					case alignment.PassRescue:
-						fill = canvas.FillCrosshatch
-					default:
-						fill = canvas.FillSolid
-					}
-					overlay.Rectangles[i] = canvas.OverlayRect{
-						X: contact.Bounds.X, Y: contact.Bounds.Y,
-						Width: contact.Bounds.Width, Height: contact.Bounds.Height,
-						Fill: fill, StripeInterval: contact.Bounds.Width,
-					}
-				}
-				ip.canvas.SetOverlay(overlayName, overlay)
-
-				// Search area overlay
-				var searchColor color.RGBA
-				var searchOverlayName string
-				if isFront {
-					searchColor = color.RGBA{R: 255, G: 105, B: 180, A: 255}
-					searchOverlayName = "front_search_area"
-				} else {
-					searchColor = colorutil.Magenta
-					searchOverlayName = "back_search_area"
-				}
-				ip.canvas.SetOverlay(searchOverlayName, &canvas.Overlay{
-					Color: searchColor,
-					Rectangles: []canvas.OverlayRect{{
-						X: result.SearchBounds.X, Y: result.SearchBounds.Y,
-						Width: result.SearchBounds.Width, Height: result.SearchBounds.Height,
-					}},
-				})
-
-				// Expected positions overlay
-				if len(result.ExpectedPositions) > 0 {
-					var expectedName string
-					var expectedColor color.RGBA
-					if isFront {
-						expectedName = "front_expected"
-						expectedColor = color.RGBA{R: 0, G: 200, B: 200, A: 255}
-					} else {
-						expectedName = "back_expected"
-						expectedColor = color.RGBA{R: 200, G: 200, B: 0, A: 255}
-					}
-					expectedOverlay := &canvas.Overlay{
-						Color:      expectedColor,
-						Rectangles: make([]canvas.OverlayRect, len(result.ExpectedPositions)),
-					}
-					for i, pos := range result.ExpectedPositions {
-						expectedOverlay.Rectangles[i] = canvas.OverlayRect{
-							X: pos.X, Y: pos.Y, Width: pos.Width, Height: pos.Height,
-							Fill: canvas.FillNone,
-						}
-					}
-					ip.canvas.SetOverlay(expectedName, expectedOverlay)
-				}
+				// Rebuild connectors from current detection results
+				// (this creates labeled features overlays that replace the old diagnostic overlays)
+				ip.state.CreateConnectorsFromAlignment()
 
 				// Ejector marks
+				overlayLayer := canvas.LayerFront
+				if !isFront {
+					overlayLayer = canvas.LayerBack
+				}
 				ejectorDPI := dpi
 				if ejectorDPI == 0 {
 					ejectorDPI = result.DPI
@@ -715,6 +651,7 @@ func (ip *ImportPanel) onDetectContacts() {
 						}
 						ejectorOverlay := &canvas.Overlay{
 							Color:      color.RGBA{R: 0, G: 255, B: 0, A: 255},
+							Layer:      overlayLayer,
 							Rectangles: make([]canvas.OverlayRect, len(ejectorMarks)),
 						}
 						markSize := int(0.25 * ejectorDPI)
@@ -1160,7 +1097,6 @@ func (ip *ImportPanel) onAutoAlign() {
 			ip.canvas.ClearOverlay("back_search_area")
 			ip.canvas.ClearOverlay("front_ejectors")
 			ip.canvas.ClearOverlay("back_ejectors")
-			ip.canvas.ClearOverlay("connectors")
 
 			ip.alignStatus.SetText(fmt.Sprintf("Aligned: front rot=%.3f°, back rot=%.3f°, offset=(%d,%d)",
 				-frontAngle, -backAngle, offsetX, offsetY))
@@ -1280,7 +1216,7 @@ func (ip *ImportPanel) onAlignImages() {
 		ip.state.BackDetectionResult.Contacts = alignedBackContacts
 
 		glib.IdleAdd(func() {
-			ip.createContactOverlay("back_contacts", alignedBackContacts, color.RGBA{R: 0, G: 0, B: 255, A: 255})
+			ip.createContactOverlay("back_contacts", alignedBackContacts, color.RGBA{R: 0, G: 0, B: 255, A: 255}, canvas.LayerBack)
 
 			ip.alignButton.SetSensitive(true)
 			ip.alignStatus.SetText("Aligned: " + alignInfo)
@@ -1429,35 +1365,26 @@ func (ip *ImportPanel) onRealign() {
 	}()
 }
 
-func (ip *ImportPanel) createContactOverlay(name string, contacts []alignment.Contact, c color.RGBA) {
+func (ip *ImportPanel) createContactOverlay(name string, contacts []alignment.Contact, c color.RGBA, layer canvas.LayerRef) {
 	overlay := &canvas.Overlay{
 		Color:      c,
+		Layer:      layer,
 		Rectangles: make([]canvas.OverlayRect, len(contacts)),
 	}
 	for i, contact := range contacts {
-		var fill canvas.FillPattern
-		switch contact.Pass {
-		case alignment.PassFirst:
-			fill = canvas.FillSolid
-		case alignment.PassBruteForce:
-			fill = canvas.FillStripe
-		case alignment.PassRescue:
-			fill = canvas.FillCrosshatch
-		default:
-			fill = canvas.FillSolid
-		}
 		overlay.Rectangles[i] = canvas.OverlayRect{
 			X: contact.Bounds.X, Y: contact.Bounds.Y,
 			Width: contact.Bounds.Width, Height: contact.Bounds.Height,
-			Fill: fill,
+			Fill: canvas.FillSolid,
 		}
 	}
 	ip.canvas.SetOverlay(name, overlay)
 }
 
-func (ip *ImportPanel) createEjectorOverlay(name string, marks []alignment.EjectorMark, c color.RGBA) {
+func (ip *ImportPanel) createEjectorOverlay(name string, marks []alignment.EjectorMark, c color.RGBA, layer canvas.LayerRef) {
 	overlay := &canvas.Overlay{
 		Color:      c,
+		Layer:      layer,
 		Rectangles: make([]canvas.OverlayRect, len(marks)),
 	}
 	markerSize := 40
@@ -1563,8 +1490,8 @@ func (ip *ImportPanel) performAlignment(frontContacts, backContacts []alignment.
 
 	fmt.Printf("Auto-align: front ejector marks=%d, back ejector marks=%d\n", len(frontMarks), len(backMarks))
 
-	ip.createEjectorOverlay("front_ejectors", frontMarks, color.RGBA{R: 255, G: 255, B: 0, A: 255})
-	ip.createEjectorOverlay("back_ejectors", backMarks, colorutil.Cyan)
+	ip.createEjectorOverlay("front_ejectors", frontMarks, color.RGBA{R: 255, G: 255, B: 0, A: 255}, canvas.LayerFront)
+	ip.createEjectorOverlay("back_ejectors", backMarks, colorutil.Cyan, canvas.LayerBack)
 
 	var finalImage image.Image = translatedBack
 	var alignInfo string
@@ -1617,7 +1544,7 @@ func (ip *ImportPanel) performAlignment(frontContacts, backContacts []alignment.
 		}
 	}
 	ip.state.BackDetectionResult.Contacts = alignedBackContacts
-	ip.createContactOverlay("back_contacts", alignedBackContacts, color.RGBA{R: 0, G: 0, B: 255, A: 255})
+	ip.createContactOverlay("back_contacts", alignedBackContacts, color.RGBA{R: 0, G: 0, B: 255, A: 255}, canvas.LayerBack)
 
 	ip.alignStatus.SetText("Aligned: " + alignInfo)
 

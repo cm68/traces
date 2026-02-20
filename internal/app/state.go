@@ -20,6 +20,7 @@ import (
 	"pcb-tracer/internal/image"
 	"pcb-tracer/internal/logo"
 	"pcb-tracer/internal/ocr"
+	"pcb-tracer/internal/trace"
 	"pcb-tracer/internal/via"
 	"pcb-tracer/pkg/geometry"
 )
@@ -475,29 +476,8 @@ func (s *State) LoadProject(path string) error {
 		}
 	}
 
-	// Restore contacts from saved data
-	if len(proj.FrontContacts) > 0 {
-		s.FrontDetectionResult = &alignment.DetectionResult{
-			Contacts: make([]alignment.Contact, len(proj.FrontContacts)),
-		}
-		for i, cd := range proj.FrontContacts {
-			s.FrontDetectionResult.Contacts[i] = alignment.Contact{
-				Center: cd.Center,
-				Bounds: cd.Bounds,
-			}
-		}
-	}
-	if len(proj.BackContacts) > 0 {
-		s.BackDetectionResult = &alignment.DetectionResult{
-			Contacts: make([]alignment.Contact, len(proj.BackContacts)),
-		}
-		for i, cd := range proj.BackContacts {
-			s.BackDetectionResult.Contacts[i] = alignment.Contact{
-				Center: cd.Center,
-				Bounds: cd.Bounds,
-			}
-		}
-	}
+	// Saved contacts are in pre-alignment coordinates and are not restored.
+	// The user must click "Detect Contacts" to re-detect on aligned images.
 
 	// Restore component training samples
 	if len(proj.ComponentTrainingSamples) > 0 {
@@ -536,6 +516,22 @@ func (s *State) LoadProject(path string) error {
 			s.FeaturesLayer.AddConfirmedVia(cv)
 		}
 		fmt.Printf("[Project] Restored %d confirmed vias\n", len(proj.ConfirmedVias))
+	}
+	if len(proj.Traces) > 0 {
+		if s.FeaturesLayer == nil {
+			s.FeaturesLayer = features.NewDetectedFeaturesLayer()
+		}
+		s.FeaturesLayer.AddTraces(proj.Traces)
+		fmt.Printf("[Project] Restored %d traces\n", len(proj.Traces))
+	}
+	if len(proj.Connectors) > 0 {
+		if s.FeaturesLayer == nil {
+			s.FeaturesLayer = features.NewDetectedFeaturesLayer()
+		}
+		for _, c := range proj.Connectors {
+			s.FeaturesLayer.AddConnector(c)
+		}
+		fmt.Printf("[Project] Restored %d connectors\n", len(proj.Connectors))
 	}
 
 	// Logo library is now loaded from shared preferences, not project file
@@ -641,6 +637,16 @@ func (s *State) SaveProject(path string) error {
 		confirmedVias := s.FeaturesLayer.GetConfirmedVias()
 		if len(confirmedVias) > 0 {
 			proj.ConfirmedVias = confirmedVias
+		}
+		allTraces := s.FeaturesLayer.GetAllTraces()
+		if len(allTraces) > 0 {
+			proj.Traces = allTraces
+			fmt.Printf("[Project] Saving %d traces\n", len(allTraces))
+		}
+		allConnectors := s.FeaturesLayer.GetConnectors()
+		if len(allConnectors) > 0 {
+			proj.Connectors = allConnectors
+			fmt.Printf("[Project] Saving %d connectors\n", len(allConnectors))
 		}
 	}
 
@@ -1296,6 +1302,12 @@ type ProjectFile struct {
 	Vias          []via.Via            `json:"vias,omitempty"`
 	ConfirmedVias []*via.ConfirmedVia  `json:"confirmed_vias,omitempty"`
 
+	// Traces (v10+)
+	Traces []trace.ExtendedTrace `json:"traces,omitempty"`
+
+	// Connectors (v11+) - persistent board edge connectors
+	Connectors []*connector.Connector `json:"connectors,omitempty"`
+
 	// Logo library (v7+) - manufacturer mark templates
 	LogoLibrary *logo.LogoLibrary `json:"logo_library,omitempty"`
 }
@@ -1414,24 +1426,32 @@ func (s *State) CreateConnectorsFromAlignment() {
 
 	// Create front connectors
 	if s.FrontDetectionResult != nil {
+		fmt.Printf("[Connectors] Front contacts: %d total\n", len(s.FrontDetectionResult.Contacts))
 		for i, contact := range s.FrontDetectionResult.Contacts {
 			pin := bd.GetPinByPosition(i, true)
 			if pin != nil {
 				c := connector.NewConnectorFromContact(i, image.SideFront, &contact, pin.PinNumber)
 				c.SignalName = pin.SignalName
 				s.FeaturesLayer.AddConnector(c)
+				if i < 3 || i >= len(s.FrontDetectionResult.Contacts)-3 {
+					fmt.Printf("[Connectors] Front[%d] X=%.0f → pin %d (%s)\n", i, contact.Center.X, pin.PinNumber, pin.SignalName)
+				}
 			}
 		}
 	}
 
 	// Create back connectors
 	if s.BackDetectionResult != nil {
+		fmt.Printf("[Connectors] Back contacts: %d total\n", len(s.BackDetectionResult.Contacts))
 		for i, contact := range s.BackDetectionResult.Contacts {
 			pin := bd.GetPinByPosition(i, false)
 			if pin != nil {
 				c := connector.NewConnectorFromContact(i, image.SideBack, &contact, pin.PinNumber)
 				c.SignalName = pin.SignalName
 				s.FeaturesLayer.AddConnector(c)
+				if i < 3 || i >= len(s.BackDetectionResult.Contacts)-3 {
+					fmt.Printf("[Connectors] Back[%d] X=%.0f → pin %d (%s)\n", i, contact.Center.X, pin.PinNumber, pin.SignalName)
+				}
 			}
 		}
 	}

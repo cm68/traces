@@ -161,6 +161,22 @@ func (l *DetectedFeaturesLayer) GetTraceFeature(id string) *trace.ExtendedTrace 
 	return nil
 }
 
+// GetAllTraces returns all traces in the layer.
+func (l *DetectedFeaturesLayer) GetAllTraces() []trace.ExtendedTrace {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	var result []trace.ExtendedTrace
+	for _, id := range l.traces {
+		if ref := l.features[id]; ref != nil {
+			if tf, ok := ref.Feature.(TraceFeature); ok {
+				result = append(result, tf.ExtendedTrace)
+			}
+		}
+	}
+	return result
+}
+
 // ClearTraces removes all traces from the layer.
 func (l *DetectedFeaturesLayer) ClearTraces() {
 	l.mu.Lock()
@@ -794,6 +810,27 @@ func (l *DetectedFeaturesLayer) ClearConnectors() {
 	l.connectorsMap = make(map[string]*connector.Connector)
 }
 
+// RemoveConnector removes a single connector by ID.
+func (l *DetectedFeaturesLayer) RemoveConnector(id string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if _, exists := l.connectorsMap[id]; !exists {
+		return false
+	}
+
+	delete(l.connectorsMap, id)
+
+	for i, cid := range l.connectors {
+		if cid == id {
+			l.connectors = append(l.connectors[:i], l.connectors[i+1:]...)
+			break
+		}
+	}
+
+	return true
+}
+
 // ConnectorCount returns the number of connectors.
 func (l *DetectedFeaturesLayer) ConnectorCount() int {
 	l.mu.RLock()
@@ -908,6 +945,24 @@ func (l *DetectedFeaturesLayer) RemoveNet(id string) bool {
 		}
 	}
 
+	return true
+}
+
+// UpdateTracePoints updates a trace's points in-place for vertex dragging.
+func (l *DetectedFeaturesLayer) UpdateTracePoints(id string, points []geometry.Point2D) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	ref, ok := l.features[id]
+	if !ok {
+		return false
+	}
+	tf, ok := ref.Feature.(TraceFeature)
+	if !ok {
+		return false
+	}
+	tf.Points = points
+	ref.Feature = tf
 	return true
 }
 

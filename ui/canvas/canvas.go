@@ -104,6 +104,7 @@ type ImageCanvas struct {
 	onRightClick  func(x, y float64)            // Right click at image coordinates
 	onMiddleClick func(x, y float64)            // Middle click at image coordinates
 	onMouseMove   func(x, y float64)            // Mouse move at image coordinates
+	onHover       func(x, y float64)            // Always-active hover callback
 
 	// Rubber band line (image coordinates)
 	rubberBandFrom geometry.Point2D
@@ -271,6 +272,10 @@ func NewImageCanvas() *ImageCanvas {
 		// Mouse move callback
 		if ic.onMouseMove != nil {
 			ic.onMouseMove(imgX, imgY)
+		}
+		// Always-active hover callback
+		if ic.onHover != nil {
+			ic.onHover(imgX, imgY)
 		}
 		return false
 	})
@@ -554,6 +559,14 @@ func (ic *ImageCanvas) ScrollOffset() (float64, float64) {
 	return hadj.GetValue(), vadj.GetValue()
 }
 
+// SetScrollOffset sets the scroll position to (x, y).
+func (ic *ImageCanvas) SetScrollOffset(x, y float64) {
+	hadj := ic.scrollWin.GetHAdjustment()
+	vadj := ic.scrollWin.GetVAdjustment()
+	hadj.SetValue(x)
+	vadj.SetValue(y)
+}
+
 // SetTool sets the current interaction tool.
 func (ic *ImageCanvas) SetTool(tool Tool) {
 	ic.tool = tool
@@ -587,6 +600,12 @@ func (ic *ImageCanvas) OnMiddleClick(callback func(x, y float64)) {
 // OnMouseMove sets a callback for mouse-move events.
 func (ic *ImageCanvas) OnMouseMove(callback func(x, y float64)) {
 	ic.onMouseMove = callback
+}
+
+// OnHover sets a permanent callback for mouse hover events.
+// Unlike OnMouseMove, this callback is never cleared by trace/drag operations.
+func (ic *ImageCanvas) OnHover(callback func(x, y float64)) {
+	ic.onHover = callback
 }
 
 // GetRenderedOutput returns the last rendered canvas output for sampling.

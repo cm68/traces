@@ -2,7 +2,9 @@ package panels
 
 import (
 	"fmt"
+	"image"
 	"image/color"
+	"image/draw"
 	"math"
 	"path/filepath"
 	"runtime"
@@ -56,13 +58,18 @@ type TracesPanel struct {
 	traceStatusLabel *gtk.Label
 
 	// Trace drawing state (polyline mode)
-	traceMode          bool
-	traceStartVia      *via.ConfirmedVia
-	traceStartConn     *connector.Connector
-	traceEndVia        *via.ConfirmedVia
-	traceEndConn       *connector.Connector
-	tracePoints        []geometry.Point2D
-	traceLayer         pcbtrace.TraceLayer
+	traceMode               bool
+	traceStartVia           *via.ConfirmedVia
+	traceStartConn          *connector.Connector
+	traceStartJunctionTrace string // trace ID when starting from a junction vertex
+	traceEndVia             *via.ConfirmedVia
+	traceEndConn            *connector.Connector
+	traceEndJunctionTrace   string // trace ID when ending at a junction vertex
+	tracePoints             []geometry.Point2D
+	traceLayer              pcbtrace.TraceLayer
+
+	// Last created trace ID (for adding to net)
+	lastTraceID string
 
 	// Vertex drag state
 	draggingVertex bool
@@ -219,8 +226,10 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, 
 		tp.traceMode = false
 		tp.traceStartVia = nil
 		tp.traceStartConn = nil
+		tp.traceStartJunctionTrace = ""
 		tp.traceEndVia = nil
 		tp.traceEndConn = nil
+		tp.traceEndJunctionTrace = ""
 		tp.tracePoints = nil
 		tp.draggingVertex = false
 		tp.canvas.OnMouseMove(nil)
@@ -244,6 +253,12 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, 
 	// Redraw features overlay when connectors are created/rebuilt
 	state.On(app.EventConnectorsCreated, func(_ interface{}) {
 		tp.rebuildFeaturesOverlay()
+	})
+
+	// Rebuild overlay when nets change (trace colors depend on net status)
+	state.On(app.EventNetlistModified, func(_ interface{}) {
+		tp.rebuildFeaturesOverlay()
+		tp.canvas.Refresh()
 	})
 
 	// Auto-match vias when alignment completes
@@ -287,6 +302,22 @@ func (tp *TracesPanel) selectedLayer() string {
 		return "Front"
 	}
 	return "Back"
+}
+
+// selectedSide returns the pcbimage.Side matching the current layer selection.
+func (tp *TracesPanel) selectedSide() pcbimage.Side {
+	if tp.viaLayerFront.GetActive() {
+		return pcbimage.SideFront
+	}
+	return pcbimage.SideBack
+}
+
+// selectedTraceLayer returns the trace layer matching the current layer selection.
+func (tp *TracesPanel) selectedTraceLayer() pcbtrace.TraceLayer {
+	if tp.viaLayerFront.GetActive() {
+		return pcbtrace.LayerFront
+	}
+	return pcbtrace.LayerBack
 }
 
 // SetEnabled enables or disables the panel's interactive widgets.
@@ -398,8 +429,10 @@ func (tp *TracesPanel) cancelTrace() {
 	tp.traceMode = false
 	tp.traceStartVia = nil
 	tp.traceStartConn = nil
+	tp.traceStartJunctionTrace = ""
 	tp.traceEndVia = nil
 	tp.traceEndConn = nil
+	tp.traceEndJunctionTrace = ""
 	tp.tracePoints = nil
 	tp.traceStatusLabel.SetText("Trace cancelled")
 	tp.canvas.Refresh()
@@ -532,7 +565,6 @@ func (tp *TracesPanel) rebuildFeaturesOverlay() {
 	cyan := &colorutil.Cyan
 	magenta := &colorutil.Magenta
 	blue := &colorutil.Blue
-	green := &color.RGBA{R: 0, G: 255, B: 0, A: 255}
 
 	// 1. Connectors: split by side
 	for _, c := range tp.state.FeaturesLayer.GetConnectors() {
@@ -618,31 +650,46 @@ func (tp *TracesPanel) rebuildFeaturesOverlay() {
 		}
 	}
 
-	// 4. Completed traces: split by layer
+	// 4. Completed traces: split by layer, colored by net status
+	red := &color.RGBA{R: 255, G: 0, B: 0, A: 255}
 	for _, tid := range tp.state.FeaturesLayer.GetTraces() {
 		tf := tp.state.FeaturesLayer.GetTraceFeature(tid)
 		if tf == nil || len(tf.Points) < 2 {
 			continue
 		}
 		var target *canvas.Overlay
+		// Pick color: named net → cyan (front) / magenta (back), unnamed → red
+		net := tp.state.FeaturesLayer.GetNetForElement(tid)
+		hasNamedNet := net != nil && net.Name != "" && net.Name != net.ID
+		var traceColor *color.RGBA
 		if tf.Layer == pcbtrace.LayerBack {
 			target = backOverlay
+			if hasNamedNet {
+				traceColor = magenta
+			} else {
+				traceColor = red
+			}
 		} else {
 			target = frontOverlay
+			if hasNamedNet {
+				traceColor = cyan
+			} else {
+				traceColor = red
+			}
 		}
 		for i := 1; i < len(tf.Points); i++ {
 			target.Lines = append(target.Lines, canvas.OverlayLine{
 				X1: tf.Points[i-1].X, Y1: tf.Points[i-1].Y,
 				X2: tf.Points[i].X, Y2: tf.Points[i].Y,
 				Thickness: 1,
-				Color:     green,
+				Color:     traceColor,
 			})
 		}
 		if len(tf.Points) > 2 {
 			for _, pt := range tf.Points[1 : len(tf.Points)-1] {
 				target.Circles = append(target.Circles, canvas.OverlayCircle{
-					X: pt.X, Y: pt.Y, Radius: 2, Filled: true,
-					Color: green,
+					X: pt.X, Y: pt.Y, Radius: 4, Filled: true,
+					Color: traceColor,
 				})
 			}
 		}
@@ -714,16 +761,26 @@ func (tp *TracesPanel) onLeftClick(x, y float64) {
 			}
 		}
 
-		// Hit-test connector → finish trace at connector center
-		conn := tp.state.FeaturesLayer.HitTestConnector(x, y)
+		// Hit-test connector on selected side → finish trace at click position
+		conn := tp.state.FeaturesLayer.HitTestConnectorOnSide(x, y, tp.selectedSide())
 		if conn != nil {
 			startConnID := ""
 			if tp.traceStartConn != nil {
 				startConnID = tp.traceStartConn.ID
 			}
 			if conn.ID != startConnID {
-				tp.tracePoints = append(tp.tracePoints, conn.Center)
+				tp.tracePoints = append(tp.tracePoints, geometry.Point2D{X: x, Y: y})
 				tp.finishTraceAtConnector(conn)
+				return
+			}
+		}
+
+		// Hit-test vertex on existing trace (junction) on selected layer
+		if jTraceID, _, ok := tp.hitTestVertex(x, y); ok {
+			tf := tp.state.FeaturesLayer.GetTraceFeature(jTraceID)
+			if tf != nil {
+				tp.tracePoints = append(tp.tracePoints, geometry.Point2D{X: x, Y: y})
+				tp.finishTraceAtJunction(jTraceID)
 				return
 			}
 		}
@@ -733,28 +790,28 @@ func (tp *TracesPanel) onLeftClick(x, y float64) {
 		tp.canvas.ShowRubberBand(x, y)
 		tp.updateTraceOverlay()
 		startLabel := tp.traceStartLabel()
-		tp.traceStatusLabel.SetText(fmt.Sprintf("Trace from %s — %d segments — click waypoints, end on via/connector",
+		tp.traceStatusLabel.SetText(fmt.Sprintf("Trace from %s — %d segments — click waypoints, end on via/connector/vertex",
 			startLabel, len(tp.tracePoints)-1))
 		return
 	}
 
-	// Not drawing — hit-test existing vertex on completed traces for drag
-	if traceID, pointIdx, ok := tp.hitTestVertex(x, y); ok {
-		tp.startVertexDrag(traceID, pointIdx)
-		return
-	}
-
-	// Hit-test confirmed via → start trace
+	// Hit-test confirmed via → start trace (takes priority over vertex drag)
 	cv := tp.state.FeaturesLayer.HitTestConfirmedVia(x, y)
 	if cv != nil {
 		tp.startTraceFromVia(cv)
 		return
 	}
 
-	// Hit-test connector → start trace
-	conn := tp.state.FeaturesLayer.HitTestConnector(x, y)
+	// Hit-test connector on selected side → start trace at click position
+	conn := tp.state.FeaturesLayer.HitTestConnectorOnSide(x, y, tp.selectedSide())
 	if conn != nil {
-		tp.startTraceFromConnector(conn)
+		tp.startTraceFromConnector(conn, x, y)
+		return
+	}
+
+	// Hit-test existing vertex on completed traces for drag
+	if traceID, pointIdx, ok := tp.hitTestVertex(x, y); ok {
+		tp.startVertexDrag(traceID, pointIdx)
 		return
 	}
 
@@ -782,6 +839,7 @@ func (tp *TracesPanel) startTraceFromVia(cv *via.ConfirmedVia) {
 	tp.traceMode = true
 	tp.traceStartVia = cv
 	tp.traceStartConn = nil
+	tp.traceStartJunctionTrace = ""
 	tp.tracePoints = []geometry.Point2D{cv.Center}
 	if tp.selectedLayer() == "Front" {
 		tp.traceLayer = pcbtrace.LayerFront
@@ -793,11 +851,12 @@ func (tp *TracesPanel) startTraceFromVia(cv *via.ConfirmedVia) {
 }
 
 // startTraceFromConnector enters trace drawing mode starting from a connector.
-func (tp *TracesPanel) startTraceFromConnector(conn *connector.Connector) {
+func (tp *TracesPanel) startTraceFromConnector(conn *connector.Connector, x, y float64) {
 	tp.traceMode = true
 	tp.traceStartVia = nil
 	tp.traceStartConn = conn
-	tp.tracePoints = []geometry.Point2D{conn.Center}
+	tp.traceStartJunctionTrace = ""
+	tp.tracePoints = []geometry.Point2D{{X: x, Y: y}}
 	if tp.selectedLayer() == "Front" {
 		tp.traceLayer = pcbtrace.LayerFront
 	} else {
@@ -905,7 +964,7 @@ func (tp *TracesPanel) onRightClickVia(x, y float64) {
 		return
 	}
 
-	conn := tp.state.FeaturesLayer.HitTestConnector(x, y)
+	conn := tp.state.FeaturesLayer.HitTestConnectorOnSide(x, y, tp.selectedSide())
 	if conn != nil {
 		tp.selectConnector(conn)
 		tp.showConnectorMenu(conn)
@@ -955,6 +1014,9 @@ func (tp *TracesPanel) showConfirmedViaMenu(cv *via.ConfirmedVia) {
 	addSep()
 	addItem("Decrease Radius", func() { tp.adjustConfirmedViaRadius(cv, -radiusStep) })
 	addItem("Increase Radius", func() { tp.adjustConfirmedViaRadius(cv, radiusStep) })
+	addSep()
+	addItem("Auto-trace to next via", func() { tp.autoTraceToAdjacentVia(cv, +1) })
+	addItem("Auto-trace to prev via", func() { tp.autoTraceToAdjacentVia(cv, -1) })
 
 	menu.ShowAll()
 	menu.PopupAtPointer(nil)
@@ -991,19 +1053,23 @@ type traceHit struct {
 	segIndex int
 }
 
-// hitTestTraceSegment returns the trace and segment closest to (x, y).
+// hitTestTraceSegment returns the trace and segment closest to (x, y) on the selected layer.
 func (tp *TracesPanel) hitTestTraceSegment(x, y float64) *traceHit {
 	tolerance := 10.0
 	if tp.state.DPI > 0 {
 		tolerance = 0.015 * tp.state.DPI
 	}
 
+	activeLayer := tp.selectedTraceLayer()
 	var bestHit *traceHit
 	bestDist := tolerance
 
 	for _, tid := range tp.state.FeaturesLayer.GetTraces() {
 		tf := tp.state.FeaturesLayer.GetTraceFeature(tid)
 		if tf == nil || len(tf.Points) < 2 {
+			continue
+		}
+		if tf.Layer != activeLayer {
 			continue
 		}
 		for i := 1; i < len(tf.Points); i++ {
@@ -1240,11 +1306,14 @@ func (tp *TracesPanel) nameNetlist(cv *via.ConfirmedVia) {
 
 	dlg, _ := gtk.DialogNewWithButtons("Name Netlist", tp.win,
 		gtk.DIALOG_MODAL|gtk.DIALOG_DESTROY_WITH_PARENT,
-		[]interface{}{"Cancel", gtk.RESPONSE_CANCEL, "OK", gtk.RESPONSE_OK})
+		[]interface{}{"Cancel", gtk.RESPONSE_CANCEL},
+		[]interface{}{"OK", gtk.RESPONSE_OK})
 	dlg.SetDefaultSize(300, 150)
+	dlg.SetDefaultResponse(gtk.RESPONSE_OK)
 
 	contentArea, _ := dlg.GetContentArea()
 	entry, _ := gtk.EntryNew()
+	entry.SetActivatesDefault(true)
 	if net != nil {
 		entry.SetText(net.Name)
 	}
@@ -1296,7 +1365,8 @@ func (tp *TracesPanel) namePin(cv *via.ConfirmedVia) {
 
 	dlg, _ := gtk.DialogNewWithButtons("Name Pin", tp.win,
 		gtk.DIALOG_MODAL|gtk.DIALOG_DESTROY_WITH_PARENT,
-		[]interface{}{"Cancel", gtk.RESPONSE_CANCEL, "OK", gtk.RESPONSE_OK})
+		[]interface{}{"Cancel", gtk.RESPONSE_CANCEL},
+		[]interface{}{"OK", gtk.RESPONSE_OK})
 	dlg.SetDefaultSize(300, 200)
 
 	contentArea, _ := dlg.GetContentArea()
@@ -1461,6 +1531,9 @@ func (tp *TracesPanel) associateTraceEndpoints() {
 	} else if startConn != nil {
 		startID = startConn.ID
 		startNet = tp.state.FeaturesLayer.GetNetForElement(startConn.ID)
+	} else if tp.traceStartJunctionTrace != "" {
+		startID = tp.traceStartJunctionTrace
+		startNet = tp.findNetForTrace(tp.traceStartJunctionTrace)
 	}
 
 	if tp.traceEndVia != nil {
@@ -1469,6 +1542,9 @@ func (tp *TracesPanel) associateTraceEndpoints() {
 	} else if tp.traceEndConn != nil {
 		endID = tp.traceEndConn.ID
 		endNet = tp.state.FeaturesLayer.GetNetForElement(tp.traceEndConn.ID)
+	} else if tp.traceEndJunctionTrace != "" {
+		endID = tp.traceEndJunctionTrace
+		endNet = tp.findNetForTrace(tp.traceEndJunctionTrace)
 	}
 
 	// For connector endpoints with no existing net, create one from the connector's signal name
@@ -1483,10 +1559,38 @@ func (tp *TracesPanel) associateTraceEndpoints() {
 		fmt.Printf("Created net %q from connector %s\n", endNet.Name, tp.traceEndConn.ID)
 	}
 
+	// addTraceToNet is called at the end to register the new trace with the resulting net.
+	addTraceToNet := func(net *netlist.ElectricalNet) {
+		if net == nil || tp.lastTraceID == "" {
+			return
+		}
+		if !net.ContainsElement(tp.lastTraceID) {
+			net.TraceIDs = append(net.TraceIDs, tp.lastTraceID)
+			net.Elements = append(net.Elements, netlist.NetElement{
+				Type: netlist.ElementTrace, ID: tp.lastTraceID,
+			})
+		}
+		// Also add the junction trace if ending at one
+		if tp.traceEndJunctionTrace != "" && !net.ContainsElement(tp.traceEndJunctionTrace) {
+			net.TraceIDs = append(net.TraceIDs, tp.traceEndJunctionTrace)
+			net.Elements = append(net.Elements, netlist.NetElement{
+				Type: netlist.ElementTrace, ID: tp.traceEndJunctionTrace,
+			})
+		}
+		if tp.traceStartJunctionTrace != "" && !net.ContainsElement(tp.traceStartJunctionTrace) {
+			net.TraceIDs = append(net.TraceIDs, tp.traceStartJunctionTrace)
+			net.Elements = append(net.Elements, netlist.NetElement{
+				Type: netlist.ElementTrace, ID: tp.traceStartJunctionTrace,
+			})
+		}
+	}
+
 	if startNet != nil && endNet != nil {
 		// Both have nets
 		if startNet.ID == endNet.ID {
-			return // already in the same net
+			addTraceToNet(startNet)
+			tp.state.Emit(app.EventNetlistModified, nil)
+			return
 		}
 		// Merge: keep the net with the better name
 		keepNet, absorbNet := startNet, endNet
@@ -1528,14 +1632,17 @@ func (tp *TracesPanel) associateTraceEndpoints() {
 			}
 		}
 		tp.state.FeaturesLayer.RemoveNet(absorbNet.ID)
+		addTraceToNet(keepNet)
 		fmt.Printf("Merged net %q into %q\n", absorbNet.Name, keepNet.Name)
 	} else if startNet != nil {
 		// Only start has a net — add end endpoint
 		tp.addEndpointToNet(startNet, tp.traceEndVia, tp.traceEndConn)
+		addTraceToNet(startNet)
 		fmt.Printf("Added %s to net %q\n", endID, startNet.Name)
 	} else if endNet != nil {
 		// Only end has a net — add start endpoint
 		tp.addEndpointToNet(endNet, startVia, startConn)
+		addTraceToNet(endNet)
 		fmt.Printf("Added %s to net %q\n", startID, endNet.Name)
 	} else {
 		// Neither has a net — create a new one
@@ -1553,10 +1660,57 @@ func (tp *TracesPanel) associateTraceEndpoints() {
 		net := netlist.NewElectricalNetWithName(id, name)
 		tp.addEndpointToNet(net, startVia, startConn)
 		tp.addEndpointToNet(net, tp.traceEndVia, tp.traceEndConn)
+		addTraceToNet(net)
 		tp.state.FeaturesLayer.AddNet(net)
 		fmt.Printf("Created net %q for %s and %s\n", name, startID, endID)
 	}
 	tp.state.Emit(app.EventNetlistModified, nil)
+}
+
+// findNetForTrace finds the electrical net associated with a trace by checking
+// the vias and connectors at its endpoints.
+func (tp *TracesPanel) findNetForTrace(traceID string) *netlist.ElectricalNet {
+	// First try direct lookup (trace may be registered as a net element)
+	if net := tp.state.FeaturesLayer.GetNetForElement(traceID); net != nil {
+		return net
+	}
+
+	// Look up the trace's endpoint coordinates
+	tf := tp.state.FeaturesLayer.GetTraceFeature(traceID)
+	if tf == nil || len(tf.Points) < 2 {
+		return nil
+	}
+
+	tolerance := 5.0
+
+	// Check each endpoint against confirmed vias and connectors
+	for _, pt := range []geometry.Point2D{tf.Points[0], tf.Points[len(tf.Points)-1]} {
+		// Check confirmed vias
+		for _, cv := range tp.state.FeaturesLayer.GetConfirmedVias() {
+			dx := cv.Center.X - pt.X
+			dy := cv.Center.Y - pt.Y
+			if math.Sqrt(dx*dx+dy*dy) <= tolerance {
+				if net := tp.state.FeaturesLayer.GetNetForElement(cv.ID); net != nil {
+					return net
+				}
+			}
+		}
+		// Check connectors on selected side
+		for _, conn := range tp.state.FeaturesLayer.GetConnectors() {
+			if conn.Side != tp.selectedSide() {
+				continue
+			}
+			dx := conn.Center.X - pt.X
+			dy := conn.Center.Y - pt.Y
+			if math.Sqrt(dx*dx+dy*dy) <= tolerance {
+				if net := tp.state.FeaturesLayer.GetNetForElement(conn.ID); net != nil {
+					return net
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 // addEndpointToNet adds a via or connector endpoint to an existing net.
@@ -1620,7 +1774,8 @@ func (tp *TracesPanel) showConnectorMenu(conn *connector.Connector) {
 func (tp *TracesPanel) renameConnectorSignal(conn *connector.Connector) {
 	dlg, _ := gtk.DialogNewWithButtons("Rename Signal", tp.win,
 		gtk.DIALOG_MODAL|gtk.DIALOG_DESTROY_WITH_PARENT,
-		[]interface{}{"Cancel", gtk.RESPONSE_CANCEL, "OK", gtk.RESPONSE_OK})
+		[]interface{}{"Cancel", gtk.RESPONSE_CANCEL},
+		[]interface{}{"OK", gtk.RESPONSE_OK})
 	dlg.SetDefaultSize(300, 150)
 
 	contentArea, _ := dlg.GetContentArea()
@@ -1718,7 +1873,7 @@ func (tp *TracesPanel) updateTraceOverlay() {
 	circles := make([]canvas.OverlayCircle, 0, len(tp.tracePoints))
 	for _, pt := range tp.tracePoints {
 		circles = append(circles, canvas.OverlayCircle{
-			X: pt.X, Y: pt.Y, Radius: 2, Filled: true,
+			X: pt.X, Y: pt.Y, Radius: 4, Filled: true,
 		})
 	}
 	tp.canvas.SetOverlay("trace_segments", &canvas.Overlay{
@@ -1761,7 +1916,7 @@ func (tp *TracesPanel) finishTraceCommon(endLabel string) string {
 		Source: pcbtrace.SourceManual,
 	}
 	tp.state.FeaturesLayer.AddTrace(et)
-	tp.rebuildFeaturesOverlay()
+	tp.lastTraceID = traceID
 
 	return traceID
 }
@@ -1770,6 +1925,7 @@ func (tp *TracesPanel) finishTraceCommon(endLabel string) string {
 func (tp *TracesPanel) finishTraceAtVia(endVia *via.ConfirmedVia) {
 	tp.traceEndVia = endVia
 	tp.traceEndConn = nil
+	tp.traceEndJunctionTrace = ""
 	tp.finishTraceCommon(endVia.ID)
 
 	tp.associateTraceEndpoints()
@@ -1785,8 +1941,10 @@ func (tp *TracesPanel) finishTraceAtVia(endVia *via.ConfirmedVia) {
 		startLabel, endVia.ID, nSegs, netInfo))
 	tp.traceStartVia = nil
 	tp.traceStartConn = nil
+	tp.traceStartJunctionTrace = ""
 	tp.traceEndVia = nil
 	tp.traceEndConn = nil
+	tp.traceEndJunctionTrace = ""
 }
 
 // finishTraceAtConnector completes the polyline trace at a connector.
@@ -1797,6 +1955,7 @@ func (tp *TracesPanel) finishTraceAtConnector(conn *connector.Connector) {
 	}
 	tp.traceEndVia = nil
 	tp.traceEndConn = conn
+	tp.traceEndJunctionTrace = ""
 	tp.finishTraceCommon(endLabel)
 
 	tp.associateTraceEndpoints()
@@ -1812,20 +1971,52 @@ func (tp *TracesPanel) finishTraceAtConnector(conn *connector.Connector) {
 		startLabel, endLabel, nSegs, netInfo))
 	tp.traceStartVia = nil
 	tp.traceStartConn = nil
+	tp.traceStartJunctionTrace = ""
 	tp.traceEndVia = nil
 	tp.traceEndConn = nil
+	tp.traceEndJunctionTrace = ""
 }
 
-// hitTestVertex checks all completed trace vertices for a hit near (x, y).
+// finishTraceAtJunction completes the polyline trace at a vertex of an existing trace (junction).
+func (tp *TracesPanel) finishTraceAtJunction(junctionTraceID string) {
+	tp.traceEndVia = nil
+	tp.traceEndConn = nil
+	tp.traceEndJunctionTrace = junctionTraceID
+	tp.finishTraceCommon(junctionTraceID)
+
+	tp.associateTraceEndpoints()
+
+	startLabel := tp.traceStartLabel()
+	net := tp.state.FeaturesLayer.GetNetForElement(junctionTraceID)
+	netInfo := ""
+	if net != nil {
+		netInfo = fmt.Sprintf(" [%s]", net.Name)
+	}
+	nSegs := len(tp.tracePoints) - 1
+	tp.traceStatusLabel.SetText(fmt.Sprintf("Trace: %s -> %s junction (%d segments)%s",
+		startLabel, junctionTraceID, nSegs, netInfo))
+	tp.traceStartVia = nil
+	tp.traceStartConn = nil
+	tp.traceStartJunctionTrace = ""
+	tp.traceEndVia = nil
+	tp.traceEndConn = nil
+	tp.traceEndJunctionTrace = ""
+}
+
+// hitTestVertex checks completed trace vertices on the selected layer for a hit near (x, y).
 func (tp *TracesPanel) hitTestVertex(x, y float64) (traceID string, pointIdx int, ok bool) {
 	tolerance := 5.0
 	if tp.state.DPI > 0 {
 		tolerance = 0.008 * tp.state.DPI
 	}
+	activeLayer := tp.selectedTraceLayer()
 	bestDist := tolerance
 	for _, tid := range tp.state.FeaturesLayer.GetTraces() {
 		tf := tp.state.FeaturesLayer.GetTraceFeature(tid)
 		if tf == nil {
+			continue
+		}
+		if tf.Layer != activeLayer {
 			continue
 		}
 		for i, pt := range tf.Points {
@@ -1922,6 +2113,197 @@ func (tp *TracesPanel) cancelVertexDrag() {
 	tp.traceStatusLabel.SetText("Vertex drag cancelled")
 }
 
+// autoTraceToAdjacentVia traces the copper path from cv to the next (+1) or previous (-1)
+// confirmed via in creation order. The trace follows the skeleton of detected copper.
+func (tp *TracesPanel) autoTraceToAdjacentVia(cv *via.ConfirmedVia, direction int) {
+	allVias := tp.state.FeaturesLayer.GetConfirmedVias()
+	if len(allVias) < 2 {
+		tp.traceStatusLabel.SetText("Need at least 2 confirmed vias")
+		return
+	}
+
+	// Find index of cv
+	idx := -1
+	for i, v := range allVias {
+		if v.ID == cv.ID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		tp.traceStatusLabel.SetText(fmt.Sprintf("Via %s not found", cv.ID))
+		return
+	}
+
+	adjIdx := idx + direction
+	if adjIdx < 0 || adjIdx >= len(allVias) {
+		label := "next"
+		if direction < 0 {
+			label = "previous"
+		}
+		tp.traceStatusLabel.SetText(fmt.Sprintf("No %s via (at boundary)", label))
+		return
+	}
+	adjVia := allVias[adjIdx]
+
+	// Get the board image for the selected layer
+	var boardImg image.Image
+	var traceLayer pcbtrace.TraceLayer
+	if tp.selectedLayer() == "Front" {
+		if tp.state.FrontImage == nil || tp.state.FrontImage.Image == nil {
+			tp.traceStatusLabel.SetText("No front image loaded")
+			return
+		}
+		boardImg = tp.state.FrontImage.Image
+		traceLayer = pcbtrace.LayerFront
+	} else {
+		if tp.state.BackImage == nil || tp.state.BackImage.Image == nil {
+			tp.traceStatusLabel.SetText("No back image loaded")
+			return
+		}
+		boardImg = tp.state.BackImage.Image
+		traceLayer = pcbtrace.LayerBack
+	}
+
+	startCenter := cv.Center
+	endCenter := adjVia.Center
+
+	tp.traceStatusLabel.SetText(fmt.Sprintf("Auto-tracing %s -> %s...", cv.ID, adjVia.ID))
+
+	// Capture values for goroutine
+	startID := cv.ID
+	endID := adjVia.ID
+
+	go func() {
+		// Compute ROI
+		minX := math.Min(startCenter.X, endCenter.X)
+		minY := math.Min(startCenter.Y, endCenter.Y)
+		maxX := math.Max(startCenter.X, endCenter.X)
+		maxY := math.Max(startCenter.Y, endCenter.Y)
+
+		dist := math.Sqrt((endCenter.X-startCenter.X)*(endCenter.X-startCenter.X) +
+			(endCenter.Y-startCenter.Y)*(endCenter.Y-startCenter.Y))
+		margin := dist * 2
+		if margin < 200 {
+			margin = 200
+		}
+
+		imgBounds := boardImg.Bounds()
+		roiX := int(math.Max(float64(imgBounds.Min.X), minX-margin))
+		roiY := int(math.Max(float64(imgBounds.Min.Y), minY-margin))
+		roiX2 := int(math.Min(float64(imgBounds.Max.X), maxX+margin))
+		roiY2 := int(math.Min(float64(imgBounds.Max.Y), maxY+margin))
+
+		roiRect := image.Rect(roiX, roiY, roiX2, roiY2)
+		roiW := roiRect.Dx()
+		roiH := roiRect.Dy()
+		if roiW <= 0 || roiH <= 0 {
+			glib.IdleAdd(func() {
+				tp.traceStatusLabel.SetText("ROI too small for auto-trace")
+			})
+			return
+		}
+
+		// Crop the board image to ROI
+		cropped := image.NewRGBA(image.Rect(0, 0, roiW, roiH))
+		draw.Draw(cropped, cropped.Bounds(), boardImg, roiRect.Min, draw.Src)
+
+		// Convert to Mat
+		mat, err := pcbtrace.ImageToMat(cropped)
+		if err != nil {
+			glib.IdleAdd(func() {
+				tp.traceStatusLabel.SetText(fmt.Sprintf("Image conversion error: %v", err))
+			})
+			return
+		}
+		defer mat.Close()
+
+		// Detect copper
+		copperMask := pcbtrace.AutoDetectCopper(mat, 4)
+		defer copperMask.Close()
+
+		// Cleanup
+		cleaned := pcbtrace.CleanupMask(copperMask, 2)
+		defer cleaned.Close()
+
+		// Skeletonize
+		skeleton := pcbtrace.Skeletonize(cleaned)
+		defer skeleton.Close()
+
+		// Convert via centers to ROI-local coordinates
+		localStart := geometry.Point2D{
+			X: startCenter.X - float64(roiX),
+			Y: startCenter.Y - float64(roiY),
+		}
+		localEnd := geometry.Point2D{
+			X: endCenter.X - float64(roiX),
+			Y: endCenter.Y - float64(roiY),
+		}
+
+		// Search radius for nearest skeleton pixel
+		searchRadius := int(margin / 2)
+		if searchRadius < 50 {
+			searchRadius = 50
+		}
+
+		// Pathfind on skeleton
+		path, ok := pcbtrace.FindPathOnSkeleton(skeleton, localStart, localEnd, searchRadius)
+		if !ok {
+			glib.IdleAdd(func() {
+				tp.traceStatusLabel.SetText(fmt.Sprintf("No copper path found between %s and %s", startID, endID))
+			})
+			return
+		}
+
+		// Simplify
+		path = pcbtrace.SimplifyPath(path, 2.0)
+
+		// Offset from ROI-local back to image-global
+		for i := range path {
+			path[i].X += float64(roiX)
+			path[i].Y += float64(roiY)
+		}
+
+		fmt.Printf("Auto-trace %s -> %s: %d points (simplified from skeleton)\n", startID, endID, len(path))
+
+		// Create trace on UI thread
+		glib.IdleAdd(func() {
+			traceID := fmt.Sprintf("trace-%03d", tp.state.FeaturesLayer.TraceCount()+1)
+			et := pcbtrace.ExtendedTrace{
+				Trace: pcbtrace.Trace{
+					ID: traceID, Layer: traceLayer, Points: path,
+				},
+				Source: pcbtrace.SourceDetected,
+			}
+			tp.state.FeaturesLayer.AddTrace(et)
+			tp.lastTraceID = traceID
+
+			// Set up endpoint state for net association
+			tp.traceStartVia = cv
+			tp.traceStartConn = nil
+			tp.traceStartJunctionTrace = ""
+			tp.traceEndVia = adjVia
+			tp.traceEndConn = nil
+			tp.traceEndJunctionTrace = ""
+			tp.associateTraceEndpoints()
+
+			tp.rebuildFeaturesOverlay()
+			tp.canvas.Refresh()
+
+			net := tp.state.FeaturesLayer.GetNetForElement(endID)
+			netInfo := ""
+			if net != nil {
+				netInfo = fmt.Sprintf(" [%s]", net.Name)
+			}
+			tp.traceStatusLabel.SetText(fmt.Sprintf("Auto-trace: %s -> %s (%d pts)%s",
+				startID, endID, len(path), netInfo))
+
+			tp.traceStartVia = nil
+			tp.traceEndVia = nil
+		})
+	}()
+}
+
 // onHover handles mouse hover to display netlist membership when over a trace, via, or connector.
 func (tp *TracesPanel) onHover(x, y float64) {
 	// Don't update hover info during active operations
@@ -1935,8 +2317,8 @@ func (tp *TracesPanel) onHover(x, y float64) {
 		return
 	}
 
-	// Hit-test connector
-	if conn := tp.state.FeaturesLayer.HitTestConnector(x, y); conn != nil {
+	// Hit-test connector on selected side
+	if conn := tp.state.FeaturesLayer.HitTestConnectorOnSide(x, y, tp.selectedSide()); conn != nil {
 		label := conn.SignalName
 		if label == "" {
 			label = fmt.Sprintf("P%d", conn.PinNumber)
@@ -1945,7 +2327,7 @@ func (tp *TracesPanel) onHover(x, y float64) {
 		return
 	}
 
-	// Hit-test trace segment
+	// Hit-test trace segment (already filtered by layer in hitTestTraceSegment)
 	if hit := tp.hitTestTraceSegment(x, y); hit != nil {
 		tp.showNetInfoForElement(hit.traceID, hit.traceID)
 		return

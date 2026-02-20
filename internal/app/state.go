@@ -19,6 +19,7 @@ import (
 	"pcb-tracer/internal/features"
 	"pcb-tracer/internal/image"
 	"pcb-tracer/internal/logo"
+	"pcb-tracer/internal/netlist"
 	"pcb-tracer/internal/ocr"
 	"pcb-tracer/internal/trace"
 	"pcb-tracer/internal/via"
@@ -123,6 +124,11 @@ type State struct {
 
 	// Board definition for pin mapping
 	BoardDefinition *connector.BoardDefinition
+
+	// Viewport state (saved/restored with project)
+	ViewZoom    float64
+	ViewScrollX float64
+	ViewScrollY float64
 
 	// Event listeners
 	listeners map[EventType][]EventListener
@@ -331,10 +337,13 @@ func (s *State) LoadProject(path string) error {
 	s.BackCropBounds = proj.BackCropBounds
 	s.mu.Unlock()
 
-	// Restore normalized image paths
+	// Restore normalized image paths and viewport
 	s.mu.Lock()
 	s.FrontNormalizedPath = proj.FrontNormalizedPath
 	s.BackNormalizedPath = proj.BackNormalizedPath
+	s.ViewZoom = proj.ViewZoom
+	s.ViewScrollX = proj.ViewScrollX
+	s.ViewScrollY = proj.ViewScrollY
 	s.mu.Unlock()
 
 	// Load images - prefer normalized PNGs if they exist
@@ -534,6 +543,16 @@ func (s *State) LoadProject(path string) error {
 		fmt.Printf("[Project] Restored %d connectors\n", len(proj.Connectors))
 	}
 
+	if len(proj.Nets) > 0 {
+		if s.FeaturesLayer == nil {
+			s.FeaturesLayer = features.NewDetectedFeaturesLayer()
+		}
+		for _, n := range proj.Nets {
+			s.FeaturesLayer.AddNet(n)
+		}
+		fmt.Printf("[Project] Restored %d nets\n", len(proj.Nets))
+	}
+
 	// Logo library is now loaded from shared preferences, not project file
 	// Legacy project files with logos are ignored - logos are shared across all projects
 	s.mu.Unlock()
@@ -593,6 +612,10 @@ func (s *State) SaveProject(path string) error {
 		// Normalized image paths
 		FrontNormalizedPath: s.FrontNormalizedPath,
 		BackNormalizedPath:  s.BackNormalizedPath,
+		// Viewport
+		ViewZoom:    s.ViewZoom,
+		ViewScrollX: s.ViewScrollX,
+		ViewScrollY: s.ViewScrollY,
 	}
 
 	// Serialize contacts from detection results
@@ -647,6 +670,11 @@ func (s *State) SaveProject(path string) error {
 		if len(allConnectors) > 0 {
 			proj.Connectors = allConnectors
 			fmt.Printf("[Project] Saving %d connectors\n", len(allConnectors))
+		}
+		allNets := s.FeaturesLayer.GetNets()
+		if len(allNets) > 0 {
+			proj.Nets = allNets
+			fmt.Printf("[Project] Saving %d nets\n", len(allNets))
 		}
 	}
 
@@ -1310,6 +1338,14 @@ type ProjectFile struct {
 
 	// Logo library (v7+) - manufacturer mark templates
 	LogoLibrary *logo.LogoLibrary `json:"logo_library,omitempty"`
+
+	// Electrical nets (v13+)
+	Nets []*netlist.ElectricalNet `json:"nets,omitempty"`
+
+	// Viewport state (v12+)
+	ViewZoom    float64 `json:"view_zoom,omitempty"`
+	ViewScrollX float64 `json:"view_scroll_x,omitempty"`
+	ViewScrollY float64 `json:"view_scroll_y,omitempty"`
 }
 
 // ContactData is a JSON-serializable representation of a detected contact.

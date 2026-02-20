@@ -362,6 +362,25 @@ func ExtractSilkscreen(img gocv.Mat, threshold uint8, minArea int) gocv.Mat {
 	return combined
 }
 
+// ImageToMat converts a Go image.Image to a gocv.Mat in BGR format.
+func ImageToMat(img image.Image) (gocv.Mat, error) {
+	bounds := img.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+
+	mat := gocv.NewMatWithSize(h, w, gocv.MatTypeCV8UC3)
+
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			r, g, b, _ := img.At(bounds.Min.X+x, bounds.Min.Y+y).RGBA()
+			mat.SetUCharAt(y, x*3+0, uint8(b>>8))
+			mat.SetUCharAt(y, x*3+1, uint8(g>>8))
+			mat.SetUCharAt(y, x*3+2, uint8(r>>8))
+		}
+	}
+
+	return mat, nil
+}
+
 func max(a, b int) int {
 	if a > b {
 		return a

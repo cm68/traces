@@ -15,6 +15,7 @@ import (
 	"pcb-tracer/ui/prefs"
 
 	"github.com/gotk3/gotk3/gdk"
+	"github.com/gotk3/gotk3/glib"
 	"github.com/gotk3/gotk3/gtk"
 )
 
@@ -368,6 +369,28 @@ func (mw *MainWindow) setupEventHandlers() {
 			mw.win.SetTitle("PCB Tracer - " + filepath.Base(path))
 			mw.updateStatus("Project loaded: " + path)
 		}
+		// Restore viewport after images are loaded and canvas is sized
+		savedZoom := mw.state.ViewZoom
+		savedScrollX := mw.state.ViewScrollX
+		savedScrollY := mw.state.ViewScrollY
+		fmt.Printf("[viewport] restoring zoom=%.3f scrollX=%.1f scrollY=%.1f\n",
+			savedZoom, savedScrollX, savedScrollY)
+		glib.IdleAdd(func() {
+			if savedZoom >= 0.1 && savedZoom <= 10.0 {
+				mw.canvas.SetZoom(savedZoom)
+				fmt.Printf("[viewport] zoom set to %.3f\n", savedZoom)
+			}
+			// Defer scroll restore so the canvas has updated its content size
+			glib.IdleAdd(func() {
+				if savedScrollX != 0 || savedScrollY != 0 {
+					mw.canvas.SetScrollOffset(savedScrollX, savedScrollY)
+					fmt.Printf("[viewport] scroll set to (%.1f, %.1f)\n", savedScrollX, savedScrollY)
+				}
+				// Verify
+				actualX, actualY := mw.canvas.ScrollOffset()
+				fmt.Printf("[viewport] actual scroll after set: (%.1f, %.1f)\n", actualX, actualY)
+			})
+		})
 	})
 
 	mw.state.On(app.EventImageLoaded, func(data interface{}) {
@@ -615,11 +638,19 @@ func (mw *MainWindow) onOpenProject() {
 	mw.syncLayers()
 }
 
+func (mw *MainWindow) snapshotViewport() {
+	mw.state.ViewZoom = mw.canvas.GetZoom()
+	mw.state.ViewScrollX, mw.state.ViewScrollY = mw.canvas.ScrollOffset()
+	fmt.Printf("[viewport] snapshot: zoom=%.3f scrollX=%.1f scrollY=%.1f\n",
+		mw.state.ViewZoom, mw.state.ViewScrollX, mw.state.ViewScrollY)
+}
+
 func (mw *MainWindow) onSaveProject() {
 	if mw.state.ProjectPath == "" {
 		mw.onSaveProjectAs()
 		return
 	}
+	mw.snapshotViewport()
 	if err := mw.state.SaveProject(mw.state.ProjectPath); err != nil {
 		mw.showError("Failed to save project: " + err.Error())
 		return
@@ -660,6 +691,7 @@ func (mw *MainWindow) onSaveProjectAs() {
 	}
 	mw.prefs.SetString(prefKeyLastDir, filepath.Dir(path))
 
+	mw.snapshotViewport()
 	if err := mw.state.SaveProject(path); err != nil {
 		mw.showError("Failed to save project: " + err.Error())
 		return

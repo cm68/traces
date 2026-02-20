@@ -70,7 +70,7 @@ func VectorizeTraces(copperMask gocv.Mat, layer TraceLayer, opts VectorizeOption
 	}
 
 	// Step 1: Skeletonize the mask to get centerlines
-	skeleton := skeletonize(copperMask)
+	skeleton := Skeletonize(copperMask)
 	defer skeleton.Close()
 
 	// Step 2: Extract paths from skeleton
@@ -78,7 +78,7 @@ func VectorizeTraces(copperMask gocv.Mat, layer TraceLayer, opts VectorizeOption
 
 	// Step 3: Simplify paths to reduce vertex count
 	for i := range paths {
-		paths[i] = simplifyPath(paths[i], opts.SimplifyEpsilon)
+		paths[i] = SimplifyPath(paths[i], opts.SimplifyEpsilon)
 	}
 
 	// Step 4: Estimate widths by measuring distance to mask edge
@@ -102,9 +102,9 @@ func VectorizeTraces(copperMask gocv.Mat, layer TraceLayer, opts VectorizeOption
 	return traces
 }
 
-// skeletonize reduces a binary mask to single-pixel-wide lines.
+// Skeletonize reduces a binary mask to single-pixel-wide lines.
 // Uses morphological thinning via iterative erosion.
-func skeletonize(mask gocv.Mat) gocv.Mat {
+func Skeletonize(mask gocv.Mat) gocv.Mat {
 	// Clone the mask since we'll modify it
 	skeleton := gocv.NewMatWithSize(mask.Rows(), mask.Cols(), gocv.MatTypeCV8U)
 	temp := mask.Clone()
@@ -172,8 +172,8 @@ func extractPaths(skeleton gocv.Mat, minLength int) [][]geometry.Point2D {
 	return paths
 }
 
-// simplifyPath reduces the number of vertices using Douglas-Peucker algorithm.
-func simplifyPath(path []geometry.Point2D, epsilon float64) []geometry.Point2D {
+// SimplifyPath reduces the number of vertices using Douglas-Peucker algorithm.
+func SimplifyPath(path []geometry.Point2D, epsilon float64) []geometry.Point2D {
 	if len(path) <= 2 {
 		return path
 	}
@@ -194,8 +194,8 @@ func simplifyPath(path []geometry.Point2D, epsilon float64) []geometry.Point2D {
 	// If max distance is greater than epsilon, recursively simplify
 	if dmax > epsilon {
 		// Recursive call
-		left := simplifyPath(path[:index+1], epsilon)
-		right := simplifyPath(path[index:], epsilon)
+		left := SimplifyPath(path[:index+1], epsilon)
+		right := SimplifyPath(path[index:], epsilon)
 
 		// Build result (avoid duplicating middle point)
 		result := make([]geometry.Point2D, 0, len(left)+len(right)-1)

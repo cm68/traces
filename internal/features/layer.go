@@ -853,6 +853,21 @@ func (l *DetectedFeaturesLayer) HitTestConnector(x, y float64) *connector.Connec
 	return nil
 }
 
+// HitTestConnectorOnSide finds the connector at the given coordinates on the specified side.
+func (l *DetectedFeaturesLayer) HitTestConnectorOnSide(x, y float64, side image.Side) *connector.Connector {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	for _, id := range l.connectors {
+		if c := l.connectorsMap[id]; c != nil && c.Side == side {
+			if c.HitTest(x, y) {
+				return c
+			}
+		}
+	}
+	return nil
+}
+
 // Electrical net methods
 
 // AddNet adds an electrical net to the layer.

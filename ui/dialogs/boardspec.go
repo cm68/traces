@@ -65,7 +65,8 @@ func NewBoardSpecDialog(spec *board.BaseSpec, win *gtk.Window, onSave func(*boar
 func (d *BoardSpecDialog) Show() {
 	dlg, _ := gtk.DialogNewWithButtons("Board Specification: "+d.spec.SpecName, d.win,
 		gtk.DIALOG_MODAL|gtk.DIALOG_DESTROY_WITH_PARENT,
-		[]interface{}{"Cancel", gtk.RESPONSE_CANCEL, "Save", gtk.RESPONSE_OK})
+		[]interface{}{"Cancel", gtk.RESPONSE_CANCEL},
+		[]interface{}{"Save", gtk.RESPONSE_OK})
 	dlg.SetDefaultSize(500, 700)
 
 	contentArea, _ := dlg.GetContentArea()

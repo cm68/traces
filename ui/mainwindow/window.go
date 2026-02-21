@@ -72,9 +72,20 @@ func New(state *app.State, p *prefs.Prefs) *MainWindow {
 
 	mw.setupUI()
 	mw.setupMenus()
+	mw.sidePanel.SetOnPanelChanged(mw.syncViewRadioItem)
 	mw.syncViewMenuSensitivity()
 	mw.setupEventHandlers()
 	mw.setupKeyboard()
+
+	// Restore saved panel after the window is realized so the GTK stack
+	// switch takes effect. During setupUI(), restoreLastProject() enables
+	// panels via EventProjectLoaded but currentPanel stays on "import".
+	glib.IdleAdd(func() {
+		saved := mw.prefs.String("activePanel")
+		if saved != "" && mw.sidePanel.IsPanelEnabled(saved) {
+			mw.sidePanel.ShowPanel(saved)
+		}
+	})
 
 	win.Connect("destroy", func() {
 		mw.saveWindowSize()
@@ -378,8 +389,6 @@ func (mw *MainWindow) setupEventHandlers() {
 			mw.win.SetTitle("PCB Tracer - " + filepath.Base(path))
 			mw.updateStatus("Project loaded: " + path)
 		}
-		// Restore the active view panel
-		mw.restoreActivePanel()
 		// Restore viewport after images are loaded and canvas is sized
 		savedZoom := mw.state.ViewZoom
 		savedScrollX := mw.state.ViewScrollX
@@ -486,15 +495,12 @@ func (mw *MainWindow) saveWindowSize() {
 	mw.prefs.Save()
 }
 
-// restoreActivePanel sets the view radio menu item from saved preferences,
-// which triggers the toggled callback and switches the side panel.
-func (mw *MainWindow) restoreActivePanel() {
-	saved := mw.prefs.String("activePanel")
-	if saved == "" {
-		return
-	}
+// syncViewRadioItem updates the View menu radio items to match the active panel.
+// Called by SidePanel's onPanelChanged callback. The early-return guard in
+// ShowPanel prevents re-entry when SetActive triggers the toggled signal.
+func (mw *MainWindow) syncViewRadioItem(name string) {
 	var item *gtk.RadioMenuItem
-	switch saved {
+	switch name {
 	case panels.PanelImport:
 		item = mw.viewImportItem
 	case panels.PanelComponents:
@@ -508,7 +514,7 @@ func (mw *MainWindow) restoreActivePanel() {
 	case panels.PanelLibrary:
 		item = mw.viewLibraryItem
 	}
-	if item != nil && mw.sidePanel.IsPanelEnabled(saved) {
+	if item != nil && !item.GetActive() {
 		item.SetActive(true)
 	}
 }

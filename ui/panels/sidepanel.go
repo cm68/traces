@@ -48,6 +48,9 @@ type SidePanel struct {
 
 	// Panel enable/disable
 	disabledPanels map[string]bool
+
+	// Callback when active panel changes (used by MainWindow to sync radio items)
+	onPanelChanged func(string)
 }
 
 // NewSidePanel creates a new side panel.
@@ -105,7 +108,6 @@ func NewSidePanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, p 
 		sp.updatePanelEnableState()
 		sp.importPanel.updateAlignmentUI()
 		sp.importPanel.syncBoardSelection()
-		sp.restoreSavedPanel()
 	})
 
 	return sp
@@ -116,14 +118,18 @@ func (sp *SidePanel) Widget() gtk.IWidget {
 	return sp.stack
 }
 
+// SetOnPanelChanged registers a callback for when the active panel changes.
+// MainWindow uses this to keep the View menu radio items in sync.
+func (sp *SidePanel) SetOnPanelChanged(cb func(string)) {
+	sp.onPanelChanged = cb
+}
+
 // ShowPanel switches to the specified panel.
 func (sp *SidePanel) ShowPanel(name string) {
-	visibleName := sp.stack.GetVisibleChildName()
-	if name == sp.currentPanel && name == visibleName {
+	if sp.disabledPanels[name] {
 		return
 	}
-	if sp.disabledPanels[name] {
-		fmt.Printf("Panel %q is disabled (save aligned images first)\n", name)
+	if name == sp.currentPanel {
 		return
 	}
 
@@ -163,6 +169,10 @@ func (sp *SidePanel) ShowPanel(name string) {
 		sp.canvas.OnLeftClick(nil)
 		sp.canvas.OnRightClick(nil)
 	}
+
+	if sp.onPanelChanged != nil {
+		sp.onPanelChanged(name)
+	}
 }
 
 // CurrentPanel returns the name of the currently visible panel.
@@ -173,6 +183,7 @@ func (sp *SidePanel) CurrentPanel() string {
 // SavePreferences saves panel preferences.
 func (sp *SidePanel) SavePreferences() {
 	if sp.prefs != nil {
+		fmt.Printf("[panel] SavePreferences: saving activePanel=%q\n", sp.currentPanel)
 		sp.prefs.SetString(prefKeyActivePanel, sp.currentPanel)
 	}
 }
@@ -247,17 +258,6 @@ func (sp *SidePanel) SetPanelEnabled(name string, enabled bool) {
 // IsPanelEnabled returns whether a panel is enabled.
 func (sp *SidePanel) IsPanelEnabled(name string) bool {
 	return !sp.disabledPanels[name]
-}
-
-// restoreSavedPanel switches to the last-used panel from preferences.
-func (sp *SidePanel) restoreSavedPanel() {
-	if sp.prefs == nil {
-		return
-	}
-	saved := sp.prefs.String(prefKeyActivePanel)
-	if saved != "" && !sp.disabledPanels[saved] {
-		sp.ShowPanel(saved)
-	}
 }
 
 // SyncBoardSelection updates the import panel's board combo to match state.

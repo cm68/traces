@@ -26,6 +26,13 @@ func netNamePriority(name string) int {
 	return 2 // signal name or user-assigned name
 }
 
+// IsLowPriorityName returns true if the name is auto-generated ("net-NNN") or
+// a component.pin format ("B13.1") — i.e. safe to overwrite with a signal name.
+// User-assigned or signal names (priority 2) are NOT low priority.
+func IsLowPriorityName(name string) bool {
+	return netNamePriority(name) < 2
+}
+
 // BetterNetName returns the higher-priority name between a and b.
 // Priority: signal/user names > component pin names > auto-generated "net-NNN".
 func BetterNetName(a, b string) string {

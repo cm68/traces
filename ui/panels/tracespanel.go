@@ -1301,12 +1301,59 @@ func (tp *TracesPanel) addConfirmedViaAt(x, y float64) {
 
 	fmt.Printf("Added confirmed via %s at (%.0f, %.0f) r=%.0f\n", cvID, x, y, radius)
 
+	// Auto-assign component pin if via falls inside a component's bounds
+	tp.autoAssignPin(cv)
+
 	tp.rebuildFeaturesOverlay()
 	tp.updateViaCounts()
 	tp.selectVia(cv)
 
 	tp.state.Emit(app.EventFeaturesChanged, nil)
 	tp.state.Emit(app.EventConfirmedViasChanged, nil)
+}
+
+// autoAssignPin finds the nearest component to a confirmed via and, if close
+// enough, automatically assigns the component ID, guessed pin number, and
+// resolved signal name. Uses the same closest-component logic as namePin()
+// but with a distance threshold so distant vias aren't spuriously assigned.
+func (tp *TracesPanel) autoAssignPin(cv *via.ConfirmedVia) {
+	if len(tp.state.Components) == 0 {
+		return
+	}
+
+	// Max distance from component center: ~0.5 inches at current DPI
+	maxDist := 200.0
+	if tp.state.DPI > 0 {
+		maxDist = 0.5 * tp.state.DPI
+	}
+
+	var closestComp *component.Component
+	bestDist := math.MaxFloat64
+	for _, comp := range tp.state.Components {
+		center := comp.Center()
+		dx := center.X - cv.Center.X
+		dy := center.Y - cv.Center.Y
+		dist := math.Sqrt(dx*dx + dy*dy)
+		if dist < bestDist {
+			bestDist = dist
+			closestComp = comp
+		}
+	}
+	if closestComp == nil || bestDist > maxDist {
+		return
+	}
+
+	cv.ComponentID = closestComp.ID
+	guessed := tp.guessPin(cv, closestComp.ID)
+	if guessed != "" {
+		cv.PinNumber = guessed
+		tp.resolveSignalName(cv)
+	}
+	fmt.Printf("Auto-assigned via %s -> %s pin %s", cv.ID, cv.ComponentID, cv.PinNumber)
+	if cv.SignalName != "" {
+		fmt.Printf(" (%s)", cv.SignalName)
+	}
+	fmt.Println()
 }
 
 // deleteNearestVia removes the closest via on the given side near (x, y).
@@ -1777,10 +1824,12 @@ func (tp *TracesPanel) namePin(cv *via.ConfirmedVia) {
 		[]interface{}{"Cancel", gtk.RESPONSE_CANCEL},
 		[]interface{}{"OK", gtk.RESPONSE_OK})
 	dlg.SetDefaultSize(300, 200)
+	dlg.SetDefaultResponse(gtk.RESPONSE_OK)
 
 	contentArea, _ := dlg.GetContentArea()
 
 	compEntry, _ := gtk.EntryNew()
+	compEntry.SetActivatesDefault(true)
 	if cv.ComponentID != "" {
 		compEntry.SetText(cv.ComponentID)
 	} else if closestID != "" {
@@ -1789,6 +1838,7 @@ func (tp *TracesPanel) namePin(cv *via.ConfirmedVia) {
 	compEntry.SetPlaceholderText("e.g. B13, U1")
 
 	pinEntry, _ := gtk.EntryNew()
+	pinEntry.SetActivatesDefault(true)
 	if cv.PinNumber != "" {
 		pinEntry.SetText(cv.PinNumber)
 	} else {
@@ -1897,10 +1947,10 @@ func (tp *TracesPanel) resolveSignalName(cv *via.ConfirmedVia) {
 		return
 	}
 
-	// Find the net containing this via
+	// Find the net containing this via — only rename low-priority names
 	for _, net := range tp.state.FeaturesLayer.GetNets() {
 		if net.ContainsVia(cv.ID) {
-			if netlist.BetterNetName(cv.SignalName, net.Name) == cv.SignalName {
+			if netlist.IsLowPriorityName(net.Name) {
 				fmt.Printf("Renaming net %q -> %q (output pin)\n", net.Name, cv.SignalName)
 				net.Name = cv.SignalName
 			}
@@ -2264,9 +2314,11 @@ func (tp *TracesPanel) renameConnectorSignal(conn *connector.Connector) {
 		[]interface{}{"Cancel", gtk.RESPONSE_CANCEL},
 		[]interface{}{"OK", gtk.RESPONSE_OK})
 	dlg.SetDefaultSize(300, 150)
+	dlg.SetDefaultResponse(gtk.RESPONSE_OK)
 
 	contentArea, _ := dlg.GetContentArea()
 	entry, _ := gtk.EntryNew()
+	entry.SetActivatesDefault(true)
 	entry.SetText(conn.SignalName)
 	entry.SetPlaceholderText("e.g. A0, D7, CLOCK")
 

@@ -24,12 +24,16 @@ const (
 	PanelLibrary    = "library"
 )
 
+// Preference key for persisting the active panel.
+const prefKeyActivePanel = "activePanel"
+
 // SidePanel provides the main side panel with switchable views.
 type SidePanel struct {
 	state  *app.State
 	canvas *canvas.ImageCanvas
 	stack  *gtk.Stack
 	win    *gtk.Window
+	prefs  *prefs.Prefs
 
 	// Individual panels
 	importPanel     *ImportPanel
@@ -52,6 +56,7 @@ func NewSidePanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, p 
 		state:          state,
 		canvas:         cvs,
 		win:            win,
+		prefs:          p,
 		currentPanel:   PanelImport,
 		disabledPanels: make(map[string]bool),
 	}
@@ -100,6 +105,7 @@ func NewSidePanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, p 
 		sp.updatePanelEnableState()
 		sp.importPanel.updateAlignmentUI()
 		sp.importPanel.syncBoardSelection()
+		sp.restoreSavedPanel()
 	})
 
 	return sp
@@ -112,7 +118,8 @@ func (sp *SidePanel) Widget() gtk.IWidget {
 
 // ShowPanel switches to the specified panel.
 func (sp *SidePanel) ShowPanel(name string) {
-	if name == sp.currentPanel {
+	visibleName := sp.stack.GetVisibleChildName()
+	if name == sp.currentPanel && name == visibleName {
 		return
 	}
 	if sp.disabledPanels[name] {
@@ -165,7 +172,9 @@ func (sp *SidePanel) CurrentPanel() string {
 
 // SavePreferences saves panel preferences.
 func (sp *SidePanel) SavePreferences() {
-	// Will be populated as panels are ported
+	if sp.prefs != nil {
+		sp.prefs.SetString(prefKeyActivePanel, sp.currentPanel)
+	}
 }
 
 // SyncLayers updates the canvas with layers from state.
@@ -238,6 +247,17 @@ func (sp *SidePanel) SetPanelEnabled(name string, enabled bool) {
 // IsPanelEnabled returns whether a panel is enabled.
 func (sp *SidePanel) IsPanelEnabled(name string) bool {
 	return !sp.disabledPanels[name]
+}
+
+// restoreSavedPanel switches to the last-used panel from preferences.
+func (sp *SidePanel) restoreSavedPanel() {
+	if sp.prefs == nil {
+		return
+	}
+	saved := sp.prefs.String(prefKeyActivePanel)
+	if saved != "" && !sp.disabledPanels[saved] {
+		sp.ShowPanel(saved)
+	}
 }
 
 // SyncBoardSelection updates the import panel's board combo to match state.

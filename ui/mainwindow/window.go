@@ -378,6 +378,8 @@ func (mw *MainWindow) setupEventHandlers() {
 			mw.win.SetTitle("PCB Tracer - " + filepath.Base(path))
 			mw.updateStatus("Project loaded: " + path)
 		}
+		// Restore the active view panel
+		mw.restoreActivePanel()
 		// Restore viewport after images are loaded and canvas is sized
 		savedZoom := mw.state.ViewZoom
 		savedScrollX := mw.state.ViewScrollX
@@ -482,6 +484,33 @@ func (mw *MainWindow) saveWindowSize() {
 	mw.prefs.SetFloat(prefKeyWindowWidth, float64(w))
 	mw.prefs.SetFloat(prefKeyWindowHeight, float64(h))
 	mw.prefs.Save()
+}
+
+// restoreActivePanel sets the view radio menu item from saved preferences,
+// which triggers the toggled callback and switches the side panel.
+func (mw *MainWindow) restoreActivePanel() {
+	saved := mw.prefs.String("activePanel")
+	if saved == "" {
+		return
+	}
+	var item *gtk.RadioMenuItem
+	switch saved {
+	case panels.PanelImport:
+		item = mw.viewImportItem
+	case panels.PanelComponents:
+		item = mw.viewComponentsItem
+	case panels.PanelTraces:
+		item = mw.viewTracesItem
+	case panels.PanelProperties:
+		item = mw.viewPropertiesItem
+	case panels.PanelLogos:
+		item = mw.viewLogosItem
+	case panels.PanelLibrary:
+		item = mw.viewLibraryItem
+	}
+	if item != nil && mw.sidePanel.IsPanelEnabled(saved) {
+		item.SetActive(true)
+	}
 }
 
 // SavePreferences saves window size and zoom to preferences.
@@ -660,6 +689,7 @@ func (mw *MainWindow) onSaveProject() {
 		return
 	}
 	mw.snapshotViewport()
+	mw.sidePanel.SavePreferences()
 	if err := mw.state.SaveProject(mw.state.ProjectPath); err != nil {
 		mw.showError("Failed to save project: " + err.Error())
 		return
@@ -701,6 +731,7 @@ func (mw *MainWindow) onSaveProjectAs() {
 	mw.prefs.SetString(prefKeyLastDir, filepath.Dir(path))
 
 	mw.snapshotViewport()
+	mw.sidePanel.SavePreferences()
 	if err := mw.state.SaveProject(path); err != nil {
 		mw.showError("Failed to save project: " + err.Error())
 		return

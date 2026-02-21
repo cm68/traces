@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"strings"
+
 	"pcb-tracer/internal/app"
 	"pcb-tracer/internal/component"
 	"pcb-tracer/internal/connector"
@@ -1318,6 +1320,7 @@ func (tp *TracesPanel) addConfirmedViaAt(x, y float64) {
 // but with a distance threshold so distant vias aren't spuriously assigned.
 func (tp *TracesPanel) autoAssignPin(cv *via.ConfirmedVia) {
 	if len(tp.state.Components) == 0 {
+		fmt.Printf("[autoAssign] %s: no components defined\n", cv.ID)
 		return
 	}
 
@@ -1339,21 +1342,63 @@ func (tp *TracesPanel) autoAssignPin(cv *via.ConfirmedVia) {
 			closestComp = comp
 		}
 	}
+
+	fmt.Printf("[autoAssign] %s at (%.0f,%.0f): closest=%s dist=%.0f maxDist=%.0f",
+		cv.ID, cv.Center.X, cv.Center.Y, closestComp.ID, bestDist, maxDist)
+	if closestComp != nil {
+		c := closestComp.Center()
+		fmt.Printf(" compCenter=(%.0f,%.0f) part=%s pkg=%s", c.X, c.Y, closestComp.PartNumber, closestComp.Package)
+	}
+	fmt.Println()
+
 	if closestComp == nil || bestDist > maxDist {
+		fmt.Printf("[autoAssign] %s: too far from any component\n", cv.ID)
 		return
 	}
 
 	cv.ComponentID = closestComp.ID
+
+	// Count existing named pins on this component
+	namedCount := 0
+	for _, other := range tp.state.FeaturesLayer.GetConfirmedVias() {
+		if other.ComponentID == closestComp.ID && other.PinNumber != "" {
+			namedCount++
+		}
+	}
+	fmt.Printf("[autoAssign] %s: component %s has %d existing named pins\n", cv.ID, closestComp.ID, namedCount)
+
 	guessed := tp.guessPin(cv, closestComp.ID)
 	if guessed != "" {
+		// Check if another via already claims this component+pin
+		if tp.isPinTaken(closestComp.ID, guessed, cv.ID) {
+			fmt.Printf("[autoAssign] %s -> %s pin %s already taken, skipping\n", cv.ID, closestComp.ID, guessed)
+			cv.ComponentID = "" // don't partially assign
+			return
+		}
 		cv.PinNumber = guessed
 		tp.resolveSignalName(cv)
+		fmt.Printf("[autoAssign] %s -> %s pin %s", cv.ID, cv.ComponentID, cv.PinNumber)
+		if cv.SignalName != "" {
+			fmt.Printf(" (%s)", cv.SignalName)
+		}
+		fmt.Println()
+	} else {
+		fmt.Printf("[autoAssign] %s -> %s: guessPin returned empty (need named pins to extrapolate)\n", cv.ID, cv.ComponentID)
 	}
-	fmt.Printf("Auto-assigned via %s -> %s pin %s", cv.ID, cv.ComponentID, cv.PinNumber)
-	if cv.SignalName != "" {
-		fmt.Printf(" (%s)", cv.SignalName)
+}
+
+// isPinTaken returns true if another via (not excludeViaID) already has the
+// given component+pin assignment.
+func (tp *TracesPanel) isPinTaken(componentID, pinNumber, excludeViaID string) bool {
+	for _, other := range tp.state.FeaturesLayer.GetConfirmedVias() {
+		if other.ID == excludeViaID {
+			continue
+		}
+		if other.ComponentID == componentID && other.PinNumber == pinNumber {
+			return true
+		}
 	}
-	fmt.Println()
+	return false
 }
 
 // deleteNearestVia removes the closest via on the given side near (x, y).
@@ -1959,11 +2004,39 @@ func (tp *TracesPanel) resolveSignalName(cv *via.ConfirmedVia) {
 	}
 }
 
+// parseDIPPinCount extracts the pin count from a DIP package string (e.g. "DIP-16" → 16).
+func parseDIPPinCount(pkg string) (int, bool) {
+	pkg = strings.ToUpper(strings.TrimSpace(pkg))
+	if !strings.HasPrefix(pkg, "DIP-") {
+		return 0, false
+	}
+	n, err := strconv.Atoi(pkg[4:])
+	if err != nil || n < 4 || n%2 != 0 {
+		return 0, false
+	}
+	return n, true
+}
+
 // guessPin estimates a pin number for a via based on distance from already-named pins.
+// For DIP packages, uses component geometry to correctly handle both pin rows.
 func (tp *TracesPanel) guessPin(cv *via.ConfirmedVia, componentID string) string {
 	if tp.state.DPI <= 0 || componentID == "" {
 		return ""
 	}
+
+	// Try DIP-specific logic if the component has a DIP package
+	for _, comp := range tp.state.Components {
+		if comp.ID == componentID {
+			if pinCount, ok := parseDIPPinCount(comp.Package); ok {
+				if guess := tp.guessDIPPin(cv, comp, pinCount); guess != "" {
+					return guess
+				}
+			}
+			break
+		}
+	}
+
+	// Fallback: generic distance-based guessing
 	pitch := 0.1 * tp.state.DPI
 
 	type namedPin struct {
@@ -2045,6 +2118,128 @@ func (tp *TracesPanel) guessPin(cv *via.ConfirmedVia, componentID string) string
 		return strconv.Itoa(guess)
 	}
 	return ""
+}
+
+// guessDIPPin uses DIP package geometry to determine the pin number for a via.
+// DIP pin numbering: pins 1..N/2 down one side, pins N/2+1..N back up the other.
+// Requires at least one named pin on the same component to determine orientation.
+func (tp *TracesPanel) guessDIPPin(cv *via.ConfirmedVia, comp *component.Component, pinCount int) string {
+	pitch := 0.1 * tp.state.DPI
+	if pitch <= 0 {
+		return ""
+	}
+	half := pinCount / 2
+	center := comp.Center()
+
+	// Determine long axis from component bounds (pins are along the long edge)
+	var longAxis, shortAxis geometry.Point2D
+	if comp.Bounds.Width >= comp.Bounds.Height {
+		longAxis = geometry.Point2D{X: 1, Y: 0}
+		shortAxis = geometry.Point2D{X: 0, Y: 1}
+	} else {
+		longAxis = geometry.Point2D{X: 0, Y: 1}
+		shortAxis = geometry.Point2D{X: 1, Y: 0}
+	}
+
+	// Collect named pins for this component
+	type refPin struct {
+		cv  *via.ConfirmedVia
+		num int
+	}
+	var refs []refPin
+	for _, other := range tp.state.FeaturesLayer.GetConfirmedVias() {
+		if other == cv || other.ComponentID != comp.ID || other.PinNumber == "" {
+			continue
+		}
+		n, err := strconv.Atoi(other.PinNumber)
+		if err != nil || n < 1 || n > pinCount {
+			continue
+		}
+		refs = append(refs, refPin{other, n})
+	}
+	if len(refs) == 0 {
+		return ""
+	}
+
+	// Determine long axis direction using a reference pin whose expected offset
+	// is far enough from center to be unambiguous
+	oriented := false
+	for _, ref := range refs {
+		// Expected position along long axis relative to component center:
+		//   Row 1 pin k: offset = (k - 1 - (half-1)/2) * pitch
+		//   Row 2 pin k: offset = (pinCount - k - (half-1)/2) * pitch
+		var expectedOffset float64
+		if ref.num <= half {
+			expectedOffset = (float64(ref.num-1) - float64(half-1)/2.0) * pitch
+		} else {
+			expectedOffset = (float64(pinCount-ref.num) - float64(half-1)/2.0) * pitch
+		}
+		if math.Abs(expectedOffset) < pitch*0.25 {
+			continue // pin too close to array center, can't determine axis direction
+		}
+
+		refDx := ref.cv.Center.X - center.X
+		refDy := ref.cv.Center.Y - center.Y
+		actualOffset := refDx*longAxis.X + refDy*longAxis.Y
+
+		if (expectedOffset > 0) != (actualOffset > 0) {
+			longAxis.X, longAxis.Y = -longAxis.X, -longAxis.Y
+		}
+		oriented = true
+		break
+	}
+	if !oriented {
+		return ""
+	}
+
+	// Determine which short-axis side is row 1 vs row 2 using a reference pin
+	ref := refs[0]
+	refDx := ref.cv.Center.X - center.X
+	refDy := ref.cv.Center.Y - center.Y
+	refShort := refDx*shortAxis.X + refDy*shortAxis.Y
+	// row1Positive: if true, positive short-axis values = row 1
+	row1Positive := (ref.num <= half && refShort > 0) || (ref.num > half && refShort < 0)
+
+	// Compute the new via's position in component coordinates
+	newDx := cv.Center.X - center.X
+	newDy := cv.Center.Y - center.Y
+	newLong := newDx*longAxis.X + newDy*longAxis.Y
+	newShort := newDx*shortAxis.X + newDy*shortAxis.Y
+
+	// Determine which row
+	var row int
+	if (row1Positive && newShort > 0) || (!row1Positive && newShort < 0) {
+		row = 1
+	} else {
+		row = 2
+	}
+
+	// Convert long-axis position to pin index (0-based position along the row)
+	halfCenter := float64(half-1) / 2.0
+	idx := int(math.Round(newLong/pitch + halfCenter))
+
+	var guess int
+	if row == 1 {
+		guess = idx + 1
+		if guess < 1 {
+			guess = 1
+		}
+		if guess > half {
+			guess = half
+		}
+	} else {
+		guess = pinCount - idx
+		if guess < half+1 {
+			guess = half + 1
+		}
+		if guess > pinCount {
+			guess = pinCount
+		}
+	}
+
+	fmt.Printf("[guessDIP] %s: comp=%s (%s) row=%d idx=%d -> pin %d\n",
+		cv.ID, comp.ID, comp.Package, row, idx, guess)
+	return strconv.Itoa(guess)
 }
 
 // associateTraceEndpoints ensures both endpoints of a completed trace share the same

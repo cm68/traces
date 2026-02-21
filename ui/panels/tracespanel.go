@@ -8,11 +8,13 @@ import (
 	"math"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
 
 	"pcb-tracer/internal/app"
+	"pcb-tracer/internal/component"
 	"pcb-tracer/internal/connector"
 	pcbimage "pcb-tracer/internal/image"
 	"pcb-tracer/internal/netlist"
@@ -90,6 +92,12 @@ type TracesPanel struct {
 
 	// Hover state for net info display
 	hoverNetID string
+
+	// Net list UI
+	netListBox       *gtk.ListBox
+	netCountLabel    *gtk.Label
+	netElementsBox   *gtk.ListBox
+	selectedNetID    string // currently selected net for element display
 
 	// Preferences
 	prefs          *prefs.Prefs
@@ -246,6 +254,113 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, 
 	traceFrame.Add(traceBox)
 	tp.box.PackStart(traceFrame, false, false, 0)
 
+	// --- Nets section ---
+	netFrame, _ := gtk.FrameNew("Nets")
+	netBox, _ := gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 4)
+	netBox.SetMarginStart(4)
+	netBox.SetMarginEnd(4)
+	netBox.SetMarginTop(4)
+	netBox.SetMarginBottom(4)
+
+	tp.netCountLabel, _ = gtk.LabelNew("Nets: 0")
+	tp.netCountLabel.SetHAlign(gtk.ALIGN_START)
+	netBox.PackStart(tp.netCountLabel, false, false, 0)
+
+	// Scrolled list of nets
+	sw, _ := gtk.ScrolledWindowNew(nil, nil)
+	sw.SetPolicy(gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC)
+	sw.SetSizeRequest(-1, 150)
+
+	tp.netListBox, _ = gtk.ListBoxNew()
+	tp.netListBox.SetSelectionMode(gtk.SELECTION_SINGLE)
+	// Single-click selects net and shows its elements
+	tp.netListBox.Connect("row-selected", func(_ *gtk.ListBox, row *gtk.ListBoxRow) {
+		if row == nil {
+			tp.selectedNetID = ""
+			tp.refreshNetElements()
+			return
+		}
+		idx := row.GetIndex()
+		nets := tp.getSortedNets()
+		if idx >= 0 && idx < len(nets) {
+			tp.selectedNetID = nets[idx].ID
+			tp.refreshNetElements()
+		}
+	})
+	// Double-click renames
+	tp.netListBox.Connect("row-activated", func(_ *gtk.ListBox, row *gtk.ListBoxRow) {
+		if row == nil {
+			return
+		}
+		idx := row.GetIndex()
+		nets := tp.getSortedNets()
+		if idx >= 0 && idx < len(nets) {
+			tp.renameNet(nets[idx])
+		}
+	})
+	sw.Add(tp.netListBox)
+	netBox.PackStart(sw, true, true, 0)
+
+	deleteNetBtn, _ := gtk.ButtonNewWithLabel("Delete Net")
+	deleteNetBtn.Connect("clicked", func() {
+		row := tp.netListBox.GetSelectedRow()
+		if row == nil {
+			return
+		}
+		idx := row.GetIndex()
+		nets := tp.getSortedNets()
+		if idx >= 0 && idx < len(nets) {
+			tp.state.FeaturesLayer.RemoveNet(nets[idx].ID)
+			tp.selectedNetID = ""
+			tp.refreshNetList()
+			tp.refreshNetElements()
+			tp.rebuildFeaturesOverlay()
+			tp.canvas.Refresh()
+			tp.state.Emit(app.EventNetlistModified, nil)
+		}
+	})
+	netBox.PackStart(deleteNetBtn, false, false, 0)
+
+	// --- Net Elements sub-panel ---
+	elemLabel, _ := gtk.LabelNew("Elements:")
+	elemLabel.SetHAlign(gtk.ALIGN_START)
+	netBox.PackStart(elemLabel, false, false, 2)
+
+	elemSW, _ := gtk.ScrolledWindowNew(nil, nil)
+	elemSW.SetPolicy(gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC)
+	elemSW.SetSizeRequest(-1, 120)
+
+	tp.netElementsBox, _ = gtk.ListBoxNew()
+	tp.netElementsBox.SetSelectionMode(gtk.SELECTION_SINGLE)
+	// Left-click selects and highlights element on canvas
+	tp.netElementsBox.Connect("row-selected", func(_ *gtk.ListBox, row *gtk.ListBoxRow) {
+		if row == nil {
+			tp.clearNetElementHighlight()
+			return
+		}
+		tp.highlightNetElement(row.GetIndex())
+	})
+	// Right-click context menu on elements
+	tp.netElementsBox.Connect("button-press-event", func(_ *gtk.ListBox, ev *gdk.Event) bool {
+		btn := gdk.EventButtonNewFromEvent(ev)
+		if btn.Button() != gdk.BUTTON_SECONDARY {
+			return false
+		}
+		// Select the row under the cursor
+		row := tp.netElementsBox.GetRowAtY(int(btn.Y()))
+		if row == nil {
+			return false
+		}
+		tp.netElementsBox.SelectRow(row)
+		tp.showNetElementMenu(row.GetIndex())
+		return true
+	})
+	elemSW.Add(tp.netElementsBox)
+	netBox.PackStart(elemSW, true, true, 0)
+
+	netFrame.Add(netBox)
+	tp.box.PackStart(netFrame, false, false, 0)
+
 	// Load training set
 	tp.loadTrainingSet()
 	tp.updateTrainingLabel()
@@ -258,6 +373,7 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, 
 	// Rebuild overlay when nets change (trace colors depend on net status)
 	state.On(app.EventNetlistModified, func(_ interface{}) {
 		tp.rebuildFeaturesOverlay()
+		tp.refreshNetList()
 		tp.canvas.Refresh()
 	})
 
@@ -277,6 +393,7 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, 
 	state.On(app.EventProjectLoaded, func(_ interface{}) {
 		glib.IdleAdd(func() {
 			tp.rebuildFeaturesOverlay()
+			tp.refreshNetList()
 			front, back := tp.state.FeaturesLayer.ViaCountBySide()
 			if front+back > 0 {
 				tp.viaCountLabel.SetText(fmt.Sprintf("Vias: %d front, %d back", front, back))
@@ -593,7 +710,9 @@ func (tp *TracesPanel) rebuildFeaturesOverlay() {
 	// 2. Confirmed vias: blue, filled, labeled — always visible
 	for _, cv := range tp.state.FeaturesLayer.GetConfirmedVias() {
 		label := ""
-		if cv.ComponentID != "" && cv.PinNumber != "" {
+		if cv.SignalName != "" {
+			label = cv.SignalName
+		} else if cv.ComponentID != "" && cv.PinNumber != "" {
 			label = fmt.Sprintf("%s-%s", cv.ComponentID, cv.PinNumber)
 		} else if tp.showViaNumbers {
 			var viaNum int
@@ -1224,57 +1343,97 @@ func (tp *TracesPanel) deleteNearestVia(x, y float64, side pcbimage.Side) {
 	tp.state.Emit(app.EventFeaturesChanged, nil)
 }
 
-// deleteConfirmedVia removes a confirmed via and its underlying front/back vias.
+// deleteConfirmedVia removes a confirmed via, its connected traces, underlying vias, and cleans up nets.
 func (tp *TracesPanel) deleteConfirmedVia(cv *via.ConfirmedVia) {
 	fmt.Printf("Delete confirmed via %s (front=%s, back=%s)\n", cv.ID, cv.FrontViaID, cv.BackViaID)
-	tp.state.FeaturesLayer.RemoveVia(cv.FrontViaID)
-	tp.state.FeaturesLayer.RemoveVia(cv.BackViaID)
-	tp.state.FeaturesLayer.RemoveConfirmedVia(cv.ID)
+	features := tp.state.FeaturesLayer
+
+	// Cascade: remove connected traces and clean up their net membership
+	connectedTraces := features.GetTracesConnectedToVia(cv.Center, 5.0)
+	net := features.GetNetForElement(cv.ID)
+	for _, traceID := range connectedTraces {
+		features.RemoveTrace(traceID)
+		if net != nil {
+			net.RemoveElement(traceID)
+		}
+	}
+
+	// Remove via from its net
+	if net != nil {
+		net.RemoveElement(cv.ID)
+		if len(net.Elements) == 0 {
+			features.RemoveNet(net.ID)
+		}
+	}
+
+	features.RemoveVia(cv.FrontViaID)
+	features.RemoveVia(cv.BackViaID)
+	features.RemoveConfirmedVia(cv.ID)
 	tp.rebuildFeaturesOverlay()
 	tp.updateViaCounts()
-	tp.viaStatusLabel.SetText(fmt.Sprintf("Deleted %s", cv.ID))
+	tp.refreshNetList()
+	tp.viaStatusLabel.SetText(fmt.Sprintf("Deleted %s (+%d traces)", cv.ID, len(connectedTraces)))
 	tp.state.Emit(app.EventFeaturesChanged, nil)
 	tp.state.Emit(app.EventConfirmedViasChanged, nil)
+	tp.state.Emit(app.EventNetlistModified, nil)
 }
 
-// deleteConfirmedViaSide removes one side of a confirmed via.
+// deleteConfirmedViaSide removes one side of a confirmed via and cleans up nets.
 func (tp *TracesPanel) deleteConfirmedViaSide(cv *via.ConfirmedVia, side pcbimage.Side) {
+	features := tp.state.FeaturesLayer
 	var removeID string
 	if side == pcbimage.SideFront {
 		removeID = cv.FrontViaID
 	} else {
 		removeID = cv.BackViaID
 	}
-	tp.state.FeaturesLayer.RemoveVia(removeID)
-	tp.state.FeaturesLayer.RemoveConfirmedVia(cv.ID)
+
+	// Cascade: remove connected traces and clean up net
+	connectedTraces := features.GetTracesConnectedToVia(cv.Center, 5.0)
+	net := features.GetNetForElement(cv.ID)
+	for _, traceID := range connectedTraces {
+		features.RemoveTrace(traceID)
+		if net != nil {
+			net.RemoveElement(traceID)
+		}
+	}
+	if net != nil {
+		net.RemoveElement(cv.ID)
+		if len(net.Elements) == 0 {
+			features.RemoveNet(net.ID)
+		}
+	}
+
+	features.RemoveVia(removeID)
+	features.RemoveConfirmedVia(cv.ID)
 	tp.rebuildFeaturesOverlay()
 	tp.updateViaCounts()
-	tp.viaStatusLabel.SetText(fmt.Sprintf("Deleted %s side of %s", side.String(), cv.ID))
+	tp.refreshNetList()
+	tp.viaStatusLabel.SetText(fmt.Sprintf("Deleted %s side of %s (+%d traces)", side.String(), cv.ID, len(connectedTraces)))
 	tp.state.Emit(app.EventFeaturesChanged, nil)
 	tp.state.Emit(app.EventConfirmedViasChanged, nil)
+	tp.state.Emit(app.EventNetlistModified, nil)
 }
 
-// deleteConnectedTrace removes traces connected to a confirmed via.
+// deleteConnectedTrace removes traces connected to a confirmed via and cleans up nets.
 func (tp *TracesPanel) deleteConnectedTrace(cv *via.ConfirmedVia) {
-	tolerance := 5.0
-	removed := 0
-	for _, tid := range tp.state.FeaturesLayer.GetTraces() {
-		tf := tp.state.FeaturesLayer.GetTraceFeature(tid)
-		if tf == nil || len(tf.Points) < 2 {
-			continue
-		}
-		start := tf.Points[0]
-		end := tf.Points[len(tf.Points)-1]
-		startDist := math.Sqrt((start.X-cv.Center.X)*(start.X-cv.Center.X) + (start.Y-cv.Center.Y)*(start.Y-cv.Center.Y))
-		endDist := math.Sqrt((end.X-cv.Center.X)*(end.X-cv.Center.X) + (end.Y-cv.Center.Y)*(end.Y-cv.Center.Y))
-		if startDist <= tolerance || endDist <= tolerance {
-			tp.state.FeaturesLayer.RemoveTrace(tid)
-			removed++
+	features := tp.state.FeaturesLayer
+	connectedTraces := features.GetTracesConnectedToVia(cv.Center, 5.0)
+	for _, traceID := range connectedTraces {
+		net := features.GetNetForElement(traceID)
+		features.RemoveTrace(traceID)
+		if net != nil {
+			net.RemoveElement(traceID)
+			if len(net.Elements) == 0 {
+				features.RemoveNet(net.ID)
+			}
 		}
 	}
 	tp.rebuildFeaturesOverlay()
-	tp.traceStatusLabel.SetText(fmt.Sprintf("Deleted %d trace(s) from %s", removed, cv.ID))
+	tp.refreshNetList()
+	tp.traceStatusLabel.SetText(fmt.Sprintf("Deleted %d trace(s) from %s", len(connectedTraces), cv.ID))
 	tp.canvas.Refresh()
+	tp.state.Emit(app.EventNetlistModified, nil)
 }
 
 // adjustConfirmedViaRadius changes the radius of a confirmed via.
@@ -1346,6 +1505,256 @@ func (tp *TracesPanel) nameNetlist(cv *via.ConfirmedVia) {
 	dlg.Destroy()
 }
 
+// getSortedNets returns all nets sorted by name (consistent ordering for list index lookups).
+func (tp *TracesPanel) getSortedNets() []*netlist.ElectricalNet {
+	nets := tp.state.FeaturesLayer.GetNets()
+	sort.Slice(nets, func(i, j int) bool {
+		return nets[i].Name < nets[j].Name
+	})
+	return nets
+}
+
+// refreshNetList rebuilds the net list widget from current features layer data.
+func (tp *TracesPanel) refreshNetList() {
+	if tp.netListBox == nil {
+		return
+	}
+	// Remove all existing rows
+	tp.netListBox.GetChildren().Foreach(func(item interface{}) {
+		if w, ok := item.(*gtk.Widget); ok {
+			tp.netListBox.Remove(w)
+		}
+	})
+
+	nets := tp.getSortedNets()
+
+	for _, net := range nets {
+		label := fmt.Sprintf("%s (%dv, %dc, %dt)",
+			net.Name, len(net.ViaIDs), len(net.ConnectorIDs), len(net.TraceIDs))
+		row, _ := gtk.LabelNew(label)
+		row.SetHAlign(gtk.ALIGN_START)
+		tp.netListBox.Add(row)
+	}
+	tp.netListBox.ShowAll()
+	tp.netCountLabel.SetText(fmt.Sprintf("Nets: %d", len(nets)))
+	tp.refreshNetElements()
+}
+
+// refreshNetElements rebuilds the elements list for the currently selected net.
+func (tp *TracesPanel) refreshNetElements() {
+	if tp.netElementsBox == nil {
+		return
+	}
+	tp.clearNetElementHighlight()
+	tp.netElementsBox.GetChildren().Foreach(func(item interface{}) {
+		if w, ok := item.(*gtk.Widget); ok {
+			tp.netElementsBox.Remove(w)
+		}
+	})
+
+	if tp.selectedNetID == "" {
+		tp.netElementsBox.ShowAll()
+		return
+	}
+
+	net := tp.state.FeaturesLayer.GetNetByID(tp.selectedNetID)
+	if net == nil {
+		tp.selectedNetID = ""
+		tp.netElementsBox.ShowAll()
+		return
+	}
+
+	for _, elem := range net.Elements {
+		label := fmt.Sprintf("[%s] %s", elem.Type.String(), elem.ID)
+		row, _ := gtk.LabelNew(label)
+		row.SetHAlign(gtk.ALIGN_START)
+		tp.netElementsBox.Add(row)
+	}
+	tp.netElementsBox.ShowAll()
+}
+
+// showNetElementMenu shows a right-click context menu for a net element row.
+func (tp *TracesPanel) showNetElementMenu(rowIdx int) {
+	net := tp.state.FeaturesLayer.GetNetByID(tp.selectedNetID)
+	if net == nil || rowIdx < 0 || rowIdx >= len(net.Elements) {
+		return
+	}
+	elem := net.Elements[rowIdx]
+
+	menu, _ := gtk.MenuNew()
+	addItem := func(label string, cb func()) {
+		item, _ := gtk.MenuItemNewWithLabel(label)
+		item.Connect("activate", func() { cb() })
+		menu.Append(item)
+	}
+
+	addItem(fmt.Sprintf("Remove %s from net", elem.ID), func() {
+		net.RemoveElement(elem.ID)
+		if len(net.Elements) == 0 {
+			tp.state.FeaturesLayer.RemoveNet(net.ID)
+			tp.selectedNetID = ""
+		}
+		tp.refreshNetList()
+		tp.refreshNetElements()
+		tp.rebuildFeaturesOverlay()
+		tp.canvas.Refresh()
+		tp.state.Emit(app.EventNetlistModified, nil)
+	})
+
+	switch elem.Type {
+	case netlist.ElementTrace:
+		addItem(fmt.Sprintf("Delete %s", elem.ID), func() {
+			// Remove trace from features and net
+			tp.state.FeaturesLayer.RemoveTrace(elem.ID)
+			net.RemoveElement(elem.ID)
+			if len(net.Elements) == 0 {
+				tp.state.FeaturesLayer.RemoveNet(net.ID)
+				tp.selectedNetID = ""
+			}
+			tp.refreshNetList()
+			tp.refreshNetElements()
+			tp.rebuildFeaturesOverlay()
+			tp.canvas.Refresh()
+			tp.state.Emit(app.EventFeaturesChanged, nil)
+			tp.state.Emit(app.EventNetlistModified, nil)
+		})
+	case netlist.ElementVia:
+		addItem(fmt.Sprintf("Delete %s", elem.ID), func() {
+			// Find and delete the confirmed via
+			cv := tp.state.FeaturesLayer.GetConfirmedViaByID(elem.ID)
+			if cv != nil {
+				tp.deleteConfirmedVia(cv)
+			} else {
+				// Just remove from net if not found as confirmed via
+				net.RemoveElement(elem.ID)
+				if len(net.Elements) == 0 {
+					tp.state.FeaturesLayer.RemoveNet(net.ID)
+					tp.selectedNetID = ""
+				}
+				tp.refreshNetList()
+				tp.refreshNetElements()
+				tp.state.Emit(app.EventNetlistModified, nil)
+			}
+		})
+	case netlist.ElementConnector:
+		addItem(fmt.Sprintf("Delete %s", elem.ID), func() {
+			tp.state.FeaturesLayer.RemoveConnector(elem.ID)
+			net.RemoveElement(elem.ID)
+			if len(net.Elements) == 0 {
+				tp.state.FeaturesLayer.RemoveNet(net.ID)
+				tp.selectedNetID = ""
+			}
+			tp.refreshNetList()
+			tp.refreshNetElements()
+			tp.rebuildFeaturesOverlay()
+			tp.canvas.Refresh()
+			tp.state.Emit(app.EventFeaturesChanged, nil)
+			tp.state.Emit(app.EventNetlistModified, nil)
+		})
+	}
+
+	menu.ShowAll()
+	menu.PopupAtPointer(nil)
+}
+
+// highlightNetElement draws a highlight overlay on the canvas for the element at rowIdx.
+func (tp *TracesPanel) highlightNetElement(rowIdx int) {
+	net := tp.state.FeaturesLayer.GetNetByID(tp.selectedNetID)
+	if net == nil || rowIdx < 0 || rowIdx >= len(net.Elements) {
+		tp.clearNetElementHighlight()
+		return
+	}
+	elem := net.Elements[rowIdx]
+	highlightColor := color.RGBA{R: 255, G: 255, B: 0, A: 255} // yellow
+
+	switch elem.Type {
+	case netlist.ElementVia:
+		cv := tp.state.FeaturesLayer.GetConfirmedViaByID(elem.ID)
+		if cv != nil {
+			tp.canvas.SetOverlay("net_element_highlight", &canvas.Overlay{
+				Circles: []canvas.OverlayCircle{
+					{X: cv.Center.X, Y: cv.Center.Y, Radius: cv.Radius + 5, Filled: false},
+					{X: cv.Center.X, Y: cv.Center.Y, Radius: cv.Radius + 3, Filled: false},
+				},
+				Color: highlightColor,
+			})
+		}
+	case netlist.ElementConnector:
+		conn := tp.state.FeaturesLayer.GetConnectorByID(elem.ID)
+		if conn != nil {
+			pad := 3
+			tp.canvas.SetOverlay("net_element_highlight", &canvas.Overlay{
+				Rectangles: []canvas.OverlayRect{
+					{
+						X: conn.Bounds.X - pad, Y: conn.Bounds.Y - pad,
+						Width: conn.Bounds.Width + 2*pad, Height: conn.Bounds.Height + 2*pad,
+						Fill: canvas.FillNone,
+					},
+				},
+				Color: highlightColor,
+			})
+		}
+	case netlist.ElementTrace:
+		tf := tp.state.FeaturesLayer.GetTraceFeature(elem.ID)
+		if tf != nil && len(tf.Points) >= 2 {
+			lines := make([]canvas.OverlayLine, 0, len(tf.Points)-1)
+			for i := 1; i < len(tf.Points); i++ {
+				lines = append(lines, canvas.OverlayLine{
+					X1: tf.Points[i-1].X, Y1: tf.Points[i-1].Y,
+					X2: tf.Points[i].X, Y2: tf.Points[i].Y,
+					Thickness: 4,
+				})
+			}
+			tp.canvas.SetOverlay("net_element_highlight", &canvas.Overlay{
+				Lines: lines,
+				Color: highlightColor,
+			})
+		}
+	default:
+		tp.clearNetElementHighlight()
+		return
+	}
+	tp.canvas.Refresh()
+}
+
+// clearNetElementHighlight removes the element highlight overlay.
+func (tp *TracesPanel) clearNetElementHighlight() {
+	tp.canvas.ClearOverlay("net_element_highlight")
+	tp.canvas.Refresh()
+}
+
+// renameNet opens a dialog to rename an electrical net.
+func (tp *TracesPanel) renameNet(net *netlist.ElectricalNet) {
+	dlg, _ := gtk.DialogNewWithButtons("Rename Net", tp.win,
+		gtk.DIALOG_MODAL|gtk.DIALOG_DESTROY_WITH_PARENT,
+		[]interface{}{"Cancel", gtk.RESPONSE_CANCEL},
+		[]interface{}{"OK", gtk.RESPONSE_OK})
+	dlg.SetDefaultSize(300, 150)
+	dlg.SetDefaultResponse(gtk.RESPONSE_OK)
+
+	contentArea, _ := dlg.GetContentArea()
+	entry, _ := gtk.EntryNew()
+	entry.SetActivatesDefault(true)
+	entry.SetText(net.Name)
+
+	lbl, _ := gtk.LabelNew("Net name:")
+	lbl.SetHAlign(gtk.ALIGN_START)
+	contentArea.PackStart(lbl, false, false, 4)
+	contentArea.PackStart(entry, false, false, 4)
+	dlg.ShowAll()
+
+	response := dlg.Run()
+	if response == gtk.RESPONSE_OK {
+		name, _ := entry.GetText()
+		if name != "" && name != net.Name {
+			net.Name = name
+			tp.refreshNetList()
+			tp.state.Emit(app.EventNetlistModified, nil)
+		}
+	}
+	dlg.Destroy()
+}
+
 // namePin shows a dialog to associate a confirmed via with a component pin.
 func (tp *TracesPanel) namePin(cv *via.ConfirmedVia) {
 	closestID := ""
@@ -1409,8 +1818,13 @@ func (tp *TracesPanel) namePin(cv *via.ConfirmedVia) {
 		cv.ComponentID = compText
 		cv.PinNumber = pinText
 
+		// Look up signal name from parts library
+		tp.resolveSignalName(cv)
+
 		label := ""
-		if cv.ComponentID != "" && cv.PinNumber != "" {
+		if cv.SignalName != "" {
+			label = cv.SignalName
+		} else if cv.ComponentID != "" && cv.PinNumber != "" {
 			label = fmt.Sprintf("%s-%s", cv.ComponentID, cv.PinNumber)
 		} else if cv.ComponentID != "" {
 			label = cv.ComponentID
@@ -1424,6 +1838,75 @@ func (tp *TracesPanel) namePin(cv *via.ConfirmedVia) {
 		tp.state.Emit(app.EventConfirmedViasChanged, nil)
 	}
 	dlg.Destroy()
+}
+
+// resolveSignalName looks up the pin's function name from the parts library and sets
+// cv.SignalName (e.g. "C3-GND"). If the pin direction is Output and the via's net has
+// a low-priority name (auto-generated or component.pin), the net is renamed.
+func (tp *TracesPanel) resolveSignalName(cv *via.ConfirmedVia) {
+	if cv.ComponentID == "" || cv.PinNumber == "" {
+		return
+	}
+
+	// Find the board component
+	var comp *component.Component
+	for _, c := range tp.state.Components {
+		if c.ID == cv.ComponentID {
+			comp = c
+			break
+		}
+	}
+	if comp == nil || comp.PartNumber == "" || comp.Package == "" {
+		return
+	}
+
+	// Look up part definition
+	lib := tp.state.ComponentLibrary
+	if lib == nil {
+		return
+	}
+	partDef := lib.GetByAlias(comp.PartNumber, comp.Package)
+	if partDef == nil {
+		return
+	}
+
+	// Find the pin by number
+	pinNum, err := strconv.Atoi(cv.PinNumber)
+	if err != nil {
+		return
+	}
+
+	var pinName string
+	var pinDir connector.SignalDirection
+	for _, pin := range partDef.Pins {
+		if pin.Number == pinNum {
+			pinName = pin.Name
+			pinDir = pin.Direction
+			break
+		}
+	}
+	if pinName == "" {
+		return
+	}
+
+	cv.SignalName = cv.ComponentID + "-" + pinName
+	fmt.Printf("Resolved signal name: %s pin %d = %s (%s)\n", cv.ComponentID, pinNum, cv.SignalName, pinDir)
+
+	// Auto-rename net only for Output pins
+	if pinDir != connector.DirectionOutput {
+		return
+	}
+
+	// Find the net containing this via
+	for _, net := range tp.state.FeaturesLayer.GetNets() {
+		if net.ContainsVia(cv.ID) {
+			if netlist.BetterNetName(cv.SignalName, net.Name) == cv.SignalName {
+				fmt.Printf("Renaming net %q -> %q (output pin)\n", net.Name, cv.SignalName)
+				net.Name = cv.SignalName
+			}
+			break
+		}
+	}
 }
 
 // guessPin estimates a pin number for a via based on distance from already-named pins.
@@ -1650,8 +2133,12 @@ func (tp *TracesPanel) associateTraceEndpoints() {
 		id := fmt.Sprintf("net-%03d", netNum)
 		name := id // default auto-generated name
 
-		// Try to derive a better name from component pin assignments
-		if startVia != nil && startVia.ComponentID != "" && startVia.PinNumber != "" {
+		// Try signal name from library lookup first, then component.pin
+		if startVia != nil && startVia.SignalName != "" {
+			name = startVia.SignalName
+		} else if tp.traceEndVia != nil && tp.traceEndVia.SignalName != "" {
+			name = tp.traceEndVia.SignalName
+		} else if startVia != nil && startVia.ComponentID != "" && startVia.PinNumber != "" {
 			name = fmt.Sprintf("%s.%s", startVia.ComponentID, startVia.PinNumber)
 		} else if tp.traceEndVia != nil && tp.traceEndVia.ComponentID != "" && tp.traceEndVia.PinNumber != "" {
 			name = fmt.Sprintf("%s.%s", tp.traceEndVia.ComponentID, tp.traceEndVia.PinNumber)
@@ -1906,7 +2393,7 @@ func (tp *TracesPanel) finishTraceCommon(endLabel string) string {
 	fmt.Printf("Trace complete: %s -> %s (%d segments, %d points)\n",
 		startLabel, endLabel, nSegs, len(tp.tracePoints))
 
-	traceID := fmt.Sprintf("trace-%03d", tp.state.FeaturesLayer.TraceCount()+1)
+	traceID := fmt.Sprintf("trace-%03d", tp.state.FeaturesLayer.NextTraceSeq())
 	points := make([]geometry.Point2D, len(tp.tracePoints))
 	copy(points, tp.tracePoints)
 	et := pcbtrace.ExtendedTrace{
@@ -2268,7 +2755,7 @@ func (tp *TracesPanel) autoTraceToAdjacentVia(cv *via.ConfirmedVia, direction in
 
 		// Create trace on UI thread
 		glib.IdleAdd(func() {
-			traceID := fmt.Sprintf("trace-%03d", tp.state.FeaturesLayer.TraceCount()+1)
+			traceID := fmt.Sprintf("trace-%03d", tp.state.FeaturesLayer.NextTraceSeq())
 			et := pcbtrace.ExtendedTrace{
 				Trace: pcbtrace.Trace{
 					ID: traceID, Layer: traceLayer, Points: path,

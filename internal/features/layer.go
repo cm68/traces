@@ -3,6 +3,7 @@ package features
 import (
 	"fmt"
 	"image/color"
+	"math"
 	"sync"
 
 	"pcb-tracer/internal/connector"
@@ -24,6 +25,9 @@ type DetectedFeaturesLayer struct {
 	// Features organized by type for efficient iteration
 	vias   []string // Via feature IDs
 	traces []string // Trace feature IDs
+
+	// Monotonic trace counter to avoid ID collisions after deletions
+	traceSeq int
 
 	// Confirmed vias (detected on both sides)
 	confirmedVias    []string                     // Confirmed via IDs
@@ -98,6 +102,14 @@ func (l *DetectedFeaturesLayer) AddTrace(t trace.ExtendedTrace) {
 	}
 	l.features[t.ID] = ref
 	l.traces = append(l.traces, t.ID)
+
+	// Keep traceSeq at least as large as this trace's numeric suffix
+	var num int
+	if _, err := fmt.Sscanf(t.ID, "trace-%d", &num); err == nil {
+		if num > l.traceSeq {
+			l.traceSeq = num
+		}
+	}
 }
 
 // AddTraces adds multiple traces to the layer.
@@ -105,6 +117,15 @@ func (l *DetectedFeaturesLayer) AddTraces(traces []trace.ExtendedTrace) {
 	for _, t := range traces {
 		l.AddTrace(t)
 	}
+}
+
+// NextTraceSeq returns a monotonically increasing trace sequence number.
+// Use this instead of TraceCount()+1 to avoid ID collisions after deletions.
+func (l *DetectedFeaturesLayer) NextTraceSeq() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.traceSeq++
+	return l.traceSeq
 }
 
 // ClearVias removes all vias from the layer.
@@ -395,6 +416,32 @@ func (l *DetectedFeaturesLayer) TraceCount() int {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return len(l.traces)
+}
+
+// GetTracesConnectedToVia returns the IDs of all traces whose first or last
+// point is within tolerance distance of center.
+func (l *DetectedFeaturesLayer) GetTracesConnectedToVia(center geometry.Point2D, tolerance float64) []string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	var result []string
+	for _, id := range l.traces {
+		ref := l.features[id]
+		if ref == nil {
+			continue
+		}
+		tf, ok := ref.Feature.(TraceFeature)
+		if !ok || len(tf.Points) < 2 {
+			continue
+		}
+		start := tf.Points[0]
+		end := tf.Points[len(tf.Points)-1]
+		if math.Hypot(start.X-center.X, start.Y-center.Y) <= tolerance ||
+			math.Hypot(end.X-center.X, end.Y-center.Y) <= tolerance {
+			result = append(result, id)
+		}
+	}
+	return result
 }
 
 // ViaCountBySide returns the number of vias on each side.

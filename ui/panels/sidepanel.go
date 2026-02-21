@@ -21,6 +21,7 @@ const (
 	PanelTraces     = "traces"
 	PanelProperties = "properties"
 	PanelLogos      = "logos"
+	PanelLibrary    = "library"
 )
 
 // SidePanel provides the main side panel with switchable views.
@@ -36,6 +37,7 @@ type SidePanel struct {
 	tracesPanel     *TracesPanel
 	propertySheet   *PropertySheet
 	logosPanel      *LogosPanel
+	libraryPanel    *LibraryPanel
 
 	// Currently visible panel name
 	currentPanel string
@@ -80,6 +82,10 @@ func NewSidePanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, p 
 	// Create logos panel
 	sp.logosPanel = NewLogosPanel(state, cvs, win)
 	stack.AddNamed(sp.logosPanel.Widget(), PanelLogos)
+
+	// Create library panel
+	sp.libraryPanel = NewLibraryPanel(state)
+	stack.AddNamed(sp.libraryPanel.Widget(), PanelLibrary)
 
 	stack.SetVisibleChildName(PanelImport)
 
@@ -137,6 +143,11 @@ func (sp *SidePanel) ShowPanel(name string) {
 	case PanelLogos:
 		sp.canvas.OnHover(nil)
 		sp.canvas.OnMiddleClick(func(x, y float64) { sp.logosPanel.OnMiddleClick(x, y) })
+		sp.canvas.OnLeftClick(nil)
+		sp.canvas.OnRightClick(nil)
+	case PanelLibrary:
+		sp.canvas.OnHover(nil)
+		sp.canvas.OnMiddleClick(nil)
 		sp.canvas.OnLeftClick(nil)
 		sp.canvas.OnRightClick(nil)
 	default:

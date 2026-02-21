@@ -50,6 +50,7 @@ type MainWindow struct {
 	viewTracesItem     *gtk.RadioMenuItem
 	viewPropertiesItem *gtk.RadioMenuItem
 	viewLogosItem      *gtk.RadioMenuItem
+	viewLibraryItem    *gtk.RadioMenuItem
 
 	// Side panel
 	sidePanel *panels.SidePanel
@@ -282,6 +283,9 @@ func (mw *MainWindow) setupMenus() {
 	mw.viewLogosItem, _ = gtk.RadioMenuItemNewWithLabelFromWidget(mw.viewImportItem, "Logos")
 	viewMenu.Append(mw.viewLogosItem)
 
+	mw.viewLibraryItem, _ = gtk.RadioMenuItemNewWithLabelFromWidget(mw.viewImportItem, "Library")
+	viewMenu.Append(mw.viewLibraryItem)
+
 	mw.viewImportItem.SetActive(true)
 
 	mw.viewImportItem.Connect("toggled", func() {
@@ -307,6 +311,11 @@ func (mw *MainWindow) setupMenus() {
 	mw.viewLogosItem.Connect("toggled", func() {
 		if mw.viewLogosItem.GetActive() {
 			mw.sidePanel.ShowPanel(panels.PanelLogos)
+		}
+	})
+	mw.viewLibraryItem.Connect("toggled", func() {
+		if mw.viewLibraryItem.GetActive() {
+			mw.sidePanel.ShowPanel(panels.PanelLibrary)
 		}
 	})
 

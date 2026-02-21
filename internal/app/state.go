@@ -122,6 +122,9 @@ type State struct {
 	// Logo library for manufacturer marks
 	LogoLibrary *logo.LogoLibrary
 
+	// Component library for part definitions (shared across projects)
+	ComponentLibrary *component.ComponentLibrary
+
 	// Board definition for pin mapping
 	BoardDefinition *connector.BoardDefinition
 
@@ -192,12 +195,21 @@ func NewState() *State {
 		fmt.Print(globalOCR.Summary())
 	}
 
+	// Load component library from shared preferences
+	compLib, err := component.LoadComponentLibrary()
+	if err != nil {
+		fmt.Printf("Warning: could not load component library: %v\n", err)
+		compLib = component.NewComponentLibrary()
+	}
+	fmt.Printf("Component library: %d parts loaded\n", len(compLib.Parts))
+
 	return &State{
 		BoardSpec:         board.S100Spec(),
 		FeaturesLayer:     features.NewDetectedFeaturesLayer(),
 		ViaTrainingSet:    via.NewTrainingSet(),
 		GlobalOCRTraining: globalOCR,
 		LogoLibrary:       logoLib,
+		ComponentLibrary:  compLib,
 		BoardDefinition:   connector.S100Definition(),
 		listeners:         make(map[EventType][]EventListener),
 	}
@@ -207,6 +219,18 @@ func NewState() *State {
 func (s *State) SaveLogoLibrary() error {
 	s.mu.RLock()
 	lib := s.LogoLibrary
+	s.mu.RUnlock()
+
+	if lib == nil {
+		return nil
+	}
+	return lib.SaveToPreferences()
+}
+
+// SaveComponentLibrary saves the component library to shared preferences.
+func (s *State) SaveComponentLibrary() error {
+	s.mu.RLock()
+	lib := s.ComponentLibrary
 	s.mu.RUnlock()
 
 	if lib == nil {

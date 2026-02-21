@@ -90,7 +90,19 @@ func (d SignalDirection) MarshalJSON() ([]byte, error) {
 }
 
 // UnmarshalJSON implements json.Unmarshaler.
+// Accepts both string ("Input") and integer (0) formats.
 func (d *SignalDirection) UnmarshalJSON(data []byte) error {
+	// Try integer first (legacy format in component_library.json)
+	var n int
+	if err := json.Unmarshal(data, &n); err == nil {
+		if n >= int(DirectionInput) && n <= int(DirectionGround) {
+			*d = SignalDirection(n)
+			return nil
+		}
+		*d = DirectionBidirectional
+		return nil
+	}
+
 	var s string
 	if err := json.Unmarshal(data, &s); err != nil {
 		return err

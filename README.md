@@ -2,6 +2,39 @@
 
 A PCB reverse engineering tool written in Go with a GTK3 GUI. Designed for tracing vintage computer boards — S-100, ISA, Multibus, ECB/Eurocard, and STD Bus systems.
 
+The current status is that it is becoming a useful tool to analyze a board, but there is still a tremendous amount of automation that is possible.
+
+## Todos: 
+
+### current manual steps that can be automated:
+
+- via detection for two-side visible vias
+- chip pin assignment
+- trace detection between connectors, vias and pins
+- alignment is way too fragile
+- auto-detect component packages from board scan (bounding boxes exist, but placement is manual)
+- auto-populate part library from detected component labels (OCR → library lookup)
+- batch net naming from connector signal definitions (propagate pin names through connected nets)
+
+### bugs:
+- OCR is pretty bad
+- logo detection is awful
+- the UI is pretty slow, maybe there are some polynomial time searches that need to be hashed
+- zoom out with cursor centering clips at scroll boundary (can't scroll to negative offsets)
+- net reconciliation runs on every overlay rebuild — expensive for large boards
+- deleting a trace that splits a net doesn't always clean up orphan single-element nets
+
+### missing features:
+- undo/redo for trace, via, and net operations
+- netlist export (KiCad, PADS, generic CSV)
+- schematic generation from traced netlist
+- DRC (design rule check) — detect unconnected pins, shorted nets
+- multi-select for bulk via/trace operations
+- search/filter in net list and component list
+- print or PDF export of board with overlay annotations
+- support for multi-layer boards (4+ layers)
+- passive component detection (resistors, capacitors, discrete semiconductors)
+	
 ## Features
 
 ### Image & Alignment

@@ -44,6 +44,9 @@ type DetectedFeaturesLayer struct {
 	nets    []string                           // Net IDs
 	netsMap map[string]*netlist.ElectricalNet // ID -> ElectricalNet
 
+	// Reverse index: element ID → net ID (cache, rebuilt by ReconcileNets)
+	elementToNet map[string]string
+
 	// Bus definitions
 	Buses map[string]*Bus
 
@@ -67,6 +70,7 @@ func NewDetectedFeaturesLayer() *DetectedFeaturesLayer {
 		connectorsMap:    make(map[string]*connector.Connector),
 		nets:             make([]string, 0),
 		netsMap:          make(map[string]*netlist.ElectricalNet),
+		elementToNet:     make(map[string]string),
 		Buses:            make(map[string]*Bus),
 		Opacity:          0.7, // Default 70% opacity
 		Visible:          true,
@@ -949,6 +953,11 @@ func (l *DetectedFeaturesLayer) AddNet(n *netlist.ElectricalNet) {
 	}
 	l.netsMap[n.ID] = n
 	l.nets = append(l.nets, n.ID)
+
+	// Update reverse index
+	for _, e := range n.Elements {
+		l.elementToNet[e.ID] = n.ID
+	}
 }
 
 // GetNets returns all electrical nets.
@@ -986,10 +995,18 @@ func (l *DetectedFeaturesLayer) GetNetByName(name string) *netlist.ElectricalNet
 }
 
 // GetNetForElement returns the net containing an element.
+// Uses the reverse index for O(1) lookup, falling back to linear scan.
 func (l *DetectedFeaturesLayer) GetNetForElement(elementID string) *netlist.ElectricalNet {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
+	// Fast path: reverse index
+	if netID, ok := l.elementToNet[elementID]; ok {
+		if n := l.netsMap[netID]; n != nil {
+			return n
+		}
+	}
+	// Fallback: linear scan (index may be stale)
 	for _, n := range l.netsMap {
 		if n.ContainsElement(elementID) {
 			return n
@@ -1005,6 +1022,7 @@ func (l *DetectedFeaturesLayer) ClearNets() {
 
 	l.nets = l.nets[:0]
 	l.netsMap = make(map[string]*netlist.ElectricalNet)
+	l.elementToNet = make(map[string]string)
 }
 
 // NetCount returns the number of electrical nets.
@@ -1019,8 +1037,16 @@ func (l *DetectedFeaturesLayer) RemoveNet(id string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if _, exists := l.netsMap[id]; !exists {
+	n, exists := l.netsMap[id]
+	if !exists {
 		return false
+	}
+
+	// Clean reverse index
+	for _, e := range n.Elements {
+		if l.elementToNet[e.ID] == id {
+			delete(l.elementToNet, e.ID)
+		}
 	}
 
 	delete(l.netsMap, id)
@@ -1033,6 +1059,313 @@ func (l *DetectedFeaturesLayer) RemoveNet(id string) bool {
 	}
 
 	return true
+}
+
+// ReconcileNets derives net membership from physical trace connectivity.
+// It walks all traces, unions elements connected by trace endpoints, and
+// ensures each connected component maps to exactly one net. Nets that span
+// multiple components are split; components that span multiple nets are merged.
+// tolerance is the maximum distance to consider two points connected.
+func (l *DetectedFeaturesLayer) ReconcileNets(tolerance float64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	// ── Union-Find ──────────────────────────────────────────────────────
+	parent := make(map[string]string)
+
+	var find func(string) string
+	find = func(x string) string {
+		p, ok := parent[x]
+		if !ok || p == x {
+			parent[x] = x
+			return x
+		}
+		parent[x] = find(p)
+		return parent[x]
+	}
+	union := func(a, b string) {
+		ra, rb := find(a), find(b)
+		if ra != rb {
+			parent[ra] = rb
+		}
+	}
+
+	// Initialise sets for all elements currently in nets.
+	for _, n := range l.netsMap {
+		for _, e := range n.Elements {
+			find(e.ID)
+		}
+	}
+	// Initialise all confirmed vias and connectors (even if unnetted).
+	for _, id := range l.confirmedVias {
+		find(id)
+	}
+	for _, id := range l.connectors {
+		find(id)
+	}
+
+	// Helper: get trace feature without acquiring the lock (we already hold it).
+	getTrace := func(tid string) *TraceFeature {
+		ref := l.features[tid]
+		if ref == nil {
+			return nil
+		}
+		tf, ok := ref.Feature.(TraceFeature)
+		if !ok || len(tf.Points) < 2 {
+			return nil
+		}
+		return &tf
+	}
+	tracePoints := func(tid string) []geometry.Point2D {
+		tf := getTrace(tid)
+		if tf == nil {
+			return nil
+		}
+		return tf.Points
+	}
+	// traceSide returns the image.Side corresponding to a trace's layer.
+	traceSide := func(tid string) image.Side {
+		tf := getTrace(tid)
+		if tf == nil {
+			return image.SideUnknown
+		}
+		if tf.Layer == trace.LayerFront {
+			return image.SideFront
+		}
+		return image.SideBack
+	}
+
+	near := func(a, b geometry.Point2D) bool {
+		return math.Hypot(a.X-b.X, a.Y-b.Y) <= tolerance
+	}
+
+	// ── Union traces with endpoint vias/connectors ──────────────────────
+	for _, tid := range l.traces {
+		pts := tracePoints(tid)
+		if pts == nil {
+			continue
+		}
+		find(tid)
+		start, end := pts[0], pts[len(pts)-1]
+
+		for _, cvID := range l.confirmedVias {
+			cv := l.confirmedViasMap[cvID]
+			if cv == nil {
+				continue
+			}
+			if near(cv.Center, start) || near(cv.Center, end) {
+				union(tid, cvID)
+			}
+		}
+		tSide := traceSide(tid)
+		for _, cid := range l.connectors {
+			conn := l.connectorsMap[cid]
+			if conn == nil {
+				continue
+			}
+			// Only match connectors on the same side as the trace
+			if conn.Side != tSide {
+				continue
+			}
+			if conn.HitTest(start.X, start.Y) || conn.HitTest(end.X, end.Y) {
+				union(tid, cid)
+			}
+		}
+	}
+
+	// ── Union traces sharing junction vertices ──────────────────────────
+	// For each pair of traces: if one's endpoint touches any vertex of the
+	// other, they are connected.
+	for i := 0; i < len(l.traces); i++ {
+		ptsA := tracePoints(l.traces[i])
+		if ptsA == nil {
+			continue
+		}
+		epA := [2]geometry.Point2D{ptsA[0], ptsA[len(ptsA)-1]}
+
+		for j := i + 1; j < len(l.traces); j++ {
+			ptsB := tracePoints(l.traces[j])
+			if ptsB == nil {
+				continue
+			}
+			epB := [2]geometry.Point2D{ptsB[0], ptsB[len(ptsB)-1]}
+
+			connected := false
+			// A's endpoints vs B's vertices
+			for _, ep := range epA {
+				for _, pt := range ptsB {
+					if near(ep, pt) {
+						connected = true
+						break
+					}
+				}
+				if connected {
+					break
+				}
+			}
+			// B's endpoints vs A's vertices
+			if !connected {
+				for _, ep := range epB {
+					for _, pt := range ptsA {
+						if near(ep, pt) {
+							connected = true
+							break
+						}
+					}
+					if connected {
+						break
+					}
+				}
+			}
+			if connected {
+				union(l.traces[i], l.traces[j])
+			}
+		}
+	}
+
+	// ── Group elements by connected component ───────────────────────────
+	groups := make(map[string][]string) // root → element IDs
+	for id := range parent {
+		root := find(id)
+		groups[root] = append(groups[root], id)
+	}
+
+	// ── Build old reverse index ─────────────────────────────────────────
+	oldIndex := make(map[string]string) // elementID → netID
+	for _, n := range l.netsMap {
+		for _, e := range n.Elements {
+			oldIndex[e.ID] = n.ID
+		}
+	}
+
+	// ── Save old net metadata before rebuilding ─────────────────────────
+	type netMeta struct {
+		id          string
+		name        string
+		manualName  bool
+		rootConnID  string
+		description string
+	}
+	oldNets := make(map[string]netMeta) // netID → metadata
+	for _, n := range l.netsMap {
+		oldNets[n.ID] = netMeta{
+			id: n.ID, name: n.Name, manualName: n.ManualName,
+			rootConnID: n.RootConnectorID, description: n.Description,
+		}
+	}
+
+	// ── Rebuild nets from connectivity components ────────────────────────
+	// Clear existing nets (we'll rebuild them).
+	newNetsMap := make(map[string]*netlist.ElectricalNet)
+	var newNetIDs []string
+	claimedOldIDs := make(map[string]bool) // old net IDs already reused
+
+	for _, members := range groups {
+		hasTrace := false
+		for _, eid := range members {
+			if ref := l.features[eid]; ref != nil {
+				if _, ok := ref.Feature.(TraceFeature); ok {
+					hasTrace = true
+					break
+				}
+			}
+		}
+
+		// Collect distinct old nets referenced by this component.
+		netSeen := make(map[string]bool)
+		var candidateMetas []netMeta
+		for _, eid := range members {
+			if nid, ok := oldIndex[eid]; ok && !netSeen[nid] {
+				netSeen[nid] = true
+				if meta, ok := oldNets[nid]; ok {
+					candidateMetas = append(candidateMetas, meta)
+				}
+			}
+		}
+
+		// Skip isolated elements (no traces, never in a net).
+		if !hasTrace && len(candidateMetas) == 0 {
+			continue
+		}
+
+		// Pick the best net ID and metadata.
+		var bestMeta netMeta
+		if len(candidateMetas) == 0 {
+			l.netSeq++
+			id := fmt.Sprintf("net-%03d", l.netSeq)
+			bestMeta = netMeta{id: id, name: id}
+		} else {
+			bestMeta = candidateMetas[0]
+			for _, m := range candidateMetas[1:] {
+				if m.manualName && !bestMeta.manualName {
+					bestMeta = m
+				} else if !bestMeta.manualName || m.manualName {
+					bn := netlist.BetterNetName(m.name, bestMeta.name)
+					if bn == m.name && bn != bestMeta.name {
+						bestMeta = m
+					}
+				}
+				bestMeta.manualName = bestMeta.manualName || m.manualName
+			}
+		}
+
+		// If the best ID was already claimed by another component (split),
+		// generate a new ID for this component.
+		netID := bestMeta.id
+		if claimedOldIDs[netID] {
+			l.netSeq++
+			netID = fmt.Sprintf("net-%03d", l.netSeq)
+		}
+		claimedOldIDs[netID] = true
+		// Also mark all other candidate IDs as consumed (they're being absorbed).
+		for _, m := range candidateMetas {
+			claimedOldIDs[m.id] = true
+		}
+
+		// Log merges and splits.
+		if len(candidateMetas) > 1 {
+			names := make([]string, len(candidateMetas))
+			for i, m := range candidateMetas {
+				names[i] = m.name
+			}
+			fmt.Printf("ReconcileNets: merged %v into %q\n", names, bestMeta.name)
+		}
+
+		// Create the net with the chosen metadata.
+		net := netlist.NewElectricalNetWithName(netID, bestMeta.name)
+		net.ManualName = bestMeta.manualName
+		net.RootConnectorID = bestMeta.rootConnID
+		net.Description = bestMeta.description
+
+		// Populate with component members.
+		for _, eid := range members {
+			if cv := l.confirmedViasMap[eid]; cv != nil {
+				net.AddVia(cv)
+			} else if conn := l.connectorsMap[eid]; conn != nil {
+				net.AddConnector(conn)
+			} else if ref := l.features[eid]; ref != nil {
+				if tf, ok := ref.Feature.(TraceFeature); ok {
+					et := tf.ExtendedTrace
+					net.AddTrace(&et)
+				}
+			}
+		}
+
+		newNetsMap[netID] = net
+		newNetIDs = append(newNetIDs, netID)
+	}
+
+	// Replace old nets with rebuilt ones.
+	l.netsMap = newNetsMap
+	l.nets = newNetIDs
+
+	// ── Rebuild reverse index ───────────────────────────────────────────
+	l.elementToNet = make(map[string]string)
+	for _, n := range l.netsMap {
+		for _, e := range n.Elements {
+			l.elementToNet[e.ID] = n.ID
+		}
+	}
 }
 
 // UpdateTracePoints updates a trace's points in-place for vertex dragging.

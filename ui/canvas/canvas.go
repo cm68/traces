@@ -12,6 +12,7 @@ import (
 
 	"github.com/gotk3/gotk3/cairo"
 	"github.com/gotk3/gotk3/gdk"
+	"github.com/gotk3/gotk3/glib"
 	"github.com/gotk3/gotk3/gtk"
 )
 
@@ -280,14 +281,19 @@ func NewImageCanvas() *ImageCanvas {
 		return false
 	})
 
-	// Scroll for zoom
+	// Scroll for zoom — centered on cursor position
 	da.Connect("scroll-event", func(da *gtk.DrawingArea, ev *gdk.Event) bool {
 		scroll := gdk.EventScrollNewFromEvent(ev)
+		// Event coords are in DrawingArea space (zoomed + scrolled).
+		// Convert to image space.
+		evtX, evtY := scroll.X(), scroll.Y()
+		imgX := evtX / ic.zoom
+		imgY := evtY / ic.zoom
 		switch scroll.Direction() {
 		case gdk.SCROLL_UP:
-			ic.ZoomIn()
+			ic.ZoomAtPoint(ic.zoom*zoomStep, imgX, imgY, evtX, evtY)
 		case gdk.SCROLL_DOWN:
-			ic.ZoomOut()
+			ic.ZoomAtPoint(ic.zoom/zoomStep, imgX, imgY, evtX, evtY)
 		}
 		return true
 	})
@@ -494,6 +500,43 @@ func (ic *ImageCanvas) ZoomIn() {
 // ZoomOut decreases the zoom level.
 func (ic *ImageCanvas) ZoomOut() {
 	ic.SetZoom(ic.zoom / zoomStep)
+}
+
+// ZoomAtPoint zooms to the given level, keeping the image point (imgX, imgY)
+// under the cursor. evtX/evtY are the original DrawingArea-relative event coords
+// (before zoom change) used to compute the viewport-relative cursor position.
+func (ic *ImageCanvas) ZoomAtPoint(newZoom, imgX, imgY, evtX, evtY float64) {
+	if newZoom < minZoom {
+		newZoom = minZoom
+	}
+	if newZoom > maxZoom {
+		newZoom = maxZoom
+	}
+
+	hadj := ic.scrollWin.GetHAdjustment()
+	vadj := ic.scrollWin.GetVAdjustment()
+
+	// Cursor position relative to the viewport
+	vpX := evtX - hadj.GetValue()
+	vpY := evtY - vadj.GetValue()
+
+	// After zoom, the image point is at imgX*newZoom in canvas space.
+	// Set scroll so that position is still vpX/vpY from viewport edge.
+	newScrollX := imgX*newZoom - vpX
+	newScrollY := imgY*newZoom - vpY
+
+	// Apply the new zoom
+	ic.zoom = newZoom
+	ic.updateContentSize()
+
+	glib.IdleAdd(func() {
+		hadj.SetValue(newScrollX)
+		vadj.SetValue(newScrollY)
+	})
+
+	if ic.onZoomChange != nil {
+		ic.onZoomChange(newZoom)
+	}
 }
 
 // FitToWindow adjusts zoom to fit the image in the visible area.

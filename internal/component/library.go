@@ -83,7 +83,8 @@ func (lib *ComponentLibrary) Get(partNumber, pkg string) *PartDefinition {
 
 // GetByAlias returns a part definition matching by exact name, alias, or normalized form.
 // Falls back through: exact match → alias match → normalized match (strips suffixes,
-// family codes, and swaps 54↔74).
+// family codes, and swaps 54↔74). If the part number matches but the package differs,
+// returns the part anyway and logs a warning (package mismatch).
 func (lib *ComponentLibrary) GetByAlias(partNumber, pkg string) *PartDefinition {
 	// 1. Exact match
 	if p := lib.Get(partNumber, pkg); p != nil {
@@ -111,6 +112,26 @@ func (lib *ComponentLibrary) GetByAlias(partNumber, pkg string) *PartDefinition 
 			continue
 		}
 		if normalizePartNumber(strings.ToUpper(p.PartNumber)) == canon {
+			return p
+		}
+	}
+
+	// 4. Package-mismatch fallback: part number matches but package differs.
+	// Try alias match ignoring package.
+	for _, p := range lib.Parts {
+		for _, alias := range p.Aliases {
+			if strings.EqualFold(alias, pn) {
+				fmt.Printf("WARNING: part %q matched alias in library as %q but package differs: component=%q library=%q\n",
+					partNumber, p.PartNumber, pkg, p.Package)
+				return p
+			}
+		}
+	}
+	// Try normalized match ignoring package.
+	for _, p := range lib.Parts {
+		if normalizePartNumber(strings.ToUpper(p.PartNumber)) == canon {
+			fmt.Printf("WARNING: part %q matched library entry %q but package differs: component=%q library=%q\n",
+				partNumber, p.PartNumber, pkg, p.Package)
 			return p
 		}
 	}

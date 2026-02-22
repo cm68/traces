@@ -2,6 +2,7 @@ package netlist
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 
@@ -35,10 +36,18 @@ func IsLowPriorityName(name string) bool {
 
 // BetterNetName returns the higher-priority name between a and b.
 // Priority: signal/user names > component pin names > auto-generated "net-NNN".
+// At equal priority, prefers the shorter name so "GND" wins over "GND#2".
 func BetterNetName(a, b string) string {
 	pa := netNamePriority(a)
 	pb := netNamePriority(b)
-	if pa >= pb {
+	if pa > pb {
+		return a
+	}
+	if pb > pa {
+		return b
+	}
+	// Same priority: prefer shorter (drops instance suffix)
+	if len(a) <= len(b) {
 		return a
 	}
 	return b
@@ -79,9 +88,10 @@ type NetElement struct {
 // ElectricalNet represents a single electrical net with all its connections.
 // Named by the connector's signal name when rooted at a connector.
 type ElectricalNet struct {
-	ID          string `json:"id"`          // Unique net ID, e.g., "net-A0"
-	Name        string `json:"name"`        // Signal name (from connector or user)
-	Description string `json:"description"` // Optional description
+	ID          string `json:"id"`                       // Unique net ID, e.g., "net-001"
+	Name        string `json:"name"`                     // Display name (signal, user, or auto)
+	ManualName  bool   `json:"manual_name,omitempty"`    // True if name was explicitly set by user
+	Description string `json:"description"`              // Optional description
 
 	// The connector that roots this net (empty for internal nets)
 	RootConnectorID string `json:"root_connector_id,omitempty"`
@@ -101,9 +111,10 @@ type ElectricalNet struct {
 }
 
 // NewElectricalNet creates a new net rooted at a connector.
-func NewElectricalNet(conn *connector.Connector) *ElectricalNet {
+// The caller must supply a unique id (e.g. from DetectedFeaturesLayer.NextNetID()).
+func NewElectricalNet(id string, conn *connector.Connector) *ElectricalNet {
 	return &ElectricalNet{
-		ID:              "net-" + conn.SignalName,
+		ID:              id,
 		Name:            conn.SignalName,
 		RootConnectorID: conn.ID,
 		ConnectorIDs:    []string{conn.ID},
@@ -265,4 +276,116 @@ func (n *ElectricalNet) GetElementsByType(t NetElementType) []NetElement {
 		}
 	}
 	return result
+}
+
+// RebuildIDLists rebuilds ConnectorIDs, ViaIDs, TraceIDs, and PadIDs
+// from the Elements slice. Call after modifying Elements directly.
+func (n *ElectricalNet) RebuildIDLists() {
+	n.ConnectorIDs = nil
+	n.ViaIDs = nil
+	n.TraceIDs = nil
+	n.PadIDs = nil
+	for _, e := range n.Elements {
+		switch e.Type {
+		case ElementConnector:
+			n.ConnectorIDs = append(n.ConnectorIDs, e.ID)
+		case ElementVia:
+			n.ViaIDs = append(n.ViaIDs, e.ID)
+		case ElementTrace:
+			n.TraceIDs = append(n.TraceIDs, e.ID)
+		case ElementPad:
+			n.PadIDs = append(n.PadIDs, e.ID)
+		}
+	}
+}
+
+// TraceEndpoint describes the two endpoints of a trace for connectivity analysis.
+type TraceEndpoint struct {
+	Start geometry.Point2D
+	End   geometry.Point2D
+}
+
+// ConnectedComponents partitions the non-trace elements of this net into
+// groups that are interconnected by the net's traces. nodePositions maps
+// element IDs to their current positions. traceEndpoints maps trace IDs
+// to their start/end points. tolerance is the snap distance.
+// Returns a slice of element-ID groups; len==1 means the net is fully connected.
+func (n *ElectricalNet) ConnectedComponents(
+	nodePositions map[string]geometry.Point2D,
+	traceEndpoints map[string]TraceEndpoint,
+	tolerance float64,
+) [][]string {
+	// Collect node (non-trace) element IDs
+	var nodeIDs []string
+	for _, e := range n.Elements {
+		if e.Type != ElementTrace {
+			nodeIDs = append(nodeIDs, e.ID)
+		}
+	}
+	if len(nodeIDs) <= 1 {
+		return [][]string{nodeIDs}
+	}
+
+	// Build adjacency list: nodeID -> set of connected nodeIDs
+	adj := make(map[string]map[string]bool)
+	for _, id := range nodeIDs {
+		adj[id] = make(map[string]bool)
+	}
+
+	for _, tid := range n.TraceIDs {
+		ep, ok := traceEndpoints[tid]
+		if !ok {
+			continue
+		}
+		var startNode, endNode string
+		for _, nid := range nodeIDs {
+			pos, ok := nodePositions[nid]
+			if !ok {
+				continue
+			}
+			if math.Hypot(pos.X-ep.Start.X, pos.Y-ep.Start.Y) <= tolerance {
+				startNode = nid
+			}
+			if math.Hypot(pos.X-ep.End.X, pos.Y-ep.End.Y) <= tolerance {
+				endNode = nid
+			}
+		}
+		if startNode != "" && endNode != "" && startNode != endNode {
+			adj[startNode][endNode] = true
+			adj[endNode][startNode] = true
+		}
+	}
+
+	// BFS to find connected components
+	visited := make(map[string]bool)
+	var components [][]string
+	for _, nid := range nodeIDs {
+		if visited[nid] {
+			continue
+		}
+		var comp []string
+		queue := []string{nid}
+		visited[nid] = true
+		for len(queue) > 0 {
+			curr := queue[0]
+			queue = queue[1:]
+			comp = append(comp, curr)
+			for neighbor := range adj[curr] {
+				if !visited[neighbor] {
+					visited[neighbor] = true
+					queue = append(queue, neighbor)
+				}
+			}
+		}
+		components = append(components, comp)
+	}
+	return components
+}
+
+// BaseNetName strips an instance suffix (e.g. "GND#2" -> "GND").
+func BaseNetName(name string) string {
+	if idx := strings.LastIndex(name, "#"); idx > 0 {
+		return name[:idx]
+	}
+	return name
 }

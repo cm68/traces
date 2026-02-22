@@ -29,6 +29,9 @@ type DetectedFeaturesLayer struct {
 	// Monotonic trace counter to avoid ID collisions after deletions
 	traceSeq int
 
+	// Monotonic net counter to avoid ID collisions
+	netSeq int
+
 	// Confirmed vias (detected on both sides)
 	confirmedVias    []string                     // Confirmed via IDs
 	confirmedViasMap map[string]*via.ConfirmedVia // ID -> ConfirmedVia
@@ -917,11 +920,33 @@ func (l *DetectedFeaturesLayer) HitTestConnectorOnSide(x, y float64, side image.
 
 // Electrical net methods
 
+// NextNetID returns a unique net ID using a monotonically increasing counter.
+func (l *DetectedFeaturesLayer) NextNetID() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.netSeq++
+	return fmt.Sprintf("net-%03d", l.netSeq)
+}
+
+// parseNetSeq extracts the numeric suffix from a "net-NNN" style ID.
+// Returns 0 if the ID doesn't match the pattern.
+func parseNetSeq(id string) int {
+	var num int
+	if _, err := fmt.Sscanf(id, "net-%d", &num); err == nil {
+		return num
+	}
+	return 0
+}
+
 // AddNet adds an electrical net to the layer.
 func (l *DetectedFeaturesLayer) AddNet(n *netlist.ElectricalNet) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	// Keep netSeq ahead of loaded IDs to prevent collisions
+	if num := parseNetSeq(n.ID); num > l.netSeq {
+		l.netSeq = num
+	}
 	l.netsMap[n.ID] = n
 	l.nets = append(l.nets, n.ID)
 }

@@ -99,11 +99,21 @@ type TracesPanel struct {
 	netListBox       *gtk.ListBox
 	netCountLabel    *gtk.Label
 	netElementsBox   *gtk.ListBox
-	selectedNetID    string // currently selected net for element display
+	selectedNetID    string // currently selected net for element display (first of group)
+	netGroups        []netGroup // cached grouped nets for row-index mapping
 
 	// Preferences
 	prefs          *prefs.Prefs
 	showViaNumbers bool
+}
+
+// netGroup represents a group of nets that share the same base name.
+type netGroup struct {
+	baseName string
+	netIDs   []string
+	vias     int
+	conns    int
+	traces   int
 }
 
 // NewTracesPanel creates a new traces panel.
@@ -275,29 +285,32 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, 
 
 	tp.netListBox, _ = gtk.ListBoxNew()
 	tp.netListBox.SetSelectionMode(gtk.SELECTION_SINGLE)
-	// Single-click selects net and shows its elements
+	// Single-click selects net group and shows its elements
 	tp.netListBox.Connect("row-selected", func(_ *gtk.ListBox, row *gtk.ListBoxRow) {
 		if row == nil {
 			tp.selectedNetID = ""
+			tp.clearNetElementHighlight()
 			tp.refreshNetElements()
 			return
 		}
 		idx := row.GetIndex()
-		nets := tp.getSortedNets()
-		if idx >= 0 && idx < len(nets) {
-			tp.selectedNetID = nets[idx].ID
+		if idx >= 0 && idx < len(tp.netGroups) {
+			tp.selectedNetID = tp.netGroups[idx].netIDs[0]
+			tp.highlightNetGroup(idx)
 			tp.refreshNetElements()
 		}
 	})
-	// Double-click renames
+	// Double-click renames the first net in the group
 	tp.netListBox.Connect("row-activated", func(_ *gtk.ListBox, row *gtk.ListBoxRow) {
 		if row == nil {
 			return
 		}
 		idx := row.GetIndex()
-		nets := tp.getSortedNets()
-		if idx >= 0 && idx < len(nets) {
-			tp.renameNet(nets[idx])
+		if idx >= 0 && idx < len(tp.netGroups) {
+			net := tp.state.FeaturesLayer.GetNetByID(tp.netGroups[idx].netIDs[0])
+			if net != nil {
+				tp.renameNet(net)
+			}
 		}
 	})
 	sw.Add(tp.netListBox)
@@ -310,14 +323,37 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, 
 			return
 		}
 		idx := row.GetIndex()
-		nets := tp.getSortedNets()
-		if idx >= 0 && idx < len(nets) {
-			tp.state.FeaturesLayer.RemoveNet(nets[idx].ID)
+		if idx >= 0 && idx < len(tp.netGroups) {
+			fl := tp.state.FeaturesLayer
+			for _, nid := range tp.netGroups[idx].netIDs {
+				net := fl.GetNetByID(nid)
+				if net == nil {
+					continue
+				}
+				// Delete all traces belonging to this net
+				for _, tid := range net.TraceIDs {
+					fl.RemoveTrace(tid)
+				}
+				// Delete all confirmed vias belonging to this net
+				for _, vid := range net.ViaIDs {
+					cv := fl.GetConfirmedViaByID(vid)
+					if cv != nil {
+						fl.RemoveVia(cv.FrontViaID)
+						fl.RemoveVia(cv.BackViaID)
+						fl.RemoveConfirmedVia(cv.ID)
+					}
+				}
+				fl.RemoveNet(nid)
+			}
 			tp.selectedNetID = ""
+			tp.clearNetElementHighlight()
 			tp.refreshNetList()
 			tp.refreshNetElements()
+			tp.updateViaCounts()
 			tp.rebuildFeaturesOverlay()
 			tp.canvas.Refresh()
+			tp.state.Emit(app.EventFeaturesChanged, nil)
+			tp.state.Emit(app.EventConfirmedViasChanged, nil)
 			tp.state.Emit(app.EventNetlistModified, nil)
 		}
 	})
@@ -670,9 +706,106 @@ func (tp *TracesPanel) onDetectVias() {
 }
 
 // rebuildFeaturesOverlay rebuilds the three feature overlays from all model data.
+// ensureAllTracesHaveNets scans for traces not belonging to any net and
+// creates an auto-named net for each orphan. Traces at the same endpoint
+// (within tolerance) are grouped into the same net.
+func (tp *TracesPanel) ensureAllTracesHaveNets() {
+	fl := tp.state.FeaturesLayer
+	const tolerance = 5.0
+
+	// Collect orphan trace IDs.
+	var orphans []string
+	for _, tid := range fl.GetTraces() {
+		if fl.GetNetForElement(tid) == nil {
+			orphans = append(orphans, tid)
+		}
+	}
+	if len(orphans) == 0 {
+		return
+	}
+
+	// For each orphan, try to attach to an existing net via endpoint proximity
+	// to a via or connector already in a net.  If none found, create a new net.
+	for _, tid := range orphans {
+		// Re-check — a previous iteration may have adopted this trace.
+		if fl.GetNetForElement(tid) != nil {
+			continue
+		}
+		tf := fl.GetTraceFeature(tid)
+		if tf == nil || len(tf.Points) < 2 {
+			continue
+		}
+
+		start := tf.Points[0]
+		end := tf.Points[len(tf.Points)-1]
+
+		// Check confirmed vias at either endpoint.
+		var found *netlist.ElectricalNet
+		for _, cv := range fl.GetConfirmedVias() {
+			if math.Hypot(cv.Center.X-start.X, cv.Center.Y-start.Y) <= tolerance ||
+				math.Hypot(cv.Center.X-end.X, cv.Center.Y-end.Y) <= tolerance {
+				if net := fl.GetNetForElement(cv.ID); net != nil {
+					found = net
+					break
+				}
+			}
+		}
+		// Check connectors at either endpoint.
+		if found == nil {
+			for _, conn := range fl.GetConnectors() {
+				if math.Hypot(conn.Center.X-start.X, conn.Center.Y-start.Y) <= tolerance ||
+					math.Hypot(conn.Center.X-end.X, conn.Center.Y-end.Y) <= tolerance {
+					if net := fl.GetNetForElement(conn.ID); net != nil {
+						found = net
+						break
+					}
+				}
+			}
+		}
+		// Check other traces at either endpoint (share an endpoint → same net).
+		if found == nil {
+			for _, otherID := range fl.GetTraces() {
+				if otherID == tid {
+					continue
+				}
+				otherNet := fl.GetNetForElement(otherID)
+				if otherNet == nil {
+					continue
+				}
+				otf := fl.GetTraceFeature(otherID)
+				if otf == nil || len(otf.Points) < 2 {
+					continue
+				}
+				oStart := otf.Points[0]
+				oEnd := otf.Points[len(otf.Points)-1]
+				if math.Hypot(oStart.X-start.X, oStart.Y-start.Y) <= tolerance ||
+					math.Hypot(oStart.X-end.X, oStart.Y-end.Y) <= tolerance ||
+					math.Hypot(oEnd.X-start.X, oEnd.Y-start.Y) <= tolerance ||
+					math.Hypot(oEnd.X-end.X, oEnd.Y-end.Y) <= tolerance {
+					found = otherNet
+					break
+				}
+			}
+		}
+
+		if found != nil {
+			found.AddTrace(tf)
+			fmt.Printf("Adopted orphan trace %s into net %q\n", tid, found.Name)
+		} else {
+			id := fl.NextNetID()
+			net := netlist.NewElectricalNetWithName(id, id)
+			net.AddTrace(tf)
+			fl.AddNet(net)
+			fmt.Printf("Created net %s for orphan trace %s\n", id, tid)
+		}
+	}
+}
+
 // Front/back overlays track their respective image layers for visibility;
 // the vias overlay is always visible (vias penetrate both sides).
 func (tp *TracesPanel) rebuildFeaturesOverlay() {
+	tp.ensureAllTracesHaveNets()
+
 	// Clear import panel diagnostic overlays so they don't cover features
 	tp.canvas.ClearOverlay("front_contacts")
 	tp.canvas.ClearOverlay("back_contacts")
@@ -806,13 +939,13 @@ func (tp *TracesPanel) rebuildFeaturesOverlay() {
 				Color:     traceColor,
 			})
 		}
-		if len(tf.Points) > 2 {
-			for _, pt := range tf.Points[1 : len(tf.Points)-1] {
-				target.Circles = append(target.Circles, canvas.OverlayCircle{
-					X: pt.X, Y: pt.Y, Radius: 4, Filled: true,
-					Color: traceColor,
-				})
-			}
+		// Draw dots on every vertex (endpoints + waypoints) so junctions
+		// and dangling ends are always visible and easy to connect to.
+		for _, pt := range tf.Points {
+			target.Circles = append(target.Circles, canvas.OverlayCircle{
+				X: pt.X, Y: pt.Y, Radius: 4, Filled: true,
+				Color: traceColor,
+			})
 		}
 	}
 
@@ -1240,6 +1373,15 @@ func (tp *TracesPanel) deleteTraceSegment(hit *traceHit) {
 
 	nSegs := len(tf.Points) - 1
 	if nSegs <= 1 {
+		// Clean up net membership before removing the trace.
+		if net := tp.state.FeaturesLayer.GetNetForElement(hit.traceID); net != nil {
+			net.RemoveElement(hit.traceID)
+			if len(net.Elements) == 0 {
+				tp.state.FeaturesLayer.RemoveNet(net.ID)
+			} else {
+				tp.splitNetIfDisconnected(net)
+			}
+		}
 		tp.state.FeaturesLayer.RemoveTrace(hit.traceID)
 		tp.traceStatusLabel.SetText(fmt.Sprintf("Deleted %s", hit.traceID))
 	} else {
@@ -1455,6 +1597,8 @@ func (tp *TracesPanel) deleteConfirmedVia(cv *via.ConfirmedVia) {
 		net.RemoveElement(cv.ID)
 		if len(net.Elements) == 0 {
 			features.RemoveNet(net.ID)
+		} else {
+			tp.splitNetIfDisconnected(net)
 		}
 	}
 
@@ -1493,6 +1637,8 @@ func (tp *TracesPanel) deleteConfirmedViaSide(cv *via.ConfirmedVia, side pcbimag
 		net.RemoveElement(cv.ID)
 		if len(net.Elements) == 0 {
 			features.RemoveNet(net.ID)
+		} else {
+			tp.splitNetIfDisconnected(net)
 		}
 	}
 
@@ -1510,7 +1656,24 @@ func (tp *TracesPanel) deleteConfirmedViaSide(cv *via.ConfirmedVia, side pcbimag
 // deleteConnectedTrace removes traces connected to a confirmed via and cleans up nets.
 func (tp *TracesPanel) deleteConnectedTrace(cv *via.ConfirmedVia) {
 	features := tp.state.FeaturesLayer
-	connectedTraces := features.GetTracesConnectedToVia(cv.Center, 5.0)
+	allConnected := features.GetTracesConnectedToVia(cv.Center, 5.0)
+
+	// Only delete traces that share a net with this via.
+	viaNet := features.GetNetForElement(cv.ID)
+	var connectedTraces []string
+	for _, tid := range allConnected {
+		if viaNet != nil && viaNet.ContainsElement(tid) {
+			connectedTraces = append(connectedTraces, tid)
+		} else if viaNet == nil {
+			// Via has no net — only delete traces that also have no net.
+			if features.GetNetForElement(tid) == nil {
+				connectedTraces = append(connectedTraces, tid)
+			}
+		}
+	}
+
+	// Track affected nets so we can check for splits after all traces are removed.
+	affectedNets := make(map[string]*netlist.ElectricalNet)
 	for _, traceID := range connectedTraces {
 		net := features.GetNetForElement(traceID)
 		features.RemoveTrace(traceID)
@@ -1518,14 +1681,205 @@ func (tp *TracesPanel) deleteConnectedTrace(cv *via.ConfirmedVia) {
 			net.RemoveElement(traceID)
 			if len(net.Elements) == 0 {
 				features.RemoveNet(net.ID)
+			} else {
+				affectedNets[net.ID] = net
 			}
 		}
+	}
+	for _, net := range affectedNets {
+		tp.splitNetIfDisconnected(net)
 	}
 	tp.rebuildFeaturesOverlay()
 	tp.refreshNetList()
 	tp.traceStatusLabel.SetText(fmt.Sprintf("Deleted %d trace(s) from %s", len(connectedTraces), cv.ID))
 	tp.canvas.Refresh()
 	tp.state.Emit(app.EventNetlistModified, nil)
+}
+
+// splitNetIfDisconnected checks whether a net's remaining elements are still
+// connected via traces. If not, it splits the net into one net per connected
+// component, derives names from each component's connectors/vias, and
+// disambiguates duplicate names with instance suffixes.
+func (tp *TracesPanel) splitNetIfDisconnected(net *netlist.ElectricalNet) {
+	fl := tp.state.FeaturesLayer
+	const tolerance = 5.0
+
+	// Collect non-trace elements with fresh positions from the features layer.
+	type node struct {
+		id  string
+		pos geometry.Point2D
+	}
+	var nodes []node
+	nodePositions := make(map[string]geometry.Point2D)
+	for _, e := range net.Elements {
+		if e.Type == netlist.ElementTrace {
+			continue
+		}
+		pos := e.Position
+		switch e.Type {
+		case netlist.ElementVia:
+			if cv := fl.GetConfirmedViaByID(e.ID); cv != nil {
+				pos = cv.Center
+			}
+		case netlist.ElementConnector:
+			if c := fl.GetConnectorByID(e.ID); c != nil {
+				pos = c.Center
+			}
+		}
+		nodes = append(nodes, node{id: e.ID, pos: pos})
+		nodePositions[e.ID] = pos
+	}
+
+	if len(nodes) <= 1 {
+		return
+	}
+
+	// Build trace endpoint map from actual feature geometry.
+	traceEndpoints := make(map[string]netlist.TraceEndpoint)
+	for _, tid := range net.TraceIDs {
+		tf := fl.GetTraceFeature(tid)
+		if tf != nil && len(tf.Points) >= 2 {
+			traceEndpoints[tid] = netlist.TraceEndpoint{
+				Start: tf.Points[0],
+				End:   tf.Points[len(tf.Points)-1],
+			}
+		}
+	}
+
+	components := net.ConnectedComponents(nodePositions, traceEndpoints, tolerance)
+	if len(components) <= 1 {
+		return
+	}
+
+	fmt.Printf("Net %q (%s) split into %d components\n", net.Name, net.ID, len(components))
+
+	// Build node -> component index.
+	nodeComp := make(map[string]int)
+	for ci, comp := range components {
+		for _, nid := range comp {
+			nodeComp[nid] = ci
+		}
+	}
+
+	// Assign each trace to the component of its nearest node endpoint.
+	traceComp := make(map[string]int)
+	for _, tid := range net.TraceIDs {
+		ep, ok := traceEndpoints[tid]
+		if !ok {
+			continue
+		}
+		for _, nd := range nodes {
+			if math.Hypot(nd.pos.X-ep.Start.X, nd.pos.Y-ep.Start.Y) <= tolerance ||
+				math.Hypot(nd.pos.X-ep.End.X, nd.pos.Y-ep.End.Y) <= tolerance {
+				traceComp[tid] = nodeComp[nd.id]
+				break
+			}
+		}
+	}
+
+	// Partition elements by component.
+	compElements := make([][]netlist.NetElement, len(components))
+	for _, e := range net.Elements {
+		if e.Type == netlist.ElementTrace {
+			ci := traceComp[e.ID] // defaults to 0 for orphaned traces
+			compElements[ci] = append(compElements[ci], e)
+		} else {
+			compElements[nodeComp[e.ID]] = append(compElements[nodeComp[e.ID]], e)
+		}
+	}
+
+	// Rebuild original net with component 0.
+	net.Elements = compElements[0]
+	net.RebuildIDLists()
+	if len(net.ConnectorIDs) > 0 {
+		net.RootConnectorID = net.ConnectorIDs[0]
+	} else {
+		net.RootConnectorID = ""
+	}
+	net.Name = tp.deriveNetName(net)
+
+	// Create new nets for remaining components.
+	for ci := 1; ci < len(components); ci++ {
+		newNet := &netlist.ElectricalNet{
+			ID:       fl.NextNetID(),
+			Elements: compElements[ci],
+		}
+		newNet.RebuildIDLists()
+		if len(newNet.ConnectorIDs) > 0 {
+			newNet.RootConnectorID = newNet.ConnectorIDs[0]
+		}
+		newNet.Name = tp.deriveNetName(newNet)
+		fl.AddNet(newNet)
+		fmt.Printf("  Split component %d: net %s %q (%d elements)\n",
+			ci, newNet.ID, newNet.Name, len(newNet.Elements))
+	}
+
+	tp.disambiguateNetNames()
+}
+
+// deriveNetName picks the best name for a net from its connectors and vias.
+// Manual names are never overridden. Connector signal names are always valid
+// (connectors are treated as outputs). Via signal names are only used when
+// the pin is an output in the component library.
+func (tp *TracesPanel) deriveNetName(net *netlist.ElectricalNet) string {
+	// Never override a manually-assigned name.
+	if net.ManualName {
+		return net.Name
+	}
+
+	fl := tp.state.FeaturesLayer
+
+	// Connector signal names always count — connectors are board-level outputs.
+	for _, cid := range net.ConnectorIDs {
+		if conn := fl.GetConnectorByID(cid); conn != nil && conn.SignalName != "" {
+			return conn.SignalName
+		}
+	}
+	// Via signal names only when the pin is an output in the library.
+	for _, vid := range net.ViaIDs {
+		if cv := fl.GetConfirmedViaByID(vid); cv != nil && cv.SignalName != "" {
+			if tp.isOutputPin(cv) {
+				return cv.SignalName
+			}
+		}
+	}
+	// Then component.pin format as fallback.
+	for _, vid := range net.ViaIDs {
+		if cv := fl.GetConfirmedViaByID(vid); cv != nil && cv.ComponentID != "" && cv.PinNumber != "" {
+			return fmt.Sprintf("%s.%s", cv.ComponentID, cv.PinNumber)
+		}
+	}
+	// Keep existing base name (may be auto-generated).
+	return netlist.BaseNetName(net.Name)
+}
+
+// disambiguateNetNames adds instance suffixes (#2, #3, …) to nets that
+// share the same base name. Call after any net creation, merge, or split.
+func (tp *TracesPanel) disambiguateNetNames() {
+	nets := tp.state.FeaturesLayer.GetNets()
+
+	// Group nets by base name (strip existing suffixes first).
+	groups := make(map[string][]*netlist.ElectricalNet)
+	for _, n := range nets {
+		bn := netlist.BaseNetName(n.Name)
+		groups[bn] = append(groups[bn], n)
+	}
+
+	for bn, group := range groups {
+		if len(group) == 1 {
+			// Sole owner of this base name — remove stale suffix.
+			group[0].Name = bn
+			continue
+		}
+		// Stable sort by ID so the first-created net keeps the bare name.
+		sort.Slice(group, func(i, j int) bool {
+			return group[i].ID < group[j].ID
+		})
+		group[0].Name = bn
+		for i := 1; i < len(group); i++ {
+			group[i].Name = fmt.Sprintf("%s#%d", bn, i+1)
+		}
+	}
 }
 
 // adjustConfirmedViaRadius changes the radius of a confirmed via.
@@ -1582,10 +1936,11 @@ func (tp *TracesPanel) nameNetlist(cv *via.ConfirmedVia) {
 		if name != "" {
 			if net != nil {
 				net.Name = name
-				net.ID = "net-" + name
+				net.ManualName = true
 				fmt.Printf("Renamed net to %q (%d vias)\n", name, len(net.ViaIDs))
 			} else {
-				net = netlist.NewElectricalNetWithName("net-"+name, name)
+				net = netlist.NewElectricalNetWithName(tp.state.FeaturesLayer.NextNetID(), name)
+				net.ManualName = true
 				net.AddVia(cv)
 				tp.state.FeaturesLayer.AddNet(net)
 				fmt.Printf("Created net %q for %s\n", name, cv.ID)
@@ -1607,6 +1962,7 @@ func (tp *TracesPanel) getSortedNets() []*netlist.ElectricalNet {
 }
 
 // refreshNetList rebuilds the net list widget from current features layer data.
+// Nets with the same base name are grouped into a single row with aggregated counts.
 func (tp *TracesPanel) refreshNetList() {
 	if tp.netListBox == nil {
 		return
@@ -1620,58 +1976,120 @@ func (tp *TracesPanel) refreshNetList() {
 
 	nets := tp.getSortedNets()
 
+	// Group by base name.
+	groupMap := make(map[string]*netGroup)
+	var groupOrder []string
 	for _, net := range nets {
+		bn := netlist.BaseNetName(net.Name)
+		g, ok := groupMap[bn]
+		if !ok {
+			g = &netGroup{baseName: bn}
+			groupMap[bn] = g
+			groupOrder = append(groupOrder, bn)
+		}
+		g.netIDs = append(g.netIDs, net.ID)
+		g.vias += len(net.ViaIDs)
+		g.conns += len(net.ConnectorIDs)
+		g.traces += len(net.TraceIDs)
+	}
+	sort.Strings(groupOrder)
+
+	tp.netGroups = make([]netGroup, 0, len(groupOrder))
+	for _, bn := range groupOrder {
+		tp.netGroups = append(tp.netGroups, *groupMap[bn])
+	}
+
+	for _, g := range tp.netGroups {
 		label := fmt.Sprintf("%s (%dv, %dc, %dt)",
-			net.Name, len(net.ViaIDs), len(net.ConnectorIDs), len(net.TraceIDs))
+			g.baseName, g.vias, g.conns, g.traces)
 		row, _ := gtk.LabelNew(label)
 		row.SetHAlign(gtk.ALIGN_START)
 		tp.netListBox.Add(row)
 	}
 	tp.netListBox.ShowAll()
-	tp.netCountLabel.SetText(fmt.Sprintf("Nets: %d", len(nets)))
+	tp.netCountLabel.SetText(fmt.Sprintf("Nets: %d", len(tp.netGroups)))
 	tp.refreshNetElements()
 }
 
-// refreshNetElements rebuilds the elements list for the currently selected net.
+// selectedNetGroup returns the netGroup that contains selectedNetID, or nil.
+func (tp *TracesPanel) selectedNetGroup() *netGroup {
+	if tp.selectedNetID == "" {
+		return nil
+	}
+	for i := range tp.netGroups {
+		for _, nid := range tp.netGroups[i].netIDs {
+			if nid == tp.selectedNetID {
+				return &tp.netGroups[i]
+			}
+		}
+	}
+	return nil
+}
+
+// refreshNetElements rebuilds the elements list for the currently selected net group.
 func (tp *TracesPanel) refreshNetElements() {
 	if tp.netElementsBox == nil {
 		return
 	}
-	tp.clearNetElementHighlight()
 	tp.netElementsBox.GetChildren().Foreach(func(item interface{}) {
 		if w, ok := item.(*gtk.Widget); ok {
 			tp.netElementsBox.Remove(w)
 		}
 	})
 
-	if tp.selectedNetID == "" {
-		tp.netElementsBox.ShowAll()
-		return
-	}
-
-	net := tp.state.FeaturesLayer.GetNetByID(tp.selectedNetID)
-	if net == nil {
+	sg := tp.selectedNetGroup()
+	if sg == nil {
 		tp.selectedNetID = ""
 		tp.netElementsBox.ShowAll()
 		return
 	}
 
-	for _, elem := range net.Elements {
-		label := fmt.Sprintf("[%s] %s", elem.Type.String(), elem.ID)
-		row, _ := gtk.LabelNew(label)
-		row.SetHAlign(gtk.ALIGN_START)
-		tp.netElementsBox.Add(row)
+	fl := tp.state.FeaturesLayer
+	for _, nid := range sg.netIDs {
+		net := fl.GetNetByID(nid)
+		if net == nil {
+			continue
+		}
+		for _, elem := range net.Elements {
+			label := fmt.Sprintf("[%s] %s", elem.Type.String(), elem.ID)
+			row, _ := gtk.LabelNew(label)
+			row.SetHAlign(gtk.ALIGN_START)
+			tp.netElementsBox.Add(row)
+		}
 	}
 	tp.netElementsBox.ShowAll()
 }
 
+// resolveGroupElement maps a row index in the flattened element list to the
+// owning net and the element within it.
+func (tp *TracesPanel) resolveGroupElement(rowIdx int) (*netlist.ElectricalNet, *netlist.NetElement) {
+	sg := tp.selectedNetGroup()
+	if sg == nil || rowIdx < 0 {
+		return nil, nil
+	}
+	fl := tp.state.FeaturesLayer
+	offset := 0
+	for _, nid := range sg.netIDs {
+		net := fl.GetNetByID(nid)
+		if net == nil {
+			continue
+		}
+		if rowIdx < offset+len(net.Elements) {
+			elem := &net.Elements[rowIdx-offset]
+			return net, elem
+		}
+		offset += len(net.Elements)
+	}
+	return nil, nil
+}
+
 // showNetElementMenu shows a right-click context menu for a net element row.
 func (tp *TracesPanel) showNetElementMenu(rowIdx int) {
-	net := tp.state.FeaturesLayer.GetNetByID(tp.selectedNetID)
-	if net == nil || rowIdx < 0 || rowIdx >= len(net.Elements) {
+	net, elemPtr := tp.resolveGroupElement(rowIdx)
+	if net == nil || elemPtr == nil {
 		return
 	}
-	elem := net.Elements[rowIdx]
+	elem := *elemPtr
 
 	menu, _ := gtk.MenuNew()
 	addItem := func(label string, cb func()) {
@@ -1702,6 +2120,8 @@ func (tp *TracesPanel) showNetElementMenu(rowIdx int) {
 			if len(net.Elements) == 0 {
 				tp.state.FeaturesLayer.RemoveNet(net.ID)
 				tp.selectedNetID = ""
+			} else {
+				tp.splitNetIfDisconnected(net)
 			}
 			tp.refreshNetList()
 			tp.refreshNetElements()
@@ -1751,12 +2171,12 @@ func (tp *TracesPanel) showNetElementMenu(rowIdx int) {
 
 // highlightNetElement draws a highlight overlay on the canvas for the element at rowIdx.
 func (tp *TracesPanel) highlightNetElement(rowIdx int) {
-	net := tp.state.FeaturesLayer.GetNetByID(tp.selectedNetID)
-	if net == nil || rowIdx < 0 || rowIdx >= len(net.Elements) {
+	_, elemPtr := tp.resolveGroupElement(rowIdx)
+	if elemPtr == nil {
 		tp.clearNetElementHighlight()
 		return
 	}
-	elem := net.Elements[rowIdx]
+	elem := *elemPtr
 	highlightColor := color.RGBA{R: 255, G: 255, B: 0, A: 255} // yellow
 
 	switch elem.Type {
@@ -1809,6 +2229,63 @@ func (tp *TracesPanel) highlightNetElement(rowIdx int) {
 	tp.canvas.Refresh()
 }
 
+// highlightNetGroup draws highlight overlays for all elements in every net of the group.
+func (tp *TracesPanel) highlightNetGroup(groupIdx int) {
+	if groupIdx < 0 || groupIdx >= len(tp.netGroups) {
+		tp.clearNetElementHighlight()
+		return
+	}
+	g := tp.netGroups[groupIdx]
+	fl := tp.state.FeaturesLayer
+	highlightColor := color.RGBA{R: 255, G: 255, B: 0, A: 255}
+
+	var circles []canvas.OverlayCircle
+	var rects []canvas.OverlayRect
+	var lines []canvas.OverlayLine
+
+	for _, nid := range g.netIDs {
+		net := fl.GetNetByID(nid)
+		if net == nil {
+			continue
+		}
+		for _, elem := range net.Elements {
+			switch elem.Type {
+			case netlist.ElementVia:
+				if cv := fl.GetConfirmedViaByID(elem.ID); cv != nil {
+					circles = append(circles,
+						canvas.OverlayCircle{X: cv.Center.X, Y: cv.Center.Y, Radius: cv.Radius + 4, Filled: false})
+				}
+			case netlist.ElementConnector:
+				if conn := fl.GetConnectorByID(elem.ID); conn != nil {
+					pad := 3
+					rects = append(rects, canvas.OverlayRect{
+						X: conn.Bounds.X - pad, Y: conn.Bounds.Y - pad,
+						Width: conn.Bounds.Width + 2*pad, Height: conn.Bounds.Height + 2*pad,
+					})
+				}
+			case netlist.ElementTrace:
+				if tf := fl.GetTraceFeature(elem.ID); tf != nil && len(tf.Points) >= 2 {
+					for i := 1; i < len(tf.Points); i++ {
+						lines = append(lines, canvas.OverlayLine{
+							X1: tf.Points[i-1].X, Y1: tf.Points[i-1].Y,
+							X2: tf.Points[i].X, Y2: tf.Points[i].Y,
+							Thickness: 4,
+						})
+					}
+				}
+			}
+		}
+	}
+
+	tp.canvas.SetOverlay("net_element_highlight", &canvas.Overlay{
+		Circles:    circles,
+		Rectangles: rects,
+		Lines:      lines,
+		Color:      highlightColor,
+	})
+	tp.canvas.Refresh()
+}
+
 // clearNetElementHighlight removes the element highlight overlay.
 func (tp *TracesPanel) clearNetElementHighlight() {
 	tp.canvas.ClearOverlay("net_element_highlight")
@@ -1840,6 +2317,7 @@ func (tp *TracesPanel) renameNet(net *netlist.ElectricalNet) {
 		name, _ := entry.GetText()
 		if name != "" && name != net.Name {
 			net.Name = name
+			net.ManualName = true
 			tp.refreshNetList()
 			tp.state.Emit(app.EventNetlistModified, nil)
 		}
@@ -1935,6 +2413,42 @@ func (tp *TracesPanel) namePin(cv *via.ConfirmedVia) {
 	dlg.Destroy()
 }
 
+// isOutputPin returns true if the confirmed via is an output pin according to the
+// component library. Only output pins should drive net naming.
+func (tp *TracesPanel) isOutputPin(cv *via.ConfirmedVia) bool {
+	if cv.ComponentID == "" || cv.PinNumber == "" {
+		return false
+	}
+	var comp *component.Component
+	for _, c := range tp.state.Components {
+		if c.ID == cv.ComponentID {
+			comp = c
+			break
+		}
+	}
+	if comp == nil || comp.PartNumber == "" || comp.Package == "" {
+		return false
+	}
+	lib := tp.state.ComponentLibrary
+	if lib == nil {
+		return false
+	}
+	partDef := lib.GetByAlias(comp.PartNumber, comp.Package)
+	if partDef == nil {
+		return false
+	}
+	pinNum, err := strconv.Atoi(cv.PinNumber)
+	if err != nil {
+		return false
+	}
+	for _, pin := range partDef.Pins {
+		if pin.Number == pinNum {
+			return pin.Direction == connector.DirectionOutput
+		}
+	}
+	return false
+}
+
 // resolveSignalName looks up the pin's function name from the parts library and sets
 // cv.SignalName (e.g. "C3-GND"). If the pin direction is Output and the via's net has
 // a low-priority name (auto-generated or component.pin), the net is renamed.
@@ -1992,10 +2506,10 @@ func (tp *TracesPanel) resolveSignalName(cv *via.ConfirmedVia) {
 		return
 	}
 
-	// Find the net containing this via — only rename low-priority names
+	// Find the net containing this via — only rename low-priority or non-manual names
 	for _, net := range tp.state.FeaturesLayer.GetNets() {
 		if net.ContainsVia(cv.ID) {
-			if netlist.IsLowPriorityName(net.Name) {
+			if !net.ManualName && netlist.IsLowPriorityName(net.Name) {
 				fmt.Printf("Renaming net %q -> %q (output pin)\n", net.Name, cv.SignalName)
 				net.Name = cv.SignalName
 			}
@@ -2277,12 +2791,12 @@ func (tp *TracesPanel) associateTraceEndpoints() {
 
 	// For connector endpoints with no existing net, create one from the connector's signal name
 	if startConn != nil && startNet == nil {
-		startNet = netlist.NewElectricalNet(startConn)
+		startNet = netlist.NewElectricalNet(tp.state.FeaturesLayer.NextNetID(), startConn)
 		tp.state.FeaturesLayer.AddNet(startNet)
 		fmt.Printf("Created net %q from connector %s\n", startNet.Name, startConn.ID)
 	}
 	if tp.traceEndConn != nil && endNet == nil {
-		endNet = netlist.NewElectricalNet(tp.traceEndConn)
+		endNet = netlist.NewElectricalNet(tp.state.FeaturesLayer.NextNetID(), tp.traceEndConn)
 		tp.state.FeaturesLayer.AddNet(endNet)
 		fmt.Printf("Created net %q from connector %s\n", endNet.Name, tp.traceEndConn.ID)
 	}
@@ -2320,12 +2834,18 @@ func (tp *TracesPanel) associateTraceEndpoints() {
 			tp.state.Emit(app.EventNetlistModified, nil)
 			return
 		}
-		// Merge: keep the net with the better name
+		// Merge: manual names win; otherwise keep the better name.
 		keepNet, absorbNet := startNet, endNet
-		if netlist.BetterNetName(endNet.Name, startNet.Name) == endNet.Name &&
-			netlist.BetterNetName(endNet.Name, startNet.Name) != startNet.Name {
+		if endNet.ManualName && !startNet.ManualName {
 			keepNet, absorbNet = endNet, startNet
+		} else if !startNet.ManualName || endNet.ManualName {
+			// Both manual or both auto — use name priority.
+			if netlist.BetterNetName(endNet.Name, startNet.Name) == endNet.Name &&
+				netlist.BetterNetName(endNet.Name, startNet.Name) != startNet.Name {
+				keepNet, absorbNet = endNet, startNet
+			}
 		}
+		keepNet.ManualName = keepNet.ManualName || absorbNet.ManualName
 		// Absorb all elements from the losing net
 		for _, vid := range absorbNet.ViaIDs {
 			if !keepNet.ContainsVia(vid) {
@@ -2374,14 +2894,13 @@ func (tp *TracesPanel) associateTraceEndpoints() {
 		fmt.Printf("Added %s to net %q\n", startID, endNet.Name)
 	} else {
 		// Neither has a net — create a new one
-		netNum := tp.state.FeaturesLayer.NetCount() + 1
-		id := fmt.Sprintf("net-%03d", netNum)
+		id := tp.state.FeaturesLayer.NextNetID()
 		name := id // default auto-generated name
 
-		// Try signal name from library lookup first, then component.pin
-		if startVia != nil && startVia.SignalName != "" {
+		// Try signal name from output pins only, then component.pin
+		if startVia != nil && startVia.SignalName != "" && tp.isOutputPin(startVia) {
 			name = startVia.SignalName
-		} else if tp.traceEndVia != nil && tp.traceEndVia.SignalName != "" {
+		} else if tp.traceEndVia != nil && tp.traceEndVia.SignalName != "" && tp.isOutputPin(tp.traceEndVia) {
 			name = tp.traceEndVia.SignalName
 		} else if startVia != nil && startVia.ComponentID != "" && startVia.PinNumber != "" {
 			name = fmt.Sprintf("%s.%s", startVia.ComponentID, startVia.PinNumber)
@@ -2396,6 +2915,7 @@ func (tp *TracesPanel) associateTraceEndpoints() {
 		tp.state.FeaturesLayer.AddNet(net)
 		fmt.Printf("Created net %q for %s and %s\n", name, startID, endID)
 	}
+	tp.disambiguateNetNames()
 	tp.state.Emit(app.EventNetlistModified, nil)
 }
 

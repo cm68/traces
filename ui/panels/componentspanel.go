@@ -20,11 +20,28 @@ import (
 	"pcb-tracer/pkg/geometry"
 	"pcb-tracer/ui/canvas"
 
+	"github.com/gotk3/gotk3/cairo"
 	"github.com/gotk3/gotk3/gdk"
 	"github.com/gotk3/gotk3/glib"
 	"github.com/gotk3/gotk3/gtk"
 	"gocv.io/x/gocv"
 )
+
+// mfrPrefixes maps IC manufacturer prefixes to manufacturer names.
+// Used for both OCR detection and manual part number entry cleanup.
+var mfrPrefixes = map[string]string{
+	"SN": "Texas Instruments", "TL": "Texas Instruments", "UC": "Texas Instruments",
+	"DM": "National Semiconductor", "LM": "National Semiconductor", "DS": "National Semiconductor",
+	"MC": "Motorola", "MJ": "Motorola",
+	"UA": "Fairchild", "9N": "Fairchild", "F": "Fairchild",
+	"AM": "AMD",
+	"CD": "RCA", "CA": "RCA",
+	"HD": "Hitachi", "HA": "Hitachi",
+	"TC": "Toshiba",
+	"MB": "Fujitsu",
+	"M": "Mitsubishi",
+	"N": "Signetics", "NE": "Signetics",
+}
 
 // ComponentsPanel displays and manages detected components.
 type ComponentsPanel struct {
@@ -55,6 +72,8 @@ type ComponentsPanel struct {
 	correctedTextEntry *gtk.TextView
 	ocrOrientation     []*gtk.RadioButton // N, S, E, W
 	ocrTrainingLabel   *gtk.Label
+	previewArea        *gtk.DrawingArea  // Raw component image preview
+	previewRGBA        *image.RGBA       // Current preview image (rotated, unscaled)
 }
 
 // NewComponentsPanel creates a new components panel.
@@ -327,6 +346,48 @@ func (cp *ComponentsPanel) buildEditForm() *gtk.ScrolledWindow {
 	formBox.PackStart(sep3, false, false, 2)
 	formBox.PackStart(btnRow, false, false, 0)
 
+	// Component image preview — DrawingArea scales to fit, never drives panel size
+	sep4, _ := gtk.SeparatorNew(gtk.ORIENTATION_HORIZONTAL)
+	formBox.PackStart(sep4, false, false, 2)
+	cp.previewArea, _ = gtk.DrawingAreaNew()
+	cp.previewArea.SetSizeRequest(-1, 1) // minimal height request
+	cp.previewArea.Connect("draw", func(da *gtk.DrawingArea, cr *cairo.Context) {
+		if cp.previewRGBA == nil {
+			return
+		}
+		aW := float64(da.GetAllocatedWidth())
+		pW := float64(cp.previewRGBA.Bounds().Dx())
+		pH := float64(cp.previewRGBA.Bounds().Dy())
+		if pW <= 0 || pH <= 0 || aW <= 0 {
+			return
+		}
+		scale := aW / pW
+
+		// Build cairo surface from RGBA data
+		iw, ih := cp.previewRGBA.Bounds().Dx(), cp.previewRGBA.Bounds().Dy()
+		cStride := cairo.FormatStrideForWidth(cairo.FORMAT_ARGB32, iw)
+		data := make([]byte, cStride*ih)
+		for y := 0; y < ih; y++ {
+			for x := 0; x < iw; x++ {
+				si := y*cp.previewRGBA.Stride + x*4
+				di := y*cStride + x*4
+				data[di+0] = cp.previewRGBA.Pix[si+2] // B
+				data[di+1] = cp.previewRGBA.Pix[si+1] // G
+				data[di+2] = cp.previewRGBA.Pix[si+0] // R
+				data[di+3] = cp.previewRGBA.Pix[si+3] // A
+			}
+		}
+		surface, err := cairo.CreateImageSurfaceForData(data, cairo.FORMAT_ARGB32, iw, ih, cStride)
+		if err != nil {
+			return
+		}
+
+		cr.Scale(scale, scale)
+		cr.SetSourceSurface(surface, 0, 0)
+		cr.Paint()
+	})
+	formBox.PackStart(cp.previewArea, true, true, 0)
+
 	cp.editFrame, _ = gtk.FrameNew("Component")
 	cp.editFrame.Add(formBox)
 
@@ -480,8 +541,59 @@ func (cp *ComponentsPanel) showEditDialog(index int) {
 	subtitle := fmt.Sprintf("%s - %s", comp.Package, comp.PartNumber)
 	cp.editFrame.SetLabel(fmt.Sprintf("%s (%s)", comp.ID, subtitle))
 
+	// Update component image preview
+	cp.updatePreviewImage()
+
 	// Highlight and scroll to component
 	cp.highlightComponent(index, true)
+}
+
+// updatePreviewImage crops, rotates, and displays the component image in the preview area.
+func (cp *ComponentsPanel) updatePreviewImage() {
+	if cp.editingComp == nil {
+		cp.previewRGBA = nil
+		cp.previewArea.QueueDraw()
+		return
+	}
+
+	img := cp.getComponentImage()
+	if img == nil {
+		cp.previewRGBA = nil
+		cp.previewArea.QueueDraw()
+		return
+	}
+
+	bounds := cp.editingComp.Bounds
+	x, y := int(bounds.X), int(bounds.Y)
+	w, h := int(bounds.Width), int(bounds.Height)
+
+	imgBounds := img.Bounds()
+	if x < imgBounds.Min.X {
+		x = imgBounds.Min.X
+	}
+	if y < imgBounds.Min.Y {
+		y = imgBounds.Min.Y
+	}
+	w = min(w, imgBounds.Max.X-x)
+	h = min(h, imgBounds.Max.Y-y)
+	if w <= 0 || h <= 0 {
+		cp.previewRGBA = nil
+		cp.previewArea.QueueDraw()
+		return
+	}
+
+	// Crop the component region
+	cropped := image.NewRGBA(image.Rect(0, 0, w, h))
+	for dy := 0; dy < h; dy++ {
+		for dx := 0; dx < w; dx++ {
+			cropped.Set(dx, dy, img.At(x+dx, y+dy))
+		}
+	}
+
+	// Rotate according to the selected OCR orientation
+	orientation := cp.getSelectedOrientation()
+	cp.previewRGBA = rotateForOCR(cropped, orientation)
+	cp.previewArea.QueueDraw()
 }
 
 // saveEditingComponent saves changes from the inline form to the editing component.
@@ -519,24 +631,12 @@ func (cp *ComponentsPanel) saveEditingComponent() {
 		if core := component.ExtractLogicPart(corrected); core != "" {
 			// Identify manufacturer from prefix
 			if mfrText == "" {
-				prefixToMfr := map[string]string{
-					"SN": "Texas Instruments", "TL": "Texas Instruments", "UC": "Texas Instruments",
-					"DM": "National Semiconductor", "LM": "National Semiconductor", "DS": "National Semiconductor",
-					"MC": "Motorola", "MJ": "Motorola",
-					"UA": "Fairchild", "9N": "Fairchild",
-					"AM": "AMD",
-					"CD": "RCA", "CA": "RCA",
-					"HD": "Hitachi", "HA": "Hitachi",
-					"TC": "Toshiba",
-					"MB": "Fujitsu",
-					"NE": "Signetics",
-				}
 				upper := strings.ToUpper(corrected)
 				// Find where the core part starts in the full string
 				coreIdx := strings.Index(upper, core)
 				if coreIdx > 0 {
 					prefix := upper[:coreIdx]
-					for p, mfr := range prefixToMfr {
+					for p, mfr := range mfrPrefixes {
 						if prefix == p {
 							mfrText = mfr
 							cp.manufacturerEntry.SetText(mfrText)
@@ -2529,24 +2629,12 @@ func parseComponentInfo(text string) componentInfo {
 	// Try 74/54-series match first — these are high-confidence part numbers
 	// Find 74/54 directly, then look backwards for known manufacturer prefix
 	logic74Core := regexp.MustCompile(`(?i)(7[4A]|54)([A-Z0-9]{2,8})\b`)
-	prefixToMfr := map[string]string{
-		"SN": "Texas Instruments", "TL": "Texas Instruments", "UC": "Texas Instruments",
-		"DM": "National Semiconductor", "LM": "National Semiconductor", "DS": "National Semiconductor",
-		"MC": "Motorola", "MJ": "Motorola",
-		"UA": "Fairchild", "9N": "Fairchild",
-		"AM": "AMD",
-		"CD": "RCA", "CA": "RCA",
-		"HD": "Hitachi", "HA": "Hitachi",
-		"TC": "Toshiba",
-		"MB": "Fujitsu",
-		"N": "Signetics", "NE": "Signetics",
-	}
 	if loc := logic74Core.FindStringSubmatchIndex(upperText); loc != nil {
 		rawPart := upperText[loc[2]:loc[5]] // series + body
 		// Look backwards from match for a known manufacturer prefix
 		before := upperText[:loc[0]]
 		prefix := ""
-		for p := range prefixToMfr {
+		for p := range mfrPrefixes {
 			if strings.HasSuffix(before, p) && len(p) > len(prefix) {
 				prefix = p
 			}
@@ -2566,7 +2654,7 @@ func parseComponentInfo(text string) componentInfo {
 			info.PartNumber = corePart
 		}
 		if prefix != "" && info.Manufacturer == "" {
-			if mfr, ok := prefixToMfr[prefix]; ok {
+			if mfr, ok := mfrPrefixes[prefix]; ok {
 				info.Manufacturer = mfr
 			}
 		}

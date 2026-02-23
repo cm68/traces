@@ -1206,12 +1206,33 @@ func boundsOverlap(a, b geometry.RectInt, threshold float64) bool {
 	return intersectArea/minArea >= threshold
 }
 
+// getLogosLibPath returns the path to logos.json in the lib/ directory
+// next to the executable, or empty string if it can't be determined.
+func getLogosLibPath() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(exe), "..", "lib", "logos.json")
+}
+
 // GetPreferencesPath returns the path to the logo library preferences file.
-// Creates the config directory if it doesn't exist.
+// Prefers lib/logos.json next to the executable; falls back to
+// ~/.config/pcb-tracer/logos.json.
 func GetPreferencesPath() (string, error) {
+	if libPath := getLogosLibPath(); libPath != "" {
+		if _, err := os.Stat(libPath); err == nil {
+			return libPath, nil
+		}
+		if dir := filepath.Dir(libPath); dir != "" {
+			if info, err := os.Stat(dir); err == nil && info.IsDir() {
+				return libPath, nil
+			}
+		}
+	}
+
 	configDir, err := os.UserConfigDir()
 	if err != nil {
-		// Fallback to home directory
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("cannot determine config directory: %w", err)
@@ -1250,6 +1271,18 @@ func (lib *LogoLibrary) SaveToPreferences() error {
 // LoadFromPreferences loads the logo library from the preferences file.
 // Returns an empty library if the file doesn't exist.
 func LoadFromPreferences() (*LogoLibrary, error) {
+	// Try lib/ directory first
+	if libPath := getLogosLibPath(); libPath != "" {
+		if data, err := os.ReadFile(libPath); err == nil {
+			var lib LogoLibrary
+			if err := json.Unmarshal(data, &lib); err == nil {
+				lib.Sort()
+				fmt.Printf("Loaded %d logos from %s\n", len(lib.Logos), libPath)
+				return &lib, nil
+			}
+		}
+	}
+
 	path, err := GetPreferencesPath()
 	if err != nil {
 		return NewLogoLibrary(), err
@@ -1258,7 +1291,6 @@ func LoadFromPreferences() (*LogoLibrary, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// No preferences file yet, return empty library
 			return NewLogoLibrary(), nil
 		}
 		return NewLogoLibrary(), fmt.Errorf("cannot read logo library: %w", err)
@@ -1269,7 +1301,6 @@ func LoadFromPreferences() (*LogoLibrary, error) {
 		return NewLogoLibrary(), fmt.Errorf("cannot parse logo library: %w", err)
 	}
 
-	// Sort by name for consistent display
 	lib.Sort()
 
 	fmt.Printf("Loaded %d logos from %s\n", len(lib.Logos), path)

@@ -74,10 +74,17 @@ func NewComponentsPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Wind
 	cp.box.SetMarginTop(4)
 	cp.box.SetMarginBottom(4)
 
-	// OCR All Silkscreen button at top
+	// Button row at top
+	btnRow, _ := gtk.BoxNew(gtk.ORIENTATION_HORIZONTAL, 4)
 	ocrSilkscreenBtn, _ := gtk.ButtonNewWithLabel("OCR All Silkscreen")
 	ocrSilkscreenBtn.Connect("clicked", func() { cp.onOCRSilkscreen() })
-	cp.box.PackStart(ocrSilkscreenBtn, false, false, 0)
+	btnRow.PackStart(ocrSilkscreenBtn, true, true, 0)
+
+	detectBtn, _ := gtk.ButtonNewWithLabel("Detect Components")
+	detectBtn.Connect("clicked", func() { cp.onDetectComponents() })
+	btnRow.PackStart(detectBtn, true, true, 0)
+
+	cp.box.PackStart(btnRow, false, false, 0)
 
 	// Create the list
 	cp.listBox, _ = gtk.ListBoxNew()
@@ -1428,6 +1435,97 @@ func (cp *ComponentsPanel) updateComponentOverlay() {
 	}
 	cp.canvas.SetOverlay("components", overlay)
 	cp.canvas.Refresh()
+}
+
+// onDetectComponents uses existing components as training data to detect new ones.
+func (cp *ComponentsPanel) onDetectComponents() {
+	if len(cp.state.Components) == 0 {
+		fmt.Println("[Detect] No existing components to train from")
+		return
+	}
+	if cp.state.FrontImage == nil || cp.state.FrontImage.Image == nil {
+		fmt.Println("[Detect] No front image loaded")
+		return
+	}
+
+	frontImg := cp.state.FrontImage.Image
+	dpi := cp.state.DPI
+	if dpi <= 0 {
+		dpi = 1200
+	}
+
+	// Build training set from existing components
+	ts := component.NewTrainingSet()
+	for _, comp := range cp.state.Components {
+		sample := component.ExtractSampleFeatures(frontImg, comp.Bounds, dpi)
+		ts.Add(sample)
+	}
+
+	fmt.Printf("[Detect] Built training set from %d existing components\n", len(ts.Samples))
+
+	// Merge into global training set and save
+	if cp.state.GlobalComponentTraining == nil {
+		cp.state.GlobalComponentTraining = component.NewTrainingSet()
+	}
+	for _, s := range ts.Samples {
+		cp.state.GlobalComponentTraining.Add(s)
+	}
+	cp.state.SaveGlobalComponentTraining()
+
+	// Derive detection parameters (uses global training for broader coverage)
+	params := cp.state.GlobalComponentTraining.DeriveParams()
+
+	// Run detection
+	result, err := component.DetectComponents(frontImg, dpi, params)
+	if err != nil {
+		fmt.Printf("[Detect] Detection failed: %v\n", err)
+		return
+	}
+
+	if result == nil || len(result.Components) == 0 {
+		fmt.Println("[Detect] No components detected")
+		return
+	}
+
+	// Filter out detections that overlap existing components
+	var newComps []*component.Component
+	for _, det := range result.Components {
+		centerX := det.Bounds.X + det.Bounds.Width/2
+		centerY := det.Bounds.Y + det.Bounds.Height/2
+
+		overlaps := false
+		for _, existing := range cp.state.Components {
+			if centerX >= existing.Bounds.X && centerX <= existing.Bounds.X+existing.Bounds.Width &&
+				centerY >= existing.Bounds.Y && centerY <= existing.Bounds.Y+existing.Bounds.Height {
+				overlaps = true
+				break
+			}
+		}
+		if !overlaps {
+			newComps = append(newComps, det)
+		}
+	}
+
+	if len(newComps) == 0 {
+		fmt.Printf("[Detect] %d candidates all overlap existing components\n", len(result.Components))
+		return
+	}
+
+	// Assign IDs and add to component list
+	for _, det := range newComps {
+		centerX := det.Bounds.X + det.Bounds.Width/2
+		centerY := det.Bounds.Y + det.Bounds.Height/2
+		det.ID = component.SuggestComponentID(cp.state.Components, centerX, centerY, 100, "U")
+		det.Confirmed = false
+		cp.state.Components = append(cp.state.Components, det)
+	}
+
+	fmt.Printf("Detected %d new components from %d training samples\n", len(newComps), len(ts.Samples))
+
+	cp.rebuildSortedIndices()
+	cp.refreshList()
+	cp.updateComponentOverlay()
+	cp.state.SetModified(true)
 }
 
 // onOCRSilkscreen runs OCR on the silkscreen to find component labels.

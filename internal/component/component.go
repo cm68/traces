@@ -2,8 +2,11 @@
 package component
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -1259,4 +1262,101 @@ func average(values []float64) float64 {
 		sum += v
 	}
 	return sum / float64(len(values))
+}
+
+// getTrainingLibPath returns the path to component_training.json in the lib/ directory
+// next to the executable, or empty string if it can't be determined.
+func getTrainingLibPath() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(exe), "..", "lib", "component_training.json")
+}
+
+// GetTrainingPath returns the path to the global component training file.
+// Prefers lib/component_training.json next to the executable; falls back to
+// ~/.config/pcb-tracer/component_training.json.
+func GetTrainingPath() (string, error) {
+	if libPath := getTrainingLibPath(); libPath != "" {
+		if _, err := os.Stat(libPath); err == nil {
+			return libPath, nil
+		}
+		if dir := filepath.Dir(libPath); dir != "" {
+			if info, err := os.Stat(dir); err == nil && info.IsDir() {
+				return libPath, nil
+			}
+		}
+	}
+
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("cannot determine config directory: %w", err)
+		}
+		configDir = filepath.Join(home, ".config")
+	}
+
+	appDir := filepath.Join(configDir, "pcb-tracer")
+	if err := os.MkdirAll(appDir, 0755); err != nil {
+		return "", fmt.Errorf("cannot create config directory: %w", err)
+	}
+
+	return filepath.Join(appDir, "component_training.json"), nil
+}
+
+// SaveGlobalTraining saves the global component training set to disk.
+func SaveGlobalTraining(ts *TrainingSet) error {
+	path, err := GetTrainingPath()
+	if err != nil {
+		return err
+	}
+
+	data, err := json.MarshalIndent(ts, "", "  ")
+	if err != nil {
+		return fmt.Errorf("cannot serialize component training: %w", err)
+	}
+
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("cannot write component training: %w", err)
+	}
+
+	fmt.Printf("Saved %d component training samples to %s\n", len(ts.Samples), path)
+	return nil
+}
+
+// LoadGlobalTraining loads the global component training set from disk.
+// Returns an empty training set if no file exists.
+func LoadGlobalTraining() (*TrainingSet, error) {
+	if libPath := getTrainingLibPath(); libPath != "" {
+		if data, err := os.ReadFile(libPath); err == nil {
+			var ts TrainingSet
+			if err := json.Unmarshal(data, &ts); err == nil {
+				fmt.Printf("Loaded %d component training samples from %s\n", len(ts.Samples), libPath)
+				return &ts, nil
+			}
+		}
+	}
+
+	path, err := GetTrainingPath()
+	if err != nil {
+		return NewTrainingSet(), err
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return NewTrainingSet(), nil
+		}
+		return NewTrainingSet(), fmt.Errorf("cannot read component training: %w", err)
+	}
+
+	var ts TrainingSet
+	if err := json.Unmarshal(data, &ts); err != nil {
+		return NewTrainingSet(), fmt.Errorf("cannot parse component training: %w", err)
+	}
+
+	fmt.Printf("Loaded %d component training samples from %s\n", len(ts.Samples), path)
+	return &ts, nil
 }

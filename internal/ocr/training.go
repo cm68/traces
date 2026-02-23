@@ -1026,8 +1026,31 @@ func (db *GlobalTrainingDB) Summary() string {
 // Persistence
 // =============================================================================
 
+// getOCRTrainingLibPath returns the path to ocr_training.json in the lib/ directory
+// next to the executable, or empty string if it can't be determined.
+func getOCRTrainingLibPath() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(exe), "..", "lib", "ocr_training.json")
+}
+
 // GetTrainingDBPath returns the path to the global training database file.
+// Prefers lib/ocr_training.json next to the executable; falls back to
+// ~/.config/pcb-tracer/ocr_training.json.
 func GetTrainingDBPath() (string, error) {
+	if libPath := getOCRTrainingLibPath(); libPath != "" {
+		if _, err := os.Stat(libPath); err == nil {
+			return libPath, nil
+		}
+		if dir := filepath.Dir(libPath); dir != "" {
+			if info, err := os.Stat(dir); err == nil && info.IsDir() {
+				return libPath, nil
+			}
+		}
+	}
+
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
@@ -1064,6 +1087,26 @@ func SaveGlobalTraining(db *GlobalTrainingDB) error {
 // LoadGlobalTraining loads the training database from disk.
 // Returns an empty database if the file doesn't exist.
 func LoadGlobalTraining() (*GlobalTrainingDB, error) {
+	// Try lib/ directory first
+	if libPath := getOCRTrainingLibPath(); libPath != "" {
+		if data, err := os.ReadFile(libPath); err == nil {
+			var db GlobalTrainingDB
+			if err := json.Unmarshal(data, &db); err == nil {
+				if db.OrientationStats == nil {
+					db.OrientationStats = make(map[string]*OrientationStats)
+				}
+				if db.ParamStats == nil {
+					db.ParamStats = &ParamStatistics{PSMModeStats: make(map[int]float64)}
+				}
+				if db.ParamStats.PSMModeStats == nil {
+					db.ParamStats.PSMModeStats = make(map[int]float64)
+				}
+				fmt.Printf("Loaded OCR training database: %d samples from %s\n", len(db.Samples), libPath)
+				return &db, nil
+			}
+		}
+	}
+
 	path, err := GetTrainingDBPath()
 	if err != nil {
 		return NewGlobalTrainingDB(), err

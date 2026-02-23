@@ -109,6 +109,9 @@ type State struct {
 	// Via training set for machine learning
 	ViaTrainingSet *via.TrainingSet
 
+	// Global component detection training (shared across all projects)
+	GlobalComponentTraining *component.TrainingSet
+
 	// Global OCR training database (shared across all projects)
 	GlobalOCRTraining *ocr.GlobalTrainingDB
 
@@ -203,15 +206,26 @@ func NewState() *State {
 	}
 	fmt.Printf("Component library: %d parts loaded\n", len(compLib.Parts))
 
+	// Load global component detection training
+	globalCompTraining, err := component.LoadGlobalTraining()
+	if err != nil {
+		fmt.Printf("Warning: could not load global component training: %v\n", err)
+		globalCompTraining = component.NewTrainingSet()
+	}
+	if len(globalCompTraining.Samples) > 0 {
+		fmt.Printf("Global component training: %d samples loaded\n", len(globalCompTraining.Samples))
+	}
+
 	return &State{
-		BoardSpec:         board.S100Spec(),
-		FeaturesLayer:     features.NewDetectedFeaturesLayer(),
-		ViaTrainingSet:    via.NewTrainingSet(),
-		GlobalOCRTraining: globalOCR,
-		LogoLibrary:       logoLib,
-		ComponentLibrary:  compLib,
-		BoardDefinition:   connector.S100Definition(),
-		listeners:         make(map[EventType][]EventListener),
+		BoardSpec:              board.S100Spec(),
+		FeaturesLayer:          features.NewDetectedFeaturesLayer(),
+		ViaTrainingSet:         via.NewTrainingSet(),
+		GlobalOCRTraining:      globalOCR,
+		GlobalComponentTraining: globalCompTraining,
+		LogoLibrary:            logoLib,
+		ComponentLibrary:       compLib,
+		BoardDefinition:        connector.S100Definition(),
+		listeners:              make(map[EventType][]EventListener),
 	}
 }
 
@@ -263,6 +277,18 @@ func (s *State) AddOCRTrainingSample(groundTruth, detected string, score float64
 
 	// Auto-save after adding
 	s.SaveGlobalOCRTraining()
+}
+
+// SaveGlobalComponentTraining saves the global component detection training set.
+func (s *State) SaveGlobalComponentTraining() error {
+	s.mu.RLock()
+	ts := s.GlobalComponentTraining
+	s.mu.RUnlock()
+
+	if ts == nil {
+		return nil
+	}
+	return component.SaveGlobalTraining(ts)
 }
 
 // GetRecommendedOCRParams returns OCR params based on global training data.

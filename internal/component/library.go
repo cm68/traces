@@ -139,6 +139,44 @@ func (lib *ComponentLibrary) GetByAlias(partNumber, pkg string) *PartDefinition 
 	return nil
 }
 
+// FindByPartNumber looks up a part definition by part number alone (ignoring package).
+// Tries exact match, then alias match, then normalized match.
+func (lib *ComponentLibrary) FindByPartNumber(partNumber string) *PartDefinition {
+	if lib == nil {
+		return nil
+	}
+	pn := strings.ToUpper(strings.TrimSpace(partNumber))
+	if pn == "" {
+		return nil
+	}
+
+	// Exact part number match
+	for _, p := range lib.Parts {
+		if strings.EqualFold(p.PartNumber, pn) {
+			return p
+		}
+	}
+
+	// Alias match
+	for _, p := range lib.Parts {
+		for _, alias := range p.Aliases {
+			if strings.EqualFold(alias, pn) {
+				return p
+			}
+		}
+	}
+
+	// Normalized match
+	canon := normalizePartNumber(pn)
+	for _, p := range lib.Parts {
+		if normalizePartNumber(strings.ToUpper(p.PartNumber)) == canon {
+			return p
+		}
+	}
+
+	return nil
+}
+
 // trailingSuffixRe strips trailing package/speed suffixes like N, P, D, -02, B-02.
 var trailingSuffixRe = regexp.MustCompile(`[A-Z]?(?:-\d+)?$`)
 

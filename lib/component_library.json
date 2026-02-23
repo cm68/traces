@@ -1728,10 +1728,6 @@
           "name": "VDD",
           "direction": "Power"
         }
-      ],
-      "aliases": [
-        "FD1793B-02",
-        "WD1793"
       ]
     },
     {

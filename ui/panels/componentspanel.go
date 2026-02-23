@@ -511,13 +511,56 @@ func (cp *ComponentsPanel) saveEditingComponent() {
 		fmt.Printf("Auto-renamed %d components from grid mapping\n", renamed)
 	}
 
+	// Clean up 74/54-series part numbers: strip manufacturer prefix and package suffix,
+	// apply OCR correction, and auto-detect manufacturer.
+	// e.g., "SN74LS08N" -> part "74LS08", manufacturer "Texas Instruments"
+	if partText != "" {
+		corrected, _ := component.CorrectOCRPartNumber(partText)
+		if core := component.ExtractLogicPart(corrected); core != "" {
+			// Identify manufacturer from prefix
+			if mfrText == "" {
+				prefixToMfr := map[string]string{
+					"SN": "Texas Instruments", "TL": "Texas Instruments", "UC": "Texas Instruments",
+					"DM": "National Semiconductor", "LM": "National Semiconductor", "DS": "National Semiconductor",
+					"MC": "Motorola", "MJ": "Motorola",
+					"UA": "Fairchild", "9N": "Fairchild",
+					"AM": "AMD",
+					"CD": "RCA", "CA": "RCA",
+					"HD": "Hitachi", "HA": "Hitachi",
+					"TC": "Toshiba",
+					"MB": "Fujitsu",
+					"NE": "Signetics",
+				}
+				upper := strings.ToUpper(corrected)
+				// Find where the core part starts in the full string
+				coreIdx := strings.Index(upper, core)
+				if coreIdx > 0 {
+					prefix := upper[:coreIdx]
+					for p, mfr := range prefixToMfr {
+						if prefix == p {
+							mfrText = mfr
+							cp.manufacturerEntry.SetText(mfrText)
+							fmt.Printf("[Save] Manufacturer from prefix %s: %s\n", p, mfr)
+							break
+						}
+					}
+				}
+			}
+			if core != partText {
+				partText = core
+				cp.partNumberEntry.SetText(partText)
+				fmt.Printf("[Save] Part number cleaned: %s\n", partText)
+			}
+		}
+	}
+
 	cp.editingComp.PartNumber = partText
 	// Auto-fill package from parts library if not already set
 	if partText != "" && pkgText == "" {
-		if pkgInfo := component.LookupPartPackage(partText); pkgInfo != nil {
-			pkgText = pkgInfo.Package
+		if libPart := cp.state.ComponentLibrary.FindByPartNumber(partText); libPart != nil {
+			pkgText = libPart.Package
 			cp.packageEntry.SetText(pkgText)
-			fmt.Printf("[Save] Package lookup: %s -> %s (%d pins)\n", partText, pkgInfo.Package, pkgInfo.PinCount)
+			fmt.Printf("[Save] Library lookup: %s -> %s (%d pins)\n", partText, libPart.Package, libPart.PinCount)
 		}
 	}
 	cp.editingComp.Package = pkgText
@@ -816,17 +859,17 @@ func (cp *ComponentsPanel) runOCR() {
 		cp.placeEntry.SetText(info.Place)
 	}
 
-	// Auto-fill package from part database
+	// Auto-fill package from component library or part database
 	partNum, _ := cp.partNumberEntry.GetText()
 	if partNum == "" {
 		partNum = info.PartNumber
 	}
 	pkgText, _ := cp.packageEntry.GetText()
 	if partNum != "" && pkgText == "" {
-		if pkgInfo := component.LookupPartPackage(partNum); pkgInfo != nil {
-			cp.packageEntry.SetText(pkgInfo.Package)
-			cp.editingComp.Package = pkgInfo.Package
-			fmt.Printf("[OCR] Package lookup: %s -> %s (%d pins)\n", partNum, pkgInfo.Package, pkgInfo.PinCount)
+		if libPart := cp.state.ComponentLibrary.FindByPartNumber(partNum); libPart != nil {
+			cp.packageEntry.SetText(libPart.Package)
+			cp.editingComp.Package = libPart.Package
+			fmt.Printf("[OCR] Library lookup: %s -> %s (%d pins)\n", partNum, libPart.Package, libPart.PinCount)
 		}
 	}
 

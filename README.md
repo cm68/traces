@@ -2,6 +2,8 @@
 
 A PCB reverse engineering tool written in Go with a GTK3 GUI. Designed for tracing vintage computer boards — S-100, ISA, Multibus, ECB/Eurocard, and STD Bus systems.
 
+![Screenshot](Screenshot.png)
+
 The current status is that it is becoming a useful tool to analyze a board, but there is still a tremendous amount of automation that is possible.
 
 ## Todos: 

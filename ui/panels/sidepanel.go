@@ -272,6 +272,8 @@ func (sp *SidePanel) OnKeyPressed(ev *gdk.EventKey) bool {
 		return sp.tracesPanel.OnKeyPressed(ev)
 	case PanelLogos:
 		return sp.logosPanel.OnKeyPressed(ev)
+	case PanelComponents:
+		return sp.componentsPanel.OnKeyPressed(ev)
 	}
 	return false
 }

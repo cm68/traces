@@ -617,18 +617,18 @@ func refineClusterBounds(hsvBytes []byte, imgW, imgH, channels, x1, y1, x2, y2 i
 	// (achromatic — low saturation). Scan rows from top, trim until we hit a row
 	// with enough achromatic pixels.
 
-	// A pixel is "black or dark gray" (IC body) if it's dark AND achromatic:
-	// low saturation = no color, low value = dark. Excludes white silkscreen
-	// (which is achromatic but bright) and dark green board (which is dark but saturated).
-	isDarkAchromatic := func(offset int) bool {
-		s := hsvBytes[offset+1]
+	// A pixel is IC body if it's dark (low V) and not green board.
+	// IC body = black/dark gray plastic, V typically 20-100.
+	// Green board also has low V but has green hue (H=35-85).
+	isChipPixel := func(offset int) bool {
+		h := hsvBytes[offset]
 		v := hsvBytes[offset+2]
-		return s < 50 && v < 220
+		return v < 120 && (h < 35 || h > 85)
 	}
 
 	// Trim top and bottom: trim while row is green board, stop when it's not.
 	// Stops at both black IC body AND white silkscreen (neither is green).
-	_ = isDarkAchromatic // keep for future use
+	_ = isChipPixel // used by left/right trim
 	const boardRowThreshold = 0.50
 
 	// Scan from top
@@ -661,6 +661,54 @@ func refineClusterBounds(hsvBytes []byte, imgW, imgH, channels, x1, y1, x2, y2 i
 		} else {
 			break
 		}
+	}
+
+	// Pass 1: compute chip% for every column to find the peak (IC body level)
+	numCols := x2 - x1
+	colChipPct := make([]float64, numCols)
+	colHeight := y2 - y1
+	if colHeight > 0 {
+		for cx := 0; cx < numCols; cx++ {
+			x := x1 + cx
+			bodyPx := 0
+			for y := y1; y < y2; y++ {
+				if isChipPixel((y*imgW + x) * channels) {
+					bodyPx++
+				}
+			}
+			colChipPct[cx] = float64(bodyPx) / float64(colHeight)
+		}
+	}
+
+	// Find peak chip% (the IC body level)
+	peakChip := 0.0
+	for _, pct := range colChipPct {
+		if pct > peakChip {
+			peakChip = pct
+		}
+	}
+
+	// Dynamic threshold: 80% of peak
+	bodyColThreshold := peakChip * 0.80
+	if bodyColThreshold < 0.20 {
+		bodyColThreshold = 0.20 // floor to avoid trimming everything
+	}
+	fmt.Printf("    chip peak=%.0f%% threshold=%.0f%%\n", peakChip*100, bodyColThreshold*100)
+
+	// Scan from left: trim until column hits the dynamic threshold
+	for cx := 0; cx < numCols; cx++ {
+		if colChipPct[cx] >= bodyColThreshold {
+			break
+		}
+		x1++
+	}
+
+	// Scan from right
+	for cx := numCols - 1; cx >= 0; cx-- {
+		if colChipPct[cx] >= bodyColThreshold {
+			break
+		}
+		x2--
 	}
 
 	// Trim from bottom — old green-based (disabled)

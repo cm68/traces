@@ -845,11 +845,13 @@ func (tp *TracesPanel) onClearVias() {
 	tp.state.Emit(app.EventFeaturesChanged, nil)
 }
 
-// loadTrainingSet loads the training set from the default location.
+// loadTrainingSet loads the training set from the global lib/ location.
 func (tp *TracesPanel) loadTrainingSet() {
-	trainingPath := "via_training.json"
-	if tp.state.ProjectPath != "" {
-		trainingPath = filepath.Join(filepath.Dir(tp.state.ProjectPath), "via_training.json")
+	trainingPath, err := via.GetTrainingPath()
+	if err != nil {
+		fmt.Printf("Warning: failed to get via training path: %v\n", err)
+		tp.state.ViaTrainingSet = via.NewTrainingSet()
+		return
 	}
 	ts, err := via.LoadTrainingSet(trainingPath)
 	if err != nil {

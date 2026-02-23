@@ -41,6 +41,75 @@ func NewTrainingSet() *TrainingSet {
 	}
 }
 
+// getViaTrainingLibPath returns the path to via_training.json in the lib/ directory
+// next to the executable, or empty string if it can't be determined.
+func getViaTrainingLibPath() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(exe), "..", "lib", "via_training.json")
+}
+
+// GetTrainingPath returns the path to the global via training file.
+// Prefers lib/via_training.json next to the executable; falls back to
+// ~/.config/pcb-tracer/via_training.json.
+func GetTrainingPath() (string, error) {
+	if libPath := getViaTrainingLibPath(); libPath != "" {
+		if _, err := os.Stat(libPath); err == nil {
+			return libPath, nil
+		}
+		if dir := filepath.Dir(libPath); dir != "" {
+			if info, err := os.Stat(dir); err == nil && info.IsDir() {
+				return libPath, nil
+			}
+		}
+	}
+
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("cannot determine config directory: %w", err)
+		}
+		configDir = filepath.Join(home, ".config")
+	}
+
+	appDir := filepath.Join(configDir, "pcb-tracer")
+	if err := os.MkdirAll(appDir, 0755); err != nil {
+		return "", fmt.Errorf("cannot create config directory: %w", err)
+	}
+
+	return filepath.Join(appDir, "via_training.json"), nil
+}
+
+// LoadGlobalTraining loads the global via training set from the preferred location.
+// Returns an empty training set if no file exists.
+func LoadGlobalTraining() (*TrainingSet, error) {
+	// Try lib/ path first
+	if libPath := getViaTrainingLibPath(); libPath != "" {
+		if ts, err := LoadTrainingSet(libPath); err == nil && len(ts.Samples) > 0 {
+			fmt.Printf("Loaded %d via training samples from %s\n", len(ts.Samples), libPath)
+			return ts, nil
+		}
+	}
+
+	path, err := GetTrainingPath()
+	if err != nil {
+		return NewTrainingSet(), err
+	}
+
+	ts, err := LoadTrainingSet(path)
+	if err != nil {
+		return NewTrainingSet(), err
+	}
+
+	if len(ts.Samples) > 0 {
+		fmt.Printf("Loaded %d via training samples from %s\n", len(ts.Samples), path)
+	}
+	return ts, nil
+}
+
 // LoadTrainingSet loads a training set from a JSON file.
 func LoadTrainingSet(path string) (*TrainingSet, error) {
 	ts := NewTrainingSet()

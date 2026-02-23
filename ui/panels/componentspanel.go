@@ -141,7 +141,7 @@ func NewComponentsPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Wind
 	// Handle key presses on the list for component adjustment
 	cp.box.Connect("key-press-event", func(_ *gtk.Box, ev *gdk.Event) bool {
 		keyEvent := gdk.EventKeyNewFromEvent(ev)
-		return cp.onKeyPressed(keyEvent)
+		return cp.OnKeyPressed(keyEvent)
 	})
 
 	return cp
@@ -1113,8 +1113,8 @@ func (cp *ComponentsPanel) highlightComponent(index int, scrollToView bool) {
 	}
 }
 
-// onKeyPressed handles keyboard input for component adjustment.
-func (cp *ComponentsPanel) onKeyPressed(ev *gdk.EventKey) bool {
+// OnKeyPressed handles keyboard input for component adjustment.
+func (cp *ComponentsPanel) OnKeyPressed(ev *gdk.EventKey) bool {
 	if cp.editingIndex < 0 || cp.editingIndex >= len(cp.state.Components) {
 		return false
 	}
@@ -1129,6 +1129,14 @@ func (cp *ComponentsPanel) onKeyPressed(ev *gdk.EventKey) bool {
 	keyval := ev.KeyVal()
 
 	switch keyval {
+	case gdk.KEY_Up, gdk.KEY_KP_Up:
+		comp.Bounds.Y -= step
+	case gdk.KEY_Down, gdk.KEY_KP_Down:
+		comp.Bounds.Y += step
+	case gdk.KEY_Left, gdk.KEY_KP_Left:
+		comp.Bounds.X -= step
+	case gdk.KEY_Right, gdk.KEY_KP_Right:
+		comp.Bounds.X += step
 	case gdk.KEY_plus, gdk.KEY_equal, gdk.KEY_KP_Add:
 		comp.Bounds.Height += step
 	case gdk.KEY_minus, gdk.KEY_KP_Subtract:
@@ -1154,11 +1162,23 @@ func (cp *ComponentsPanel) onKeyPressed(ev *gdk.EventKey) bool {
 	return true
 }
 
+// frontLayerOffset returns the manual offset of the front layer, matching
+// the offset applied by the overlay renderer for LayerFront overlays.
+func (cp *ComponentsPanel) frontLayerOffset() (float64, float64) {
+	for _, layer := range cp.canvas.GetLayers() {
+		if layer != nil && layer.Side == pcbimage.SideFront && !layer.IsNormalized {
+			return float64(layer.ManualOffsetX), float64(layer.ManualOffsetY)
+		}
+	}
+	return 0, 0
+}
+
 // onRightClickDeleteComponent handles right-click to delete components on the canvas.
 func (cp *ComponentsPanel) onRightClickDeleteComponent(x, y float64) {
+	offX, offY := cp.frontLayerOffset()
 	for i, comp := range cp.state.Components {
-		if x >= comp.Bounds.X && x <= comp.Bounds.X+comp.Bounds.Width &&
-			y >= comp.Bounds.Y && y <= comp.Bounds.Y+comp.Bounds.Height {
+		if x >= comp.Bounds.X+offX && x <= comp.Bounds.X+offX+comp.Bounds.Width &&
+			y >= comp.Bounds.Y+offY && y <= comp.Bounds.Y+offY+comp.Bounds.Height {
 			cp.deleteComponent(i)
 			return
 		}
@@ -1169,11 +1189,15 @@ func (cp *ComponentsPanel) onRightClickDeleteComponent(x, y float64) {
 func (cp *ComponentsPanel) OnLeftClick(x, y float64) {
 	const edgeThreshold = 10.0
 
+	// Click coords are in image space (includes layer offset).
+	// Component bounds are in raw space. Offset-adjust for hit-testing.
+	offX, offY := cp.frontLayerOffset()
+
 	for i, comp := range cp.state.Components {
-		left := comp.Bounds.X
-		right := comp.Bounds.X + comp.Bounds.Width
-		top := comp.Bounds.Y
-		bottom := comp.Bounds.Y + comp.Bounds.Height
+		left := comp.Bounds.X + offX
+		right := comp.Bounds.X + offX + comp.Bounds.Width
+		top := comp.Bounds.Y + offY
+		bottom := comp.Bounds.Y + offY + comp.Bounds.Height
 
 		// Check if click is inside (with edge threshold margin)
 		if y < top-edgeThreshold || y > bottom+edgeThreshold {
@@ -1203,21 +1227,23 @@ func (cp *ComponentsPanel) OnLeftClick(x, y float64) {
 			edge = "bottom"
 		}
 
-		// Near an edge — resize
+		// Near an edge — resize (store back in raw coords)
 		if minEdgeDist <= edgeThreshold {
+			rawX := x - offX
+			rawY := y - offY
 			switch edge {
 			case "left":
-				delta := x - left
-				cp.state.Components[i].Bounds.X = x
+				delta := rawX - comp.Bounds.X
+				cp.state.Components[i].Bounds.X = rawX
 				cp.state.Components[i].Bounds.Width -= delta
 			case "right":
-				cp.state.Components[i].Bounds.Width = x - left
+				cp.state.Components[i].Bounds.Width = rawX - comp.Bounds.X
 			case "top":
-				delta := y - top
-				cp.state.Components[i].Bounds.Y = y
+				delta := rawY - comp.Bounds.Y
+				cp.state.Components[i].Bounds.Y = rawY
 				cp.state.Components[i].Bounds.Height -= delta
 			case "bottom":
-				cp.state.Components[i].Bounds.Height = y - top
+				cp.state.Components[i].Bounds.Height = rawY - comp.Bounds.Y
 			}
 			cp.state.SetModified(true)
 			cp.updateComponentOverlay()
@@ -1231,6 +1257,78 @@ func (cp *ComponentsPanel) OnLeftClick(x, y float64) {
 		cp.selectComponentByIndex(i)
 		return
 	}
+
+	// Click didn't hit any component — create a new one at click point
+	// Convert click to raw coords for storage
+	rawX := x - offX
+	rawY := y - offY
+
+	dpi := cp.state.DPI
+	if dpi <= 0 {
+		dpi = 1200
+	}
+
+	// Compute average width/height from training data or existing components
+	var avgW, avgH float64
+	if cp.state.GlobalComponentTraining != nil && len(cp.state.GlobalComponentTraining.Samples) > 0 {
+		for _, s := range cp.state.GlobalComponentTraining.Samples {
+			avgW += s.WidthMM
+			avgH += s.HeightMM
+		}
+		n := float64(len(cp.state.GlobalComponentTraining.Samples))
+		avgW = (avgW / n) * dpi / 25.4
+		avgH = (avgH / n) * dpi / 25.4
+	} else if len(cp.state.Components) > 0 {
+		for _, c := range cp.state.Components {
+			avgW += c.Bounds.Width
+			avgH += c.Bounds.Height
+		}
+		n := float64(len(cp.state.Components))
+		avgW /= n
+		avgH /= n
+	} else {
+		// Fallback: ~10mm x 5mm
+		avgW = dpi * 10.0 / 25.4
+		avgH = dpi * 5.0 / 25.4
+	}
+
+	newX := rawX - avgW/2
+	newY := rawY - avgH/2
+	compID := component.SuggestComponentID(cp.state.Components, rawX, rawY, 100, "U")
+
+	newComp := &component.Component{
+		ID: compID,
+		Bounds: geometry.Rect{
+			X:      newX,
+			Y:      newY,
+			Width:  avgW,
+			Height: avgH,
+		},
+		Confirmed: true,
+	}
+
+	cp.state.Components = append(cp.state.Components, newComp)
+	cp.state.SetModified(true)
+	cp.rebuildSortedIndices()
+	cp.refreshList()
+
+	fmt.Printf("Created component %s at (%.0f,%.0f) size %.0fx%.0f\n",
+		compID, newX, newY, avgW, avgH)
+
+	// Select the new component for editing
+	newCompIdx := len(cp.state.Components) - 1
+	for sortedPos, compIdx := range cp.sortedIndices {
+		if compIdx == newCompIdx {
+			row := cp.listBox.GetRowAtIndex(sortedPos)
+			if row != nil {
+				cp.listBox.SelectRow(row)
+			}
+			cp.showEditDialog(newCompIdx)
+			break
+		}
+	}
+
+	cp.updateComponentOverlay()
 }
 
 // selectComponentByIndex selects a component in both the edit form and the list.
@@ -1733,20 +1831,38 @@ func (cp *ComponentsPanel) onDetectComponents() {
 		fmt.Printf("[Detect] Visualizing %d regions\n", len(result.Regions))
 	}
 
-	return
+	// Build component bounds from refined bounds or raw grid regions
+	var detectedBounds []geometry.Rect
+	if len(result.RefinedBounds) > 0 {
+		for _, rb := range result.RefinedBounds {
+			detectedBounds = append(detectedBounds, geometry.Rect{
+				X:      float64(rb.Min.X),
+				Y:      float64(rb.Min.Y),
+				Width:  float64(rb.Max.X - rb.Min.X),
+				Height: float64(rb.Max.Y - rb.Min.Y),
+			})
+		}
+	} else {
+		for _, r := range result.Regions {
+			detectedBounds = append(detectedBounds, geometry.Rect{
+				X:      float64(result.ScanX + r.Min.X*result.CellSizePx),
+				Y:      float64(result.ScanY + r.Min.Y*result.CellSizePx),
+				Width:  float64((r.Max.X - r.Min.X) * result.CellSizePx),
+				Height: float64((r.Max.Y - r.Min.Y) * result.CellSizePx),
+			})
+		}
+	}
 
-	// --- Remaining pipeline (disabled for iterative debugging) ---
-
-	if len(result.Components) == 0 {
+	if len(detectedBounds) == 0 {
 		fmt.Println("[Detect] No components detected")
 		return
 	}
 
 	// Filter out detections that overlap existing components
-	var newComps []*component.Component
-	for _, det := range result.Components {
-		centerX := det.Bounds.X + det.Bounds.Width/2
-		centerY := det.Bounds.Y + det.Bounds.Height/2
+	var newBounds []geometry.Rect
+	for _, db := range detectedBounds {
+		centerX := db.X + db.Width/2
+		centerY := db.Y + db.Height/2
 
 		overlaps := false
 		for _, existing := range cp.state.Components {
@@ -1757,25 +1873,27 @@ func (cp *ComponentsPanel) onDetectComponents() {
 			}
 		}
 		if !overlaps {
-			newComps = append(newComps, det)
+			newBounds = append(newBounds, db)
 		}
 	}
 
-	if len(newComps) == 0 {
-		fmt.Printf("[Detect] %d candidates all overlap existing components\n", len(result.Components))
+	if len(newBounds) == 0 {
+		fmt.Printf("[Detect] %d candidates all overlap existing components\n", len(detectedBounds))
 		return
 	}
 
-	// Assign IDs and add to component list
-	for _, det := range newComps {
-		centerX := det.Bounds.X + det.Bounds.Width/2
-		centerY := det.Bounds.Y + det.Bounds.Height/2
-		det.ID = component.SuggestComponentID(cp.state.Components, centerX, centerY, 100, "U")
-		det.Confirmed = false
-		cp.state.Components = append(cp.state.Components, det)
+	// Create components from detected bounds
+	for _, db := range newBounds {
+		centerX := db.X + db.Width/2
+		centerY := db.Y + db.Height/2
+		compID := component.SuggestComponentID(cp.state.Components, centerX, centerY, 100, "U")
+		cp.state.Components = append(cp.state.Components, &component.Component{
+			ID:     compID,
+			Bounds: db,
+		})
 	}
 
-	fmt.Printf("Detected %d new components from %d training samples\n", len(newComps), len(cp.state.GlobalComponentTraining.Samples))
+	fmt.Printf("Detected %d new components from %d training samples\n", len(newBounds), len(cp.state.GlobalComponentTraining.Samples))
 
 	cp.rebuildSortedIndices()
 	cp.refreshList()

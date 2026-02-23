@@ -166,7 +166,8 @@ func (l *List) Filter(layer image.Side) []*Component {
 
 // TrainingSample represents a user-selected region for training the detector.
 type TrainingSample struct {
-	Bounds geometry.Rect `json:"bounds"` // Bounding box in image coordinates
+	Bounds    geometry.Rect `json:"bounds"`              // Bounding box in image coordinates
+	Reference string        `json:"reference,omitempty"` // Source component ID (e.g. "U3")
 
 	// Extracted features (populated when sample is added)
 	MeanHue    float64 `json:"mean_hue"`    // Average hue (0-180)
@@ -185,13 +186,14 @@ type TrainingSample struct {
 
 // SizeTemplate represents an expected component size derived from training data.
 type SizeTemplate struct {
-	WidthMM     float64 // Mean width in mm
-	HeightMM    float64 // Mean height in mm
-	MinWidthMM  float64 // Min observed width in cluster
-	MaxWidthMM  float64 // Max observed width in cluster
-	MinHeightMM float64 // Min observed height in cluster
-	MaxHeightMM float64 // Max observed height in cluster
-	Count       int     // Number of training samples in this cluster
+	WidthMM     float64  // Mean width in mm
+	HeightMM    float64  // Mean height in mm
+	MinWidthMM  float64  // Min observed width in cluster
+	MaxWidthMM  float64  // Max observed width in cluster
+	MinHeightMM float64  // Min observed height in cluster
+	MaxHeightMM float64  // Max observed height in cluster
+	Count       int      // Number of training samples in this cluster
+	Refs        []string // Source component references in this cluster
 }
 
 // TrainingSet holds training samples for conditioning the detector.
@@ -206,7 +208,43 @@ func NewTrainingSet() *TrainingSet {
 
 // Add adds a training sample to the set.
 func (ts *TrainingSet) Add(sample TrainingSample) {
+	// Dedup by bounds — don't add if a sample with the same bounds already exists
+	for _, s := range ts.Samples {
+		if math.Abs(s.Bounds.X-sample.Bounds.X) < 1 &&
+			math.Abs(s.Bounds.Y-sample.Bounds.Y) < 1 &&
+			math.Abs(s.Bounds.Width-sample.Bounds.Width) < 1 &&
+			math.Abs(s.Bounds.Height-sample.Bounds.Height) < 1 {
+			return
+		}
+	}
 	ts.Samples = append(ts.Samples, sample)
+}
+
+// Dedup removes duplicate training samples (same bounds within 1px).
+func (ts *TrainingSet) Dedup() {
+	if len(ts.Samples) <= 1 {
+		return
+	}
+	unique := make([]TrainingSample, 0, len(ts.Samples))
+	for _, s := range ts.Samples {
+		dup := false
+		for _, u := range unique {
+			if math.Abs(u.Bounds.X-s.Bounds.X) < 1 &&
+				math.Abs(u.Bounds.Y-s.Bounds.Y) < 1 &&
+				math.Abs(u.Bounds.Width-s.Bounds.Width) < 1 &&
+				math.Abs(u.Bounds.Height-s.Bounds.Height) < 1 {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			unique = append(unique, s)
+		}
+	}
+	if len(unique) < len(ts.Samples) {
+		fmt.Printf("Dedup: %d → %d training samples\n", len(ts.Samples), len(unique))
+		ts.Samples = unique
+	}
 }
 
 // Clear removes all training samples.
@@ -236,6 +274,7 @@ func (ts *TrainingSet) DeriveParams() DetectionParams {
 	}
 	var samples []sampleData
 	var minWidth, maxWidth, minHeight, maxHeight float64 = 1e9, 0, 1e9, 0
+	var minAspect, maxAspect float64 = 1e9, 0
 
 	for i, s := range ts.Samples {
 		// Use histogram-derived background value if available, else fall back to mean
@@ -243,8 +282,12 @@ func (ts *TrainingSet) DeriveParams() DetectionParams {
 		if bgVal == 0 {
 			bgVal = s.MeanVal
 		}
-		fmt.Printf("  Sample %d: BgVal=%.0f MeanSat=%.0f Size=%.1fx%.1f mm\n",
-			i+1, bgVal, s.MeanSat, s.WidthMM, s.HeightMM)
+		ref := s.Reference
+		if ref == "" {
+			ref = "?"
+		}
+		fmt.Printf("  Sample %2d [%s]: BgVal=%.0f MeanSat=%.0f Size=%.1fx%.1f mm\n",
+			i+1, ref, bgVal, s.MeanSat, s.WidthMM, s.HeightMM)
 
 		samples = append(samples, sampleData{bgVal: bgVal, satMax: s.MeanSat})
 
@@ -260,9 +303,25 @@ func (ts *TrainingSet) DeriveParams() DetectionParams {
 		if s.HeightMM > maxHeight {
 			maxHeight = s.HeightMM
 		}
+
+		// Aspect ratio: max/min dimension
+		shortDim, longDim := s.WidthMM, s.HeightMM
+		if shortDim > longDim {
+			shortDim, longDim = longDim, shortDim
+		}
+		if shortDim > 0 {
+			aspect := longDim / shortDim
+			if aspect < minAspect {
+				minAspect = aspect
+			}
+			if aspect > maxAspect {
+				maxAspect = aspect
+			}
+		}
 	}
 
-	fmt.Printf("  Size range: %.1f-%.1f x %.1f-%.1f mm\n", minWidth, maxWidth, minHeight, maxHeight)
+	fmt.Printf("  Size range: %.1f-%.1f x %.1f-%.1f mm, aspect %.1f-%.1f\n",
+		minWidth, maxWidth, minHeight, maxHeight, minAspect, maxAspect)
 
 	// Cluster samples into distinct color profiles based on V value.
 	// Uses max-diameter clustering: a sample joins a cluster only if the resulting
@@ -361,9 +420,9 @@ func (ts *TrainingSet) DeriveParams() DetectionParams {
 		MinHeight: minHeight * 0.7,
 		MaxHeight: maxHeight * 1.5,
 
-		// Aspect ratio and quality
-		MinAspectRatio: 0.5,
-		MaxAspectRatio: 15.0,
+		// Aspect ratio from training data + 20% margin
+		MinAspectRatio: minAspect * 0.8,
+		MaxAspectRatio: maxAspect * 1.2,
 		MinSolidity:    0.4,
 		MinWhitePixels: 0.0,
 	}
@@ -382,12 +441,12 @@ func (ts *TrainingSet) DeriveParams() DetectionParams {
 		params.SatMax = 200
 	}
 
-	// Compute cell size from training data: min dimension / 3
+	// Compute cell size from training data: min dimension / 6
 	minDim := minWidth
 	if minHeight < minDim {
 		minDim = minHeight
 	}
-	params.CellSizeMM = minDim / 3.0
+	params.CellSizeMM = minDim / 6.0
 	if params.CellSizeMM < 0.5 {
 		params.CellSizeMM = 0.5
 	}
@@ -402,8 +461,12 @@ func (ts *TrainingSet) DeriveParams() DetectionParams {
 	fmt.Printf("  Cell size: %.2f mm\n", params.CellSizeMM)
 	fmt.Printf("  Size templates: %d\n", len(params.SizeTemplates))
 	for i, t := range params.SizeTemplates {
-		fmt.Printf("    Template %d: %.1fx%.1f mm (w=%.1f-%.1f, h=%.1f-%.1f, n=%d)\n",
-			i+1, t.WidthMM, t.HeightMM, t.MinWidthMM, t.MaxWidthMM, t.MinHeightMM, t.MaxHeightMM, t.Count)
+		refStr := ""
+		if len(t.Refs) > 0 {
+			refStr = " [" + strings.Join(t.Refs, ", ") + "]"
+		}
+		fmt.Printf("    Template %d: %.1fx%.1f mm (w=%.1f-%.1f, h=%.1f-%.1f, n=%d)%s\n",
+			i+1, t.WidthMM, t.HeightMM, t.MinWidthMM, t.MaxWidthMM, t.MinHeightMM, t.MaxHeightMM, t.Count, refStr)
 	}
 	fmt.Printf("=============================================\n")
 
@@ -469,6 +532,14 @@ func clusterSizeTemplates(samples []TrainingSample) []SizeTemplate {
 		meanW := sumW / n
 		meanH := sumH / n
 
+		// Collect references
+		var refs []string
+		for _, s := range group {
+			if s.Reference != "" {
+				refs = append(refs, s.Reference)
+			}
+		}
+
 		// Add tolerance: +/- 1.5mm on width, +/- half a pin pitch on height
 		t := SizeTemplate{
 			WidthMM:     meanW,
@@ -478,6 +549,7 @@ func clusterSizeTemplates(samples []TrainingSample) []SizeTemplate {
 			MinHeightMM: float64(key.lengthUnit)*pinPitch - pinPitch*0.75,
 			MaxHeightMM: float64(key.lengthUnit)*pinPitch + pinPitch*0.75,
 			Count:       len(group),
+			Refs:        refs,
 		}
 		if t.MinWidthMM < 1 {
 			t.MinWidthMM = 1
@@ -1458,6 +1530,7 @@ func LoadGlobalTraining() (*TrainingSet, error) {
 		if data, err := os.ReadFile(libPath); err == nil {
 			var ts TrainingSet
 			if err := json.Unmarshal(data, &ts); err == nil {
+				ts.Dedup()
 				fmt.Printf("Loaded %d component training samples from %s\n", len(ts.Samples), libPath)
 				return &ts, nil
 			}
@@ -1482,6 +1555,7 @@ func LoadGlobalTraining() (*TrainingSet, error) {
 		return NewTrainingSet(), fmt.Errorf("cannot parse component training: %w", err)
 	}
 
+	ts.Dedup()
 	fmt.Printf("Loaded %d component training samples from %s\n", len(ts.Samples), path)
 	return &ts, nil
 }

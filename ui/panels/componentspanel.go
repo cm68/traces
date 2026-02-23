@@ -1465,6 +1465,7 @@ func (cp *ComponentsPanel) onTrainComponents() {
 	added := 0
 	for _, comp := range cp.state.Components {
 		sample := component.ExtractSampleFeatures(frontImg, comp.Bounds, dpi)
+		sample.Reference = comp.ID
 		cp.state.GlobalComponentTraining.Add(sample)
 		added++
 	}
@@ -1489,16 +1490,6 @@ func (cp *ComponentsPanel) onDetectComponents() {
 
 	if cp.state.GlobalComponentTraining == nil {
 		cp.state.GlobalComponentTraining = component.NewTrainingSet()
-	}
-
-	// Add any existing components on this board to the global training set
-	if len(cp.state.Components) > 0 {
-		for _, comp := range cp.state.Components {
-			sample := component.ExtractSampleFeatures(frontImg, comp.Bounds, dpi)
-			cp.state.GlobalComponentTraining.Add(sample)
-		}
-		cp.state.SaveGlobalComponentTraining()
-		fmt.Printf("[Detect] Added %d components from this board to global training\n", len(cp.state.Components))
 	}
 
 	if len(cp.state.GlobalComponentTraining.Samples) == 0 {
@@ -1585,7 +1576,168 @@ func (cp *ComponentsPanel) onDetectComponents() {
 		return
 	}
 
-	if result == nil || len(result.Components) == 0 {
+	if result == nil {
+		fmt.Println("[Detect] No result")
+		return
+	}
+
+	// Visualize grid and connected regions
+	if result.Grid != nil {
+		cellHit := color.RGBA{R: 200, G: 0, B: 0, A: 80}
+		gridOverlay := &canvas.Overlay{}
+
+		// Draw all matched cells in dim red (disabled for debugging)
+		if false {
+		for gy := 0; gy < result.GridRows; gy++ {
+			for gx := 0; gx < result.GridCols; gx++ {
+				if result.Grid[gy*result.GridCols+gx] == 1 {
+					gridOverlay.Rectangles = append(gridOverlay.Rectangles, canvas.OverlayRect{
+						X:      result.ScanX + gx*result.CellSizePx,
+						Y:      result.ScanY + gy*result.CellSizePx,
+						Width:  result.CellSizePx,
+						Height: result.CellSizePx,
+						Fill:   canvas.FillSolid,
+						Color:  &cellHit,
+					})
+				}
+			}
+		}
+		}
+
+		// Dump HSV stats for first refined bound
+		if len(result.RefinedBounds) > 0 && result.HSVBytes != nil {
+			rb := result.RefinedBounds[0]
+			var hHist [181]int
+			var sHist [256]int
+			var vHist [256]int
+			count := 0
+			for y := rb.Min.Y; y < rb.Max.Y; y += 4 {
+				for x := rb.Min.X; x < rb.Max.X; x += 4 {
+					off := (y*result.HSVWidth + x) * result.HSVChannels
+					if off+2 < len(result.HSVBytes) {
+						h := result.HSVBytes[off]
+						s := result.HSVBytes[off+1]
+						v := result.HSVBytes[off+2]
+						if int(h) <= 180 { hHist[h]++ }
+						sHist[s]++
+						vHist[v]++
+						count++
+					}
+				}
+			}
+			fmt.Printf("[HSV stats] Region 0: %d samples\n", count)
+			fmt.Printf("  H peaks: ")
+			for i := 0; i <= 180; i++ {
+				if hHist[i] > count/20 {
+					fmt.Printf("H=%d(%d%%) ", i, hHist[i]*100/count)
+				}
+			}
+			fmt.Println()
+			fmt.Printf("  S range: ")
+			s10, s50, s90 := 0, 0, 0
+			cum := 0
+			for i := 0; i < 256; i++ {
+				cum += sHist[i]
+				if s10 == 0 && cum >= count/10 { s10 = i }
+				if s50 == 0 && cum >= count/2 { s50 = i }
+				if s90 == 0 && cum >= count*9/10 { s90 = i }
+			}
+			fmt.Printf("p10=%d p50=%d p90=%d\n", s10, s50, s90)
+			fmt.Printf("  V range: ")
+			v10, v50, v90 := 0, 0, 0
+			cum = 0
+			for i := 0; i < 256; i++ {
+				cum += vHist[i]
+				if v10 == 0 && cum >= count/10 { v10 = i }
+				if v50 == 0 && cum >= count/2 { v50 = i }
+				if v90 == 0 && cum >= count*9/10 { v90 = i }
+			}
+			fmt.Printf("p10=%d p50=%d p90=%d\n", v10, v50, v90)
+			// Count how many pass the green check
+			greenCount := 0
+			for y := rb.Min.Y; y < rb.Max.Y; y += 4 {
+				for x := rb.Min.X; x < rb.Max.X; x += 4 {
+					off := (y*result.HSVWidth + x) * result.HSVChannels
+					if off+2 < len(result.HSVBytes) {
+						h := result.HSVBytes[off]
+						s := result.HSVBytes[off+1]
+						v := result.HSVBytes[off+2]
+						if h >= 35 && h <= 85 && s >= 30 && v >= 50 {
+							greenCount++
+						}
+					}
+				}
+			}
+			fmt.Printf("  Green check: %d/%d (%.1f%%)\n", greenCount, count, float64(greenCount)/float64(count)*100)
+		}
+
+		// Paint green board pixels inside each refined bound (disabled)
+		// Uses the actual detector's HSV check via OpenCV for accuracy.
+		if false && len(result.RefinedBounds) > 0 {
+			greenMark := color.RGBA{R: 0, G: 255, B: 0, A: 120}
+			step := 2
+			// Get HSV bytes from the detection result's source image
+			hsvBytes, hsvW, hsvCh := result.HSVBytes, result.HSVWidth, result.HSVChannels
+			if hsvBytes != nil {
+				for _, rb := range result.RefinedBounds {
+					for y := rb.Min.Y; y < rb.Max.Y; y += step {
+						for x := rb.Min.X; x < rb.Max.X; x += step {
+							off := (y*hsvW + x) * hsvCh
+							if off+2 < len(hsvBytes) {
+								h := hsvBytes[off]
+								s := hsvBytes[off+1]
+								v := hsvBytes[off+2]
+								if h >= 35 && h <= 85 && s >= 30 && v >= 50 {
+									gridOverlay.Rectangles = append(gridOverlay.Rectangles, canvas.OverlayRect{
+										X: x, Y: y, Width: step, Height: step,
+										Fill: canvas.FillSolid, Color: &greenMark,
+									})
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Draw region bounding boxes in yellow (grid coordinates)
+		yellow := color.RGBA{R: 255, G: 255, B: 0, A: 200}
+		if len(result.RefinedBounds) > 0 {
+			// Stage 2+: draw refined pixel bounds
+			for _, rb := range result.RefinedBounds {
+				gridOverlay.Rectangles = append(gridOverlay.Rectangles, canvas.OverlayRect{
+					X:      rb.Min.X,
+					Y:      rb.Min.Y,
+					Width:  rb.Max.X - rb.Min.X,
+					Height: rb.Max.Y - rb.Min.Y,
+					Fill:   canvas.FillNone,
+					Color:  &yellow,
+				})
+			}
+		} else {
+			// Stage 1: draw raw grid-coordinate regions
+			for _, r := range result.Regions {
+				gridOverlay.Rectangles = append(gridOverlay.Rectangles, canvas.OverlayRect{
+					X:      result.ScanX + r.Min.X*result.CellSizePx,
+					Y:      result.ScanY + r.Min.Y*result.CellSizePx,
+					Width:  (r.Max.X - r.Min.X) * result.CellSizePx,
+					Height: (r.Max.Y - r.Min.Y) * result.CellSizePx,
+					Fill:   canvas.FillNone,
+					Color:  &yellow,
+				})
+			}
+		}
+
+		cp.canvas.SetOverlay("detect_grid", gridOverlay)
+		cp.canvas.Refresh()
+		fmt.Printf("[Detect] Visualizing %d regions\n", len(result.Regions))
+	}
+
+	return
+
+	// --- Remaining pipeline (disabled for iterative debugging) ---
+
+	if len(result.Components) == 0 {
 		fmt.Println("[Detect] No components detected")
 		return
 	}

@@ -8,7 +8,6 @@ import (
 	"math"
 	"os"
 	"runtime"
-	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -83,6 +82,19 @@ func DefaultParams() DetectionParams {
 type DetectionResult struct {
 	Components []*Component
 	DebugImage gocv.Mat // Optional debug visualization
+
+	// Intermediate grid data for visualization
+	Grid          []byte            // Cell classification grid (0/1), row-major, post-morph
+	GridCols      int               // Grid columns
+	GridRows      int               // Grid rows
+	CellSizePx    int              // Cell size in pixels
+	ScanX         int               // Grid origin X in image coordinates
+	ScanY         int               // Grid origin Y in image coordinates
+	Regions       []image.Rectangle // Connected regions in grid coordinates
+	RefinedBounds []image.Rectangle // Refined pixel bounds after dense-core + green trim
+	HSVBytes      []byte            // Raw HSV pixel data for visualization
+	HSVWidth      int               // Image width for HSV byte indexing
+	HSVChannels   int               // Number of channels (3)
 }
 
 // DetectComponents finds DIP components in an image.
@@ -255,11 +267,23 @@ func DetectComponentsMatWithBounds(img gocv.Mat, dpi float64, params DetectionPa
 
 	fmt.Printf("Found %d connected regions\n", len(regions))
 
-	// Convert regions to pixel bounds, refine, and match against templates
-	var candidates []*Component
-	componentID := 1
+	// Debug stage 1: return grid + raw regions for visualization
+	if false {
+	return &DetectionResult{
+		Grid:       grid,
+		GridCols:   gridCols,
+		GridRows:   gridRows,
+		CellSizePx: cellSizePx,
+		ScanX:      scanX,
+		ScanY:      scanY,
+		Regions:    regions,
+	}, nil
+	} // end debug stage 1
 
-	for _, region := range regions {
+	// Debug stage 2a: size prefilter only (no refine)
+	var survivingRegions []image.Rectangle
+
+	for i, region := range regions {
 		x1 := scanX + region.Min.X*cellSizePx
 		y1 := scanY + region.Min.Y*cellSizePx
 		x2 := scanX + region.Max.X*cellSizePx
@@ -275,6 +299,11 @@ func DetectComponentsMatWithBounds(img gocv.Mat, dpi float64, params DetectionPa
 		rawH := float64(y2 - y1)
 		rawWMM := rawW / mmToPixels
 		rawHMM := rawH / mmToPixels
+		regionCells := (region.Max.X - region.Min.X) * (region.Max.Y - region.Min.Y)
+
+		fmt.Printf("  Region %d: grid %dx%d (%d cells) at (%d,%d) raw %.1fx%.1f mm\n",
+			i+1, region.Max.X-region.Min.X, region.Max.Y-region.Min.Y,
+			regionCells, x1, y1, rawWMM, rawHMM)
 
 		// Quick size pre-filter: skip regions obviously too small or too large
 		minDim := rawWMM
@@ -285,9 +314,65 @@ func DetectComponentsMatWithBounds(img gocv.Mat, dpi float64, params DetectionPa
 		if rawHMM > maxDim {
 			maxDim = rawHMM
 		}
-		if minDim < params.MinWidth*0.5 || maxDim > params.MaxHeight*2.0 {
-			fmt.Printf("  [prefilter] region at (%d,%d) size %.1fx%.1f mm\n", x1, y1, rawWMM, rawHMM)
+		if minDim < params.MinWidth {
+			fmt.Printf("    REJECT: too narrow (min dim %.1f mm < %.1f mm)\n",
+				minDim, params.MinWidth)
 			continue
+		}
+		if maxDim < params.MinHeight {
+			fmt.Printf("    REJECT: too short (max dim %.1f mm < %.1f mm)\n",
+				maxDim, params.MinHeight)
+			continue
+		}
+		if maxDim > params.MaxHeight {
+			fmt.Printf("    REJECT: too large (max dim %.1f mm > threshold %.1f mm)\n",
+				maxDim, params.MaxHeight)
+			continue
+		}
+		aspect := maxDim / minDim
+		if aspect < params.MinAspectRatio {
+			fmt.Printf("    REJECT: aspect ratio %.1f < min %.1f\n",
+				aspect, params.MinAspectRatio)
+			continue
+		}
+		if aspect > params.MaxAspectRatio {
+			fmt.Printf("    REJECT: aspect ratio %.1f > max %.1f\n",
+				aspect, params.MaxAspectRatio)
+			continue
+		}
+
+		fmt.Printf("    SURVIVE prefilter (%.1fx%.1f mm, aspect %.1f)\n", rawWMM, rawHMM, aspect)
+		survivingRegions = append(survivingRegions, region)
+	}
+
+	fmt.Printf("Prefilter: %d of %d regions survived\n", len(survivingRegions), len(regions))
+
+	// Debug stage 2a: return after prefilter only
+	if false {
+	return &DetectionResult{
+		Grid:       grid,
+		GridCols:   gridCols,
+		GridRows:   gridRows,
+		CellSizePx: cellSizePx,
+		ScanX:      scanX,
+		ScanY:      scanY,
+		Regions:    survivingRegions,
+	}, nil
+	} // end debug stage 2a
+
+	// --- Stage 2b: refine bounds (green trim + dense-core) ---
+	var refinedBounds []image.Rectangle
+
+	for i, region := range survivingRegions {
+		x1 := scanX + region.Min.X*cellSizePx
+		y1 := scanY + region.Min.Y*cellSizePx
+		x2 := scanX + region.Max.X*cellSizePx
+		y2 := scanY + region.Max.Y*cellSizePx
+		if x2 > scanX+scanW {
+			x2 = scanX + scanW
+		}
+		if y2 > scanY+scanH {
+			y2 = scanY + scanH
 		}
 
 		// Refine bounds by scanning actual HSV pixels at the edges
@@ -299,47 +384,26 @@ func DetectComponentsMatWithBounds(img gocv.Mat, dpi float64, params DetectionPa
 		widthMM := width / mmToPixels
 		heightMM := height / mmToPixels
 
-		// Try to match a size template (either orientation)
-		matched, pkgType := matchSizeTemplate(widthMM, heightMM, mmToPixels, params)
-		if !matched {
-			fmt.Printf("  [template reject] region at (%d,%d) refined %.1fx%.1f mm\n",
-				rx1, ry1, widthMM, heightMM)
-			continue
-		}
+		fmt.Printf("  Region %d: Refined (%d,%d)-(%d,%d) = %.1fx%.1f mm\n",
+			i+1, rx1, ry1, rx2, ry2, widthMM, heightMM)
 
-		comp := &Component{
-			ID:      fmt.Sprintf("U%d", componentID),
-			Package: pkgType,
-			Bounds: geometry.Rect{
-				X:      float64(rx1),
-				Y:      float64(ry1),
-				Width:  width,
-				Height: height,
-			},
-		}
-		candidates = append(candidates, comp)
-		componentID++
-
-		fmt.Printf("  Candidate %s: %s at (%d,%d) size %.1fx%.1f mm\n",
-			comp.ID, pkgType, rx1, ry1, widthMM, heightMM)
+		refinedBounds = append(refinedBounds, image.Rect(rx1, ry1, rx2, ry2))
 	}
 
-	// Sort by Y then X
-	sort.Slice(candidates, func(i, j int) bool {
-		if math.Abs(candidates[i].Bounds.Y-candidates[j].Bounds.Y) > 50 {
-			return candidates[i].Bounds.Y < candidates[j].Bounds.Y
-		}
-		return candidates[i].Bounds.X < candidates[j].Bounds.X
-	})
-
-	for i, comp := range candidates {
-		comp.ID = fmt.Sprintf("U%d", i+1)
-	}
-
-	fmt.Printf("Detection complete: %d components found\n", len(candidates))
+	fmt.Printf("Refined: %d regions\n", len(refinedBounds))
 
 	return &DetectionResult{
-		Components: candidates,
+		Grid:          grid,
+		GridCols:      gridCols,
+		GridRows:      gridRows,
+		CellSizePx:    cellSizePx,
+		ScanX:         scanX,
+		ScanY:         scanY,
+		Regions:       survivingRegions,
+		RefinedBounds: refinedBounds,
+		HSVBytes:      hsvBytes,
+		HSVWidth:      imgW,
+		HSVChannels:   channels,
 	}, nil
 }
 
@@ -503,9 +567,9 @@ func floodFillFlat(grid []byte, visited []byte, startX, startY, gridCols, gridRo
 }
 
 // refineClusterBounds tightens the bounding box in two passes:
-// 1. Dense-core: find the contiguous column/row range with high color-profile match density.
-// 2. Board-trim: scan inward from each edge, trimming rows/columns that contain significant
+// 1. Board-trim: scan inward from each edge, trimming rows/columns that contain significant
 //    green (board surface) pixels. IC body should contain no visible board surface.
+// 2. Dense-core: find the contiguous column/row range with high color-profile match density.
 func refineClusterBounds(hsvBytes []byte, imgW, imgH, channels, x1, y1, x2, y2 int, params DetectionParams) (int, int, int, int) {
 	// Clamp
 	if x1 < 0 {
@@ -548,54 +612,26 @@ func refineClusterBounds(hsvBytes []byte, imgW, imgH, channels, x1, y1, x2, y2 i
 		return x1, y1, x2, y2
 	}
 
-	// --- Pass 1: Dense-core trim ---
-	// Compute per-column density (fraction of pixels matching color profiles)
-	colDensity := make([]float64, regionW)
-	for cx := 0; cx < regionW; cx++ {
-		x := x1 + cx
-		matches := 0
-		for y := y1; y < y2; y++ {
-			if matchPixel((y*imgW + x) * channels) {
-				matches++
-			}
-		}
-		colDensity[cx] = float64(matches) / float64(regionH)
+	// --- Pass 1: Board-surface trim (top edge only) ---
+	// Board is dark green (has color/saturation). IC body is black or dark gray
+	// (achromatic — low saturation). Scan rows from top, trim until we hit a row
+	// with enough achromatic pixels.
+
+	// A pixel is "black or dark gray" (IC body) if it's dark AND achromatic:
+	// low saturation = no color, low value = dark. Excludes white silkscreen
+	// (which is achromatic but bright) and dark green board (which is dark but saturated).
+	isDarkAchromatic := func(offset int) bool {
+		s := hsvBytes[offset+1]
+		v := hsvBytes[offset+2]
+		return s < 50 && v < 220
 	}
 
-	// Compute per-row density
-	rowDensity := make([]float64, regionH)
-	for ry := 0; ry < regionH; ry++ {
-		y := y1 + ry
-		matches := 0
-		for x := x1; x < x2; x++ {
-			if matchPixel((y*imgW + x) * channels) {
-				matches++
-			}
-		}
-		rowDensity[ry] = float64(matches) / float64(regionW)
-	}
+	// Trim top and bottom: trim while row is green board, stop when it's not.
+	// Stops at both black IC body AND white silkscreen (neither is green).
+	_ = isDarkAchromatic // keep for future use
+	const boardRowThreshold = 0.50
 
-	const coreThreshold = 0.50
-
-	coreX1, coreX2 := findDenseRange(colDensity, coreThreshold)
-	coreY1, coreY2 := findDenseRange(rowDensity, coreThreshold)
-
-	if coreX2-coreX1 >= regionW/4 {
-		x1 = x1 + coreX1
-		x2 = x1 + (coreX2 - coreX1)
-	}
-	if coreY2-coreY1 >= regionH/4 {
-		y1orig := y1
-		y1 = y1orig + coreY1
-		y2 = y1orig + coreY2
-	}
-
-	// --- Pass 2: Board-surface trim ---
-	// Scan inward from each edge, trimming rows/columns that contain significant
-	// green (board surface) pixels. IC body should be free of board surface.
-	const boardThreshold = 0.10 // >10% green pixels means this is board, not body
-
-	// Trim from top
+	// Scan from top
 	for y := y1; y < y2; y++ {
 		boardPx := 0
 		total := x2 - x1
@@ -604,14 +640,32 @@ func refineClusterBounds(hsvBytes []byte, imgW, imgH, channels, x1, y1, x2, y2 i
 				boardPx++
 			}
 		}
-		if total > 0 && float64(boardPx)/float64(total) > boardThreshold {
+		if total > 0 && float64(boardPx)/float64(total) >= boardRowThreshold {
 			y1 = y + 1
 		} else {
 			break
 		}
 	}
 
-	// Trim from bottom
+	// Scan from bottom
+	for y := y2 - 1; y > y1; y-- {
+		boardPx := 0
+		total := x2 - x1
+		for x := x1; x < x2; x++ {
+			if isBoardPixel((y*imgW + x) * channels) {
+				boardPx++
+			}
+		}
+		if total > 0 && float64(boardPx)/float64(total) >= boardRowThreshold {
+			y2 = y
+		} else {
+			break
+		}
+	}
+
+	// Trim from bottom — old green-based (disabled)
+	if false {
+	const boardThreshold = 0.50
 	for y := y2 - 1; y > y1; y-- {
 		boardPx := 0
 		total := x2 - x1
@@ -658,6 +712,58 @@ func refineClusterBounds(hsvBytes []byte, imgW, imgH, channels, x1, y1, x2, y2 i
 			break
 		}
 	}
+	} // end disabled bottom/left/right trim
+
+	// --- Pass 2: Dense-core trim (disabled for debugging) ---
+	if false {
+	regionW = x2 - x1
+	regionH = y2 - y1
+	if regionW > 0 && regionH > 0 {
+
+	// Compute per-column density (fraction of pixels matching color profiles)
+	colDensity := make([]float64, regionW)
+	for cx := 0; cx < regionW; cx++ {
+		x := x1 + cx
+		matches := 0
+		for y := y1; y < y2; y++ {
+			if matchPixel((y*imgW + x) * channels) {
+				matches++
+			}
+		}
+		colDensity[cx] = float64(matches) / float64(regionH)
+	}
+
+	// Compute per-row density
+	rowDensity := make([]float64, regionH)
+	for ry := 0; ry < regionH; ry++ {
+		y := y1 + ry
+		matches := 0
+		for x := x1; x < x2; x++ {
+			if matchPixel((y*imgW + x) * channels) {
+				matches++
+			}
+		}
+		rowDensity[ry] = float64(matches) / float64(regionW)
+	}
+
+	const coreThreshold = 0.50
+
+	coreX1, coreX2 := findDenseRange(colDensity, coreThreshold)
+	coreY1, coreY2 := findDenseRange(rowDensity, coreThreshold)
+
+	if coreX2-coreX1 >= regionW/4 {
+		x1orig := x1
+		x1 = x1orig + coreX1
+		x2 = x1orig + coreX2
+	}
+	if coreY2-coreY1 >= regionH/4 {
+		y1orig := y1
+		y1 = y1orig + coreY1
+		y2 = y1orig + coreY2
+	}
+
+	} // end regionW/regionH check
+	} // end dense-core disabled
 
 	return x1, y1, x2, y2
 }
@@ -728,6 +834,47 @@ func matchSizeTemplate(widthMM, heightMM, mmToPixels float64, params DetectionPa
 		return false, ""
 	}
 	return true, classifyPackage(widthMM*mmToPixels, heightMM*mmToPixels, mmToPixels)
+}
+
+// matchSizeTemplateWithReason is like matchSizeTemplate but returns a human-readable
+// rejection reason when no template matches.
+func matchSizeTemplateWithReason(widthMM, heightMM, mmToPixels float64, params DetectionParams) (bool, string, string) {
+	if len(params.SizeTemplates) > 0 {
+		// Try normal orientation
+		for _, t := range params.SizeTemplates {
+			if widthMM >= t.MinWidthMM && widthMM <= t.MaxWidthMM &&
+				heightMM >= t.MinHeightMM && heightMM <= t.MaxHeightMM {
+				return true, classifyPackage(widthMM*mmToPixels, heightMM*mmToPixels, mmToPixels), ""
+			}
+		}
+		// Try rotated 90 degrees
+		for _, t := range params.SizeTemplates {
+			if heightMM >= t.MinWidthMM && heightMM <= t.MaxWidthMM &&
+				widthMM >= t.MinHeightMM && widthMM <= t.MaxHeightMM {
+				return true, classifyPackage(widthMM*mmToPixels, heightMM*mmToPixels, mmToPixels), ""
+			}
+		}
+		// Build rejection reason showing what templates exist
+		reason := fmt.Sprintf("no template match for %.1fx%.1f mm — templates:", widthMM, heightMM)
+		for i, t := range params.SizeTemplates {
+			reason += fmt.Sprintf(" [%d] W=%.1f-%.1f H=%.1f-%.1f",
+				i+1, t.MinWidthMM, t.MaxWidthMM, t.MinHeightMM, t.MaxHeightMM)
+		}
+		return false, "", reason
+	}
+
+	// Fallback: original DIP validation
+	if !IsValidDIPWidth(widthMM) && !IsValidDIPWidth(heightMM) {
+		return false, "", fmt.Sprintf("no valid DIP width (%.1f mm or %.1f mm)", widthMM, heightMM)
+	}
+	dipLength := heightMM
+	if IsValidDIPWidth(heightMM) && !IsValidDIPWidth(widthMM) {
+		dipLength = widthMM
+	}
+	if !isValidDIPLength(dipLength) {
+		return false, "", fmt.Sprintf("invalid DIP length %.1f mm", dipLength)
+	}
+	return true, classifyPackage(widthMM*mmToPixels, heightMM*mmToPixels, mmToPixels), ""
 }
 
 // BoardBoundsResult holds the detected board region and per-cell variance data

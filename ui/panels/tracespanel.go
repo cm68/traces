@@ -3434,6 +3434,9 @@ func (tp *TracesPanel) onHover(x, y float64) {
 	}
 
 	// Hit-test confirmed via
+	if tp.state.FeaturesLayer == nil {
+		return
+	}
 	if cv := tp.state.FeaturesLayer.HitTestConfirmedVia(x, y); cv != nil {
 		tp.showNetInfoForElement(cv.ID, cv.ID)
 		return

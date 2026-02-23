@@ -600,11 +600,11 @@ func (mw *MainWindow) onNewProject() {
 	}
 
 	response := dlg.Run()
+	frontPath := dlg.GetFilename()
 	dlg.Destroy()
 	if response != gtk.RESPONSE_ACCEPT {
 		return
 	}
-	frontPath := dlg.GetFilename()
 
 	// Now select back image
 	dlg2, _ := gtk.FileChooserDialogNewWith2Buttons(
@@ -618,11 +618,11 @@ func (mw *MainWindow) onNewProject() {
 	dlg2.SetCurrentFolder(filepath.Dir(frontPath))
 
 	response2 := dlg2.Run()
+	backPath := dlg2.GetFilename()
 	dlg2.Destroy()
 	if response2 != gtk.RESPONSE_ACCEPT {
 		return
 	}
-	backPath := dlg2.GetFilename()
 
 	mw.prefs.SetString(prefKeyLastDir, filepath.Dir(frontPath))
 	mw.prefs.Save()
@@ -665,12 +665,12 @@ func (mw *MainWindow) onOpenProject() {
 	}
 
 	response := dlg.Run()
+	path := dlg.GetFilename()
 	dlg.Destroy()
 	if response != gtk.RESPONSE_ACCEPT {
 		return
 	}
 
-	path := dlg.GetFilename()
 	mw.prefs.SetString(prefKeyLastDir, filepath.Dir(path))
 
 	if err := mw.state.LoadProject(path); err != nil {
@@ -726,12 +726,12 @@ func (mw *MainWindow) onSaveProjectAs() {
 	}
 
 	response := dlg.Run()
+	path := dlg.GetFilename()
 	dlg.Destroy()
 	if response != gtk.RESPONSE_ACCEPT {
 		return
 	}
 
-	path := dlg.GetFilename()
 	if filepath.Ext(path) != ".pcbproj" {
 		path += ".pcbproj"
 	}

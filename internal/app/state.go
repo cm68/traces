@@ -958,7 +958,7 @@ func (s *State) ResetForNewProject() {
 	s.Components = nil
 	s.ComponentTraining = nil
 	s.LogoTraining = nil
-	s.FeaturesLayer = nil
+	s.FeaturesLayer = features.NewDetectedFeaturesLayer()
 }
 
 // LoadRawFrontImage loads the front side image without any processing.

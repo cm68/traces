@@ -200,6 +200,195 @@ func (n *Netlist) ExportSPICE(path string) error {
 	return os.WriteFile(path, []byte(sb.String()), 0644)
 }
 
+// PinRef identifies a component pin or connector pin for the dump format.
+type PinRef struct {
+	Component string // Component ID (e.g., "A12") or "CONN" for connectors
+	Pin       string // Pin number/name
+	Signal    string // Signal name if known
+}
+
+func (p PinRef) String() string {
+	if p.Signal != "" {
+		return fmt.Sprintf("%s-%s(%s)", p.Component, p.Pin, p.Signal)
+	}
+	return fmt.Sprintf("%s-%s", p.Component, p.Pin)
+}
+
+// PinConnection describes one pin and everything it connects to.
+type PinConnection struct {
+	Pin       PinRef
+	NetName   string
+	ConnectsTo []PinRef
+}
+
+// ComponentDump groups all pin connections for one component.
+type ComponentDump struct {
+	ComponentID string
+	Pins        []PinConnection
+}
+
+// NetlistDump is the brute-force dump of all component pin connections.
+type NetlistDump struct {
+	Components []ComponentDump
+}
+
+// GenerateNetlistDump builds a brute-force dump from electrical nets.
+// For each component, lists every pin and what other pins/connectors share its net.
+// viaResolver maps via ID → (componentID, pinNumber, signalName).
+// connResolver maps connector ID → (pinNumber, signalName).
+func GenerateNetlistDump(
+	nets []*ElectricalNet,
+	viaResolver func(viaID string) (componentID, pinNumber, signalName string),
+	connResolver func(connID string) (pinNumber int, signalName string),
+) *NetlistDump {
+	// Step 1: Build a map of net name → all PinRefs in that net (excluding traces)
+	type netPins struct {
+		name string
+		pins []PinRef
+	}
+	var netList []netPins
+
+	for _, net := range nets {
+		var pins []PinRef
+
+		// Resolve vias to component pins
+		for _, viaID := range net.ViaIDs {
+			compID, pinNum, sigName := viaResolver(viaID)
+			if compID == "" {
+				continue // unassigned via, skip
+			}
+			pins = append(pins, PinRef{
+				Component: compID,
+				Pin:       pinNum,
+				Signal:    sigName,
+			})
+		}
+
+		// Resolve connectors
+		for _, connID := range net.ConnectorIDs {
+			pinNum, sigName := connResolver(connID)
+			label := fmt.Sprintf("%d", pinNum)
+			pins = append(pins, PinRef{
+				Component: "CONN",
+				Pin:       label,
+				Signal:    sigName,
+			})
+		}
+
+		// Resolve pads (component pins added directly)
+		for _, padID := range net.PadIDs {
+			parts := strings.SplitN(padID, ".", 2)
+			if len(parts) == 2 {
+				pins = append(pins, PinRef{
+					Component: parts[0],
+					Pin:       parts[1],
+				})
+			}
+		}
+
+		if len(pins) > 0 {
+			netList = append(netList, netPins{name: net.Name, pins: pins})
+		}
+	}
+
+	// Step 2: Build per-component pin connections
+	// compPins: componentID → pinNumber → PinConnection
+	compPins := make(map[string]map[string]*PinConnection)
+
+	for _, np := range netList {
+		for _, pin := range np.pins {
+			if _, ok := compPins[pin.Component]; !ok {
+				compPins[pin.Component] = make(map[string]*PinConnection)
+			}
+			if _, ok := compPins[pin.Component][pin.Pin]; !ok {
+				compPins[pin.Component][pin.Pin] = &PinConnection{
+					Pin:     pin,
+					NetName: np.name,
+				}
+			}
+			// Add all other pins in this net as connections
+			pc := compPins[pin.Component][pin.Pin]
+			for _, other := range np.pins {
+				if other.Component == pin.Component && other.Pin == pin.Pin {
+					continue
+				}
+				// Avoid duplicates
+				found := false
+				for _, existing := range pc.ConnectsTo {
+					if existing.Component == other.Component && existing.Pin == other.Pin {
+						found = true
+						break
+					}
+				}
+				if !found {
+					pc.ConnectsTo = append(pc.ConnectsTo, other)
+				}
+			}
+		}
+	}
+
+	// Step 3: Sort and build output
+	var compIDs []string
+	for id := range compPins {
+		compIDs = append(compIDs, id)
+	}
+	sort.Strings(compIDs)
+
+	dump := &NetlistDump{}
+	for _, compID := range compIDs {
+		pins := compPins[compID]
+		var pinNums []string
+		for p := range pins {
+			pinNums = append(pinNums, p)
+		}
+		// Sort pins numerically where possible
+		sort.Slice(pinNums, func(i, j int) bool {
+			// Try numeric comparison
+			var ni, nj int
+			if _, err := fmt.Sscanf(pinNums[i], "%d", &ni); err == nil {
+				if _, err := fmt.Sscanf(pinNums[j], "%d", &nj); err == nil {
+					return ni < nj
+				}
+			}
+			return pinNums[i] < pinNums[j]
+		})
+
+		cd := ComponentDump{ComponentID: compID}
+		for _, p := range pinNums {
+			cd.Pins = append(cd.Pins, *pins[p])
+		}
+		dump.Components = append(dump.Components, cd)
+	}
+
+	return dump
+}
+
+// FormatText formats the dump as readable text.
+func (d *NetlistDump) FormatText() string {
+	var sb strings.Builder
+	for _, comp := range d.Components {
+		sb.WriteString(fmt.Sprintf("=== %s ===\n", comp.ComponentID))
+		for _, pc := range comp.Pins {
+			if len(pc.ConnectsTo) == 0 {
+				sb.WriteString(fmt.Sprintf("  pin %-4s [%s] (no connections)\n", pc.Pin.Pin, pc.NetName))
+				continue
+			}
+			var others []string
+			for _, o := range pc.ConnectsTo {
+				others = append(others, o.String())
+			}
+			sb.WriteString(fmt.Sprintf("  pin %-4s [%s] -> %s\n", pc.Pin.Pin, pc.NetName, strings.Join(others, ", ")))
+		}
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// ExportText writes the dump to a text file.
+func (d *NetlistDump) ExportText(path string) error {
+	return os.WriteFile(path, []byte(d.FormatText()), 0644)
+}
+
 // Statistics returns statistics about the netlist.
 type Statistics struct {
 	ComponentCount int

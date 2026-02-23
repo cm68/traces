@@ -103,9 +103,13 @@ func (l *DetectedFeaturesLayer) AddTrace(t trace.ExtendedTrace) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	traceColor := UnassignedColor
+	if t.Source == trace.SourceDetected {
+		traceColor = DetectedTraceColor
+	}
 	ref := &FeatureRef{
 		Feature: TraceFeature{t},
-		Color:   UnassignedColor,
+		Color:   traceColor,
 	}
 	l.features[t.ID] = ref
 	l.traces = append(l.traces, t.ID)
@@ -675,7 +679,7 @@ func (l *DetectedFeaturesLayer) DeleteBus(id string) {
 	for _, featureID := range bus.Features {
 		if ref := l.features[featureID]; ref != nil {
 			ref.BusID = ""
-			ref.Color = UnassignedColor
+			ref.Color = defaultFeatureColor(ref.Feature)
 		}
 	}
 
@@ -746,7 +750,7 @@ func (l *DetectedFeaturesLayer) UnassignFromBus(featureIDs []string) {
 					bus.Features = removeString(bus.Features, id)
 				}
 				ref.BusID = ""
-				ref.Color = UnassignedColor
+				ref.Color = defaultFeatureColor(ref.Feature)
 			}
 		}
 	}
@@ -1402,4 +1406,13 @@ func rectsIntersect(a, b geometry.RectInt) bool {
 		a.X+a.Width > b.X &&
 		a.Y < b.Y+b.Height &&
 		a.Y+a.Height > b.Y
+}
+
+// defaultFeatureColor returns the default (unassigned) color for a feature,
+// using orange for auto-detected traces to visually distinguish them.
+func defaultFeatureColor(f Feature) color.RGBA {
+	if tf, ok := f.(TraceFeature); ok && tf.Source == trace.SourceDetected {
+		return DetectedTraceColor
+	}
+	return UnassignedColor
 }

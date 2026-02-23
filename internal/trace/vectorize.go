@@ -431,12 +431,12 @@ func MergeResults(results ...*DetectionResult) *DetectionResult {
 // SortTracesByLength sorts traces by path length (longest first).
 func SortTracesByLength(traces []ExtendedTrace) {
 	sort.Slice(traces, func(i, j int) bool {
-		return pathLength(traces[i].Points) > pathLength(traces[j].Points)
+		return PathLength(traces[i].Points) > PathLength(traces[j].Points)
 	})
 }
 
-// pathLength calculates the total length of a path.
-func pathLength(points []geometry.Point2D) float64 {
+// PathLength calculates the total length of a path.
+func PathLength(points []geometry.Point2D) float64 {
 	if len(points) < 2 {
 		return 0
 	}

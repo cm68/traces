@@ -381,6 +381,21 @@ func ImageToMat(img image.Image) (gocv.Mat, error) {
 	return mat, nil
 }
 
+// StampCircle paints a filled white circle onto a single-channel mask.
+func StampCircle(mask gocv.Mat, cx, cy, radius int) {
+	rows, cols := mask.Rows(), mask.Cols()
+	for dy := -radius; dy <= radius; dy++ {
+		for dx := -radius; dx <= radius; dx++ {
+			if dx*dx+dy*dy <= radius*radius {
+				x, y := cx+dx, cy+dy
+				if x >= 0 && x < cols && y >= 0 && y < rows {
+					mask.SetUCharAt(y, x, 255)
+				}
+			}
+		}
+	}
+}
+
 func max(a, b int) int {
 	if a > b {
 		return a

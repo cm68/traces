@@ -9,6 +9,7 @@ import (
 
 	"pcb-tracer/internal/app"
 	"pcb-tracer/internal/board"
+	"pcb-tracer/internal/netlist"
 	"pcb-tracer/internal/version"
 	"pcb-tracer/ui/canvas"
 	"pcb-tracer/ui/panels"
@@ -747,7 +748,56 @@ func (mw *MainWindow) onSaveProjectAs() {
 }
 
 func (mw *MainWindow) onExportNetlist() {
-	mw.updateStatus("Export netlist not yet implemented")
+	nets := mw.state.FeaturesLayer.GetNets()
+	if len(nets) == 0 {
+		mw.updateStatus("No nets to export")
+		return
+	}
+
+	// Resolver: via ID → component pin
+	viaResolver := func(viaID string) (componentID, pinNumber, signalName string) {
+		cv := mw.state.FeaturesLayer.GetConfirmedViaByID(viaID)
+		if cv == nil {
+			return "", "", ""
+		}
+		return cv.ComponentID, cv.PinNumber, cv.SignalName
+	}
+
+	// Resolver: connector ID → pin info
+	connResolver := func(connID string) (pinNumber int, signalName string) {
+		conn := mw.state.FeaturesLayer.GetConnectorByID(connID)
+		if conn == nil {
+			return 0, ""
+		}
+		return conn.PinNumber, conn.SignalName
+	}
+
+	dump := netlist.GenerateNetlistDump(nets, viaResolver, connResolver)
+
+	// Print to stdout
+	text := dump.FormatText()
+	fmt.Print(text)
+
+	// Also save to file via dialog
+	dlg, _ := gtk.FileChooserDialogNewWith2Buttons(
+		"Export Netlist", mw.win, gtk.FILE_CHOOSER_ACTION_SAVE,
+		"Cancel", gtk.RESPONSE_CANCEL,
+		"Save", gtk.RESPONSE_ACCEPT,
+	)
+	defer dlg.Destroy()
+	dlg.SetCurrentName("netlist.txt")
+	if mw.state.ProjectPath != "" {
+		dlg.SetCurrentFolder(filepath.Dir(mw.state.ProjectPath))
+	}
+
+	if dlg.Run() == gtk.RESPONSE_ACCEPT {
+		path := dlg.GetFilename()
+		if err := dump.ExportText(path); err != nil {
+			mw.updateStatus(fmt.Sprintf("Export error: %v", err))
+		} else {
+			mw.updateStatus(fmt.Sprintf("Netlist exported to %s (%d components)", path, len(dump.Components)))
+		}
+	}
 }
 
 func (mw *MainWindow) onZoomIn() {

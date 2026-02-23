@@ -198,8 +198,35 @@ func (lib *ComponentLibrary) Sort() {
 	})
 }
 
-// GetPreferencesPath returns the path to the component library preferences file.
+// getLibDirPath returns the path to component_library.json in the lib/ directory
+// next to the executable, or empty string if it can't be determined.
+func getLibDirPath() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(exe), "..", "lib", "component_library.json")
+}
+
+// GetPreferencesPath returns the path to the component library file.
+// Prefers lib/component_library.json next to the executable; falls back to
+// ~/.config/pcb-tracer/component_library.json.
 func GetPreferencesPath() (string, error) {
+	// Prefer lib/ directory next to the build output
+	if libPath := getLibDirPath(); libPath != "" {
+		// If the file already exists there, use it
+		if _, err := os.Stat(libPath); err == nil {
+			return libPath, nil
+		}
+		// If the lib/ directory exists, use it (for new saves)
+		if dir := filepath.Dir(libPath); dir != "" {
+			if info, err := os.Stat(dir); err == nil && info.IsDir() {
+				return libPath, nil
+			}
+		}
+	}
+
+	// Fall back to user config directory
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		home, err := os.UserHomeDir()
@@ -237,9 +264,23 @@ func (lib *ComponentLibrary) SaveToPreferences() error {
 	return nil
 }
 
-// LoadComponentLibrary loads the component library from the preferences file.
-// Returns an empty library if the file doesn't exist.
+// LoadComponentLibrary loads the component library.
+// Checks lib/ directory next to the executable first, then falls back to
+// the user config directory. Returns an empty library if no file exists.
 func LoadComponentLibrary() (*ComponentLibrary, error) {
+	// Try lib/ directory first
+	if libPath := getLibDirPath(); libPath != "" {
+		if data, err := os.ReadFile(libPath); err == nil {
+			var lib ComponentLibrary
+			if err := json.Unmarshal(data, &lib); err == nil {
+				lib.Sort()
+				fmt.Printf("Loaded %d parts from %s\n", len(lib.Parts), libPath)
+				return &lib, nil
+			}
+		}
+	}
+
+	// Fall back to preferences path
 	path, err := GetPreferencesPath()
 	if err != nil {
 		return NewComponentLibrary(), err

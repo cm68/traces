@@ -123,6 +123,9 @@ var DefaultColors = []color.RGBA{
 // UnassignedColor is used for features not assigned to a bus.
 var UnassignedColor = color.RGBA{255, 255, 255, 255} // White
 
+// DetectedTraceColor is used for auto-detected traces to distinguish them from manual ones.
+var DetectedTraceColor = color.RGBA{255, 165, 0, 255} // Orange
+
 // SelectionColor is used to highlight selected features.
 var SelectionColor = color.RGBA{255, 255, 0, 255} // Yellow with high visibility
 

@@ -1,0 +1,1785 @@
+{
+  "parts": [
+    {
+      "part_number": "7414",
+      "package": "DIP-14",
+      "pin_count": 14,
+      "pins": [
+        {
+          "number": 1,
+          "name": "1A",
+          "direction": "Input"
+        },
+        {
+          "number": 2,
+          "name": "1Y",
+          "direction": "Output"
+        },
+        {
+          "number": 3,
+          "name": "2A",
+          "direction": "Input"
+        },
+        {
+          "number": 4,
+          "name": "2Y",
+          "direction": "Output"
+        },
+        {
+          "number": 5,
+          "name": "3A",
+          "direction": "Input"
+        },
+        {
+          "number": 6,
+          "name": "3Y",
+          "direction": "Output"
+        },
+        {
+          "number": 7,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 8,
+          "name": "4Y",
+          "direction": "Output"
+        },
+        {
+          "number": 9,
+          "name": "4A",
+          "direction": "Input"
+        },
+        {
+          "number": 10,
+          "name": "5Y",
+          "direction": "Output"
+        },
+        {
+          "number": 11,
+          "name": "5A",
+          "direction": "Input"
+        },
+        {
+          "number": 12,
+          "name": "6Y",
+          "direction": "Output"
+        },
+        {
+          "number": 13,
+          "name": "6A",
+          "direction": "Input"
+        },
+        {
+          "number": 14,
+          "name": "VCC",
+          "direction": "Power"
+        }
+      ],
+      "aliases": [
+        "74LS14",
+        "74HC14",
+        "SN7414N"
+      ]
+    },
+    {
+      "part_number": "7438",
+      "package": "DIP-14",
+      "pin_count": 14,
+      "pins": [
+        {
+          "number": 1,
+          "name": "1A",
+          "direction": "Input"
+        },
+        {
+          "number": 2,
+          "name": "1B",
+          "direction": "Input"
+        },
+        {
+          "number": 3,
+          "name": "1Y",
+          "direction": "Output"
+        },
+        {
+          "number": 4,
+          "name": "2A",
+          "direction": "Input"
+        },
+        {
+          "number": 5,
+          "name": "2B",
+          "direction": "Input"
+        },
+        {
+          "number": 6,
+          "name": "2Y",
+          "direction": "Output"
+        },
+        {
+          "number": 7,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 8,
+          "name": "3Y",
+          "direction": "Output"
+        },
+        {
+          "number": 9,
+          "name": "3A",
+          "direction": "Input"
+        },
+        {
+          "number": 10,
+          "name": "3B",
+          "direction": "Input"
+        },
+        {
+          "number": 11,
+          "name": "4Y",
+          "direction": "Output"
+        },
+        {
+          "number": 12,
+          "name": "4A",
+          "direction": "Input"
+        },
+        {
+          "number": 13,
+          "name": "4B",
+          "direction": "Input"
+        },
+        {
+          "number": 14,
+          "name": "VCC",
+          "direction": "Power"
+        }
+      ]
+    },
+    {
+      "part_number": "74LS00",
+      "package": "DIP-14",
+      "pin_count": 14,
+      "pins": [
+        {
+          "number": 1,
+          "name": "1A",
+          "direction": "Input"
+        },
+        {
+          "number": 2,
+          "name": "1B",
+          "direction": "Input"
+        },
+        {
+          "number": 3,
+          "name": "1Y",
+          "direction": "Output"
+        },
+        {
+          "number": 4,
+          "name": "2A",
+          "direction": "Input"
+        },
+        {
+          "number": 5,
+          "name": "2B",
+          "direction": "Input"
+        },
+        {
+          "number": 6,
+          "name": "2Y",
+          "direction": "Output"
+        },
+        {
+          "number": 7,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 8,
+          "name": "3Y",
+          "direction": "Output"
+        },
+        {
+          "number": 9,
+          "name": "3A",
+          "direction": "Input"
+        },
+        {
+          "number": 10,
+          "name": "3B",
+          "direction": "Input"
+        },
+        {
+          "number": 11,
+          "name": "4Y",
+          "direction": "Output"
+        },
+        {
+          "number": 12,
+          "name": "4A",
+          "direction": "Input"
+        },
+        {
+          "number": 13,
+          "name": "4B",
+          "direction": "Input"
+        },
+        {
+          "number": 14,
+          "name": "VCC",
+          "direction": "Power"
+        }
+      ]
+    },
+    {
+      "part_number": "74LS02",
+      "package": "DIP-14",
+      "pin_count": 14,
+      "pins": [
+        {
+          "number": 1,
+          "name": "1Y",
+          "direction": "Output"
+        },
+        {
+          "number": 2,
+          "name": "1A",
+          "direction": "Input"
+        },
+        {
+          "number": 3,
+          "name": "1B",
+          "direction": "Input"
+        },
+        {
+          "number": 4,
+          "name": "2Y",
+          "direction": "Output"
+        },
+        {
+          "number": 5,
+          "name": "2A",
+          "direction": "Input"
+        },
+        {
+          "number": 6,
+          "name": "2B",
+          "direction": "Input"
+        },
+        {
+          "number": 7,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 8,
+          "name": "3A",
+          "direction": "Input"
+        },
+        {
+          "number": 9,
+          "name": "3B",
+          "direction": "Input"
+        },
+        {
+          "number": 10,
+          "name": "3Y",
+          "direction": "Output"
+        },
+        {
+          "number": 11,
+          "name": "4A",
+          "direction": "Input"
+        },
+        {
+          "number": 12,
+          "name": "4B",
+          "direction": "Input"
+        },
+        {
+          "number": 13,
+          "name": "4Y",
+          "direction": "Output"
+        },
+        {
+          "number": 14,
+          "name": "VCC",
+          "direction": "Power"
+        }
+      ]
+    },
+    {
+      "part_number": "74LS04",
+      "package": "DIP-14",
+      "pin_count": 14,
+      "pins": [
+        {
+          "number": 1,
+          "name": "1A",
+          "direction": "Input"
+        },
+        {
+          "number": 2,
+          "name": "1Y",
+          "direction": "Output"
+        },
+        {
+          "number": 3,
+          "name": "2A",
+          "direction": "Input"
+        },
+        {
+          "number": 4,
+          "name": "2Y",
+          "direction": "Output"
+        },
+        {
+          "number": 5,
+          "name": "3A",
+          "direction": "Input"
+        },
+        {
+          "number": 6,
+          "name": "3Y",
+          "direction": "Output"
+        },
+        {
+          "number": 7,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 8,
+          "name": "4Y",
+          "direction": "Output"
+        },
+        {
+          "number": 9,
+          "name": "4A",
+          "direction": "Input"
+        },
+        {
+          "number": 10,
+          "name": "5Y",
+          "direction": "Output"
+        },
+        {
+          "number": 11,
+          "name": "5A",
+          "direction": "Input"
+        },
+        {
+          "number": 12,
+          "name": "6Y",
+          "direction": "Output"
+        },
+        {
+          "number": 13,
+          "name": "6A",
+          "direction": "Input"
+        },
+        {
+          "number": 14,
+          "name": "VCC",
+          "direction": "Power"
+        }
+      ]
+    },
+    {
+      "part_number": "74LS123",
+      "package": "DIP-16",
+      "pin_count": 16,
+      "pins": [
+        {
+          "number": 1,
+          "name": "1A",
+          "direction": "Input"
+        },
+        {
+          "number": 2,
+          "name": "1B",
+          "direction": "Input"
+        },
+        {
+          "number": 3,
+          "name": "1CLR",
+          "direction": "Input"
+        },
+        {
+          "number": 4,
+          "name": "1Qn",
+          "direction": "Output"
+        },
+        {
+          "number": 5,
+          "name": "2Q",
+          "direction": "Output"
+        },
+        {
+          "number": 6,
+          "name": "2Cext",
+          "direction": "Input"
+        },
+        {
+          "number": 7,
+          "name": "2RCext",
+          "direction": "Input"
+        },
+        {
+          "number": 8,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 9,
+          "name": "2A",
+          "direction": "Input"
+        },
+        {
+          "number": 10,
+          "name": "2B",
+          "direction": "Input"
+        },
+        {
+          "number": 11,
+          "name": "2CLR",
+          "direction": "Input"
+        },
+        {
+          "number": 12,
+          "name": "2Qn",
+          "direction": "Output"
+        },
+        {
+          "number": 13,
+          "name": "1Q",
+          "direction": "Output"
+        },
+        {
+          "number": 14,
+          "name": "1Cext",
+          "direction": "Input"
+        },
+        {
+          "number": 15,
+          "name": "1RCext",
+          "direction": "Input"
+        },
+        {
+          "number": 16,
+          "name": "VCC",
+          "direction": "Power"
+        }
+      ],
+      "aliases": [
+        "54LS123",
+        "74123",
+        "SN74LS123N"
+      ]
+    },
+    {
+      "part_number": "74LS138",
+      "package": "DIP-16",
+      "pin_count": 16,
+      "pins": [
+        {
+          "number": 1,
+          "name": "A",
+          "direction": "Input"
+        },
+        {
+          "number": 2,
+          "name": "B",
+          "direction": "Input"
+        },
+        {
+          "number": 3,
+          "name": "C",
+          "direction": "Input"
+        },
+        {
+          "number": 4,
+          "name": "G2A",
+          "direction": "Input"
+        },
+        {
+          "number": 5,
+          "name": "G2B",
+          "direction": "Input"
+        },
+        {
+          "number": 6,
+          "name": "G1",
+          "direction": "Input"
+        },
+        {
+          "number": 7,
+          "name": "Y7",
+          "direction": "Output"
+        },
+        {
+          "number": 8,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 9,
+          "name": "Y6",
+          "direction": "Output"
+        },
+        {
+          "number": 10,
+          "name": "Y5",
+          "direction": "Output"
+        },
+        {
+          "number": 11,
+          "name": "Y4",
+          "direction": "Output"
+        },
+        {
+          "number": 12,
+          "name": "Y3",
+          "direction": "Output"
+        },
+        {
+          "number": 13,
+          "name": "Y2",
+          "direction": "Output"
+        },
+        {
+          "number": 14,
+          "name": "Y1",
+          "direction": "Output"
+        },
+        {
+          "number": 15,
+          "name": "Y0",
+          "direction": "Output"
+        },
+        {
+          "number": 16,
+          "name": "VCC",
+          "direction": "Power"
+        }
+      ]
+    },
+    {
+      "part_number": "74LS139",
+      "package": "DIP-16",
+      "pin_count": 16,
+      "pins": [
+        {
+          "number": 1,
+          "name": "1E",
+          "direction": "Input"
+        },
+        {
+          "number": 2,
+          "name": "1A0",
+          "direction": "Input"
+        },
+        {
+          "number": 3,
+          "name": "1A1",
+          "direction": "Input"
+        },
+        {
+          "number": 4,
+          "name": "1Y0",
+          "direction": "Output"
+        },
+        {
+          "number": 5,
+          "name": "1Y1",
+          "direction": "Output"
+        },
+        {
+          "number": 6,
+          "name": "1Y2",
+          "direction": "Output"
+        },
+        {
+          "number": 7,
+          "name": "1Y3",
+          "direction": "Output"
+        },
+        {
+          "number": 8,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 9,
+          "name": "2Y3",
+          "direction": "Output"
+        },
+        {
+          "number": 10,
+          "name": "2Y2",
+          "direction": "Output"
+        },
+        {
+          "number": 11,
+          "name": "2Y1",
+          "direction": "Output"
+        },
+        {
+          "number": 12,
+          "name": "2Y0",
+          "direction": "Output"
+        },
+        {
+          "number": 13,
+          "name": "2A1",
+          "direction": "Input"
+        },
+        {
+          "number": 14,
+          "name": "2A0",
+          "direction": "Input"
+        },
+        {
+          "number": 15,
+          "name": "2E",
+          "direction": "Input"
+        },
+        {
+          "number": 16,
+          "name": "VCC",
+          "direction": "Power"
+        }
+      ]
+    },
+    {
+      "part_number": "74LS153",
+      "package": "DIP-16",
+      "pin_count": 16,
+      "pins": [
+        {
+          "number": 1,
+          "name": "1Ea",
+          "direction": "Input"
+        },
+        {
+          "number": 2,
+          "name": "S1",
+          "direction": "Input"
+        },
+        {
+          "number": 3,
+          "name": "1I3",
+          "direction": "Input"
+        },
+        {
+          "number": 4,
+          "name": "1I2",
+          "direction": "Input"
+        },
+        {
+          "number": 5,
+          "name": "1I1",
+          "direction": "Input"
+        },
+        {
+          "number": 6,
+          "name": "1I0",
+          "direction": "Input"
+        },
+        {
+          "number": 7,
+          "name": "1Za",
+          "direction": "Output"
+        },
+        {
+          "number": 8,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 9,
+          "name": "2Zb",
+          "direction": "Output"
+        },
+        {
+          "number": 10,
+          "name": "2I0",
+          "direction": "Input"
+        },
+        {
+          "number": 11,
+          "name": "2I1",
+          "direction": "Input"
+        },
+        {
+          "number": 12,
+          "name": "2I2",
+          "direction": "Input"
+        },
+        {
+          "number": 13,
+          "name": "2I3",
+          "direction": "Input"
+        },
+        {
+          "number": 14,
+          "name": "S0",
+          "direction": "Input"
+        },
+        {
+          "number": 15,
+          "name": "2Eb",
+          "direction": "Input"
+        },
+        {
+          "number": 16,
+          "name": "VCC",
+          "direction": "Power"
+        }
+      ]
+    },
+    {
+      "part_number": "74LS195",
+      "package": "DIP-16",
+      "pin_count": 16,
+      "pins": [
+        {
+          "number": 1,
+          "name": "MR",
+          "direction": "Input"
+        },
+        {
+          "number": 2,
+          "name": "J",
+          "direction": "Input"
+        },
+        {
+          "number": 3,
+          "name": "Kn",
+          "direction": "Input"
+        },
+        {
+          "number": 4,
+          "name": "P0",
+          "direction": "Input"
+        },
+        {
+          "number": 5,
+          "name": "P1",
+          "direction": "Input"
+        },
+        {
+          "number": 6,
+          "name": "P2",
+          "direction": "Input"
+        },
+        {
+          "number": 7,
+          "name": "P3",
+          "direction": "Input"
+        },
+        {
+          "number": 8,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 9,
+          "name": "PE",
+          "direction": "Input"
+        },
+        {
+          "number": 10,
+          "name": "CP",
+          "direction": "Input"
+        },
+        {
+          "number": 11,
+          "name": "Q3n",
+          "direction": "Output"
+        },
+        {
+          "number": 12,
+          "name": "Q3",
+          "direction": "Output"
+        },
+        {
+          "number": 13,
+          "name": "Q2",
+          "direction": "Output"
+        },
+        {
+          "number": 14,
+          "name": "Q1",
+          "direction": "Output"
+        },
+        {
+          "number": 15,
+          "name": "Q0",
+          "direction": "Output"
+        },
+        {
+          "number": 16,
+          "name": "VCC",
+          "direction": "Power"
+        }
+      ]
+    },
+    {
+      "part_number": "74LS197",
+      "package": "DIP-14",
+      "pin_count": 14,
+      "pins": [
+        {
+          "number": 1,
+          "name": "MR",
+          "direction": "Input"
+        },
+        {
+          "number": 2,
+          "name": "Q0",
+          "direction": "Output"
+        },
+        {
+          "number": 3,
+          "name": "PL",
+          "direction": "Input"
+        },
+        {
+          "number": 4,
+          "name": "CP0",
+          "direction": "Input"
+        },
+        {
+          "number": 5,
+          "name": "P1",
+          "direction": "Input"
+        },
+        {
+          "number": 6,
+          "name": "P2",
+          "direction": "Input"
+        },
+        {
+          "number": 7,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 8,
+          "name": "Q3",
+          "direction": "Output"
+        },
+        {
+          "number": 9,
+          "name": "P3",
+          "direction": "Input"
+        },
+        {
+          "number": 10,
+          "name": "CP1",
+          "direction": "Input"
+        },
+        {
+          "number": 11,
+          "name": "P0",
+          "direction": "Input"
+        },
+        {
+          "number": 12,
+          "name": "Q1",
+          "direction": "Output"
+        },
+        {
+          "number": 13,
+          "name": "Q2",
+          "direction": "Output"
+        },
+        {
+          "number": 14,
+          "name": "VCC",
+          "direction": "Power"
+        }
+      ]
+    },
+    {
+      "part_number": "74LS240",
+      "package": "DIP-20",
+      "pin_count": 20,
+      "pins": [
+        {
+          "number": 1,
+          "name": "1OE",
+          "direction": "Input"
+        },
+        {
+          "number": 2,
+          "name": "1A1",
+          "direction": "Input"
+        },
+        {
+          "number": 3,
+          "name": "1Y1",
+          "direction": "Output"
+        },
+        {
+          "number": 4,
+          "name": "1A2",
+          "direction": "Input"
+        },
+        {
+          "number": 5,
+          "name": "1Y2",
+          "direction": "Output"
+        },
+        {
+          "number": 6,
+          "name": "1A3",
+          "direction": "Input"
+        },
+        {
+          "number": 7,
+          "name": "1Y3",
+          "direction": "Output"
+        },
+        {
+          "number": 8,
+          "name": "1A4",
+          "direction": "Input"
+        },
+        {
+          "number": 9,
+          "name": "1Y4",
+          "direction": "Output"
+        },
+        {
+          "number": 10,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 11,
+          "name": "2A1",
+          "direction": "Input"
+        },
+        {
+          "number": 12,
+          "name": "2Y1",
+          "direction": "Output"
+        },
+        {
+          "number": 13,
+          "name": "2A2",
+          "direction": "Input"
+        },
+        {
+          "number": 14,
+          "name": "2Y2",
+          "direction": "Output"
+        },
+        {
+          "number": 15,
+          "name": "2A3",
+          "direction": "Input"
+        },
+        {
+          "number": 16,
+          "name": "2Y3",
+          "direction": "Output"
+        },
+        {
+          "number": 17,
+          "name": "2A4",
+          "direction": "Input"
+        },
+        {
+          "number": 18,
+          "name": "2Y4",
+          "direction": "Output"
+        },
+        {
+          "number": 19,
+          "name": "2OE",
+          "direction": "Input"
+        },
+        {
+          "number": 20,
+          "name": "VCC",
+          "direction": "Power"
+        }
+      ]
+    },
+    {
+      "part_number": "74LS244",
+      "package": "DIP-20",
+      "pin_count": 20,
+      "pins": [
+        {
+          "number": 1,
+          "name": "1OE",
+          "direction": "Input"
+        },
+        {
+          "number": 2,
+          "name": "1A1",
+          "direction": "Input"
+        },
+        {
+          "number": 3,
+          "name": "2Y4",
+          "direction": "Output"
+        },
+        {
+          "number": 4,
+          "name": "1A2",
+          "direction": "Input"
+        },
+        {
+          "number": 5,
+          "name": "2Y3",
+          "direction": "Output"
+        },
+        {
+          "number": 6,
+          "name": "1A3",
+          "direction": "Input"
+        },
+        {
+          "number": 7,
+          "name": "2Y2",
+          "direction": "Output"
+        },
+        {
+          "number": 8,
+          "name": "1A4",
+          "direction": "Input"
+        },
+        {
+          "number": 9,
+          "name": "2Y1",
+          "direction": "Output"
+        },
+        {
+          "number": 10,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 11,
+          "name": "2A1",
+          "direction": "Input"
+        },
+        {
+          "number": 12,
+          "name": "1Y4",
+          "direction": "Output"
+        },
+        {
+          "number": 13,
+          "name": "2A2",
+          "direction": "Input"
+        },
+        {
+          "number": 14,
+          "name": "1Y3",
+          "direction": "Output"
+        },
+        {
+          "number": 15,
+          "name": "2A3",
+          "direction": "Input"
+        },
+        {
+          "number": 16,
+          "name": "1Y2",
+          "direction": "Output"
+        },
+        {
+          "number": 17,
+          "name": "2A4",
+          "direction": "Input"
+        },
+        {
+          "number": 18,
+          "name": "1Y1",
+          "direction": "Output"
+        },
+        {
+          "number": 19,
+          "name": "2OE",
+          "direction": "Input"
+        },
+        {
+          "number": 20,
+          "name": "VCC",
+          "direction": "Power"
+        }
+      ]
+    },
+    {
+      "part_number": "74LS245",
+      "package": "DIP-20",
+      "pin_count": 20,
+      "pins": [
+        {
+          "number": 1,
+          "name": "DIR",
+          "direction": "Input"
+        },
+        {
+          "number": 2,
+          "name": "A1",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 3,
+          "name": "A2",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 4,
+          "name": "A3",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 5,
+          "name": "A4",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 6,
+          "name": "A5",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 7,
+          "name": "A6",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 8,
+          "name": "A7",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 9,
+          "name": "A8",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 10,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 11,
+          "name": "B8",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 12,
+          "name": "B7",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 13,
+          "name": "B6",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 14,
+          "name": "B5",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 15,
+          "name": "B4",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 16,
+          "name": "B3",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 17,
+          "name": "B2",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 18,
+          "name": "B1",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 19,
+          "name": "OE",
+          "direction": "Input"
+        },
+        {
+          "number": 20,
+          "name": "VCC",
+          "direction": "Power"
+        }
+      ]
+    },
+    {
+      "part_number": "74LS273",
+      "package": "DIP-20",
+      "pin_count": 20,
+      "pins": [
+        {
+          "number": 1,
+          "name": "CLR",
+          "direction": "Input"
+        },
+        {
+          "number": 2,
+          "name": "1Q",
+          "direction": "Output"
+        },
+        {
+          "number": 3,
+          "name": "1D",
+          "direction": "Input"
+        },
+        {
+          "number": 4,
+          "name": "2D",
+          "direction": "Input"
+        },
+        {
+          "number": 5,
+          "name": "2Q",
+          "direction": "Output"
+        },
+        {
+          "number": 6,
+          "name": "3D",
+          "direction": "Input"
+        },
+        {
+          "number": 7,
+          "name": "3Q",
+          "direction": "Output"
+        },
+        {
+          "number": 8,
+          "name": "4D",
+          "direction": "Input"
+        },
+        {
+          "number": 9,
+          "name": "4Q",
+          "direction": "Output"
+        },
+        {
+          "number": 10,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 11,
+          "name": "CLK",
+          "direction": "Input"
+        },
+        {
+          "number": 12,
+          "name": "5Q",
+          "direction": "Output"
+        },
+        {
+          "number": 13,
+          "name": "5D",
+          "direction": "Input"
+        },
+        {
+          "number": 14,
+          "name": "6Q",
+          "direction": "Output"
+        },
+        {
+          "number": 15,
+          "name": "6D",
+          "direction": "Input"
+        },
+        {
+          "number": 16,
+          "name": "7D",
+          "direction": "Input"
+        },
+        {
+          "number": 17,
+          "name": "7Q",
+          "direction": "Output"
+        },
+        {
+          "number": 18,
+          "name": "8D",
+          "direction": "Input"
+        },
+        {
+          "number": 19,
+          "name": "8Q",
+          "direction": "Output"
+        },
+        {
+          "number": 20,
+          "name": "VCC",
+          "direction": "Power"
+        }
+      ]
+    },
+    {
+      "part_number": "74LS373",
+      "package": "DIP-20",
+      "pin_count": 20,
+      "pins": [
+        {
+          "number": 1,
+          "name": "OE",
+          "direction": "Input"
+        },
+        {
+          "number": 2,
+          "name": "1Q",
+          "direction": "Output"
+        },
+        {
+          "number": 3,
+          "name": "1D",
+          "direction": "Input"
+        },
+        {
+          "number": 4,
+          "name": "2D",
+          "direction": "Input"
+        },
+        {
+          "number": 5,
+          "name": "2Q",
+          "direction": "Output"
+        },
+        {
+          "number": 6,
+          "name": "3D",
+          "direction": "Input"
+        },
+        {
+          "number": 7,
+          "name": "3Q",
+          "direction": "Output"
+        },
+        {
+          "number": 8,
+          "name": "4D",
+          "direction": "Input"
+        },
+        {
+          "number": 9,
+          "name": "4Q",
+          "direction": "Output"
+        },
+        {
+          "number": 10,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 11,
+          "name": "LE",
+          "direction": "Input"
+        },
+        {
+          "number": 12,
+          "name": "5Q",
+          "direction": "Output"
+        },
+        {
+          "number": 13,
+          "name": "5D",
+          "direction": "Input"
+        },
+        {
+          "number": 14,
+          "name": "6Q",
+          "direction": "Output"
+        },
+        {
+          "number": 15,
+          "name": "6D",
+          "direction": "Input"
+        },
+        {
+          "number": 16,
+          "name": "7D",
+          "direction": "Input"
+        },
+        {
+          "number": 17,
+          "name": "7Q",
+          "direction": "Output"
+        },
+        {
+          "number": 18,
+          "name": "8D",
+          "direction": "Input"
+        },
+        {
+          "number": 19,
+          "name": "8Q",
+          "direction": "Output"
+        },
+        {
+          "number": 20,
+          "name": "VCC",
+          "direction": "Power"
+        }
+      ],
+      "aliases": [
+        "74LS373N",
+        "SN74LS373N"
+      ]
+    },
+    {
+      "part_number": "74LS74",
+      "package": "DIP-14",
+      "pin_count": 14,
+      "pins": [
+        {
+          "number": 1,
+          "name": "1CLR",
+          "direction": "Input"
+        },
+        {
+          "number": 2,
+          "name": "1D",
+          "direction": "Input"
+        },
+        {
+          "number": 3,
+          "name": "1CLK",
+          "direction": "Input"
+        },
+        {
+          "number": 4,
+          "name": "1PRE",
+          "direction": "Input"
+        },
+        {
+          "number": 5,
+          "name": "1Q",
+          "direction": "Output"
+        },
+        {
+          "number": 6,
+          "name": "1Qn",
+          "direction": "Output"
+        },
+        {
+          "number": 7,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 8,
+          "name": "2Qn",
+          "direction": "Output"
+        },
+        {
+          "number": 9,
+          "name": "2Q",
+          "direction": "Output"
+        },
+        {
+          "number": 10,
+          "name": "2PRE",
+          "direction": "Input"
+        },
+        {
+          "number": 11,
+          "name": "2CLK",
+          "direction": "Input"
+        },
+        {
+          "number": 12,
+          "name": "2D",
+          "direction": "Input"
+        },
+        {
+          "number": 13,
+          "name": "2CLR",
+          "direction": "Input"
+        },
+        {
+          "number": 14,
+          "name": "VCC",
+          "direction": "Power"
+        }
+      ]
+    },
+    {
+      "part_number": "FD1793",
+      "package": "DIP-40",
+      "pin_count": 40,
+      "pins": [
+        {
+          "number": 1,
+          "name": "NC",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 2,
+          "name": "WE",
+          "direction": "Input"
+        },
+        {
+          "number": 3,
+          "name": "CS",
+          "direction": "Input"
+        },
+        {
+          "number": 4,
+          "name": "RE",
+          "direction": "Input"
+        },
+        {
+          "number": 5,
+          "name": "A0",
+          "direction": "Input"
+        },
+        {
+          "number": 6,
+          "name": "A1",
+          "direction": "Input"
+        },
+        {
+          "number": 7,
+          "name": "DAL0",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 8,
+          "name": "DAL1",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 9,
+          "name": "DAL2",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 10,
+          "name": "DAL3",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 11,
+          "name": "DAL4",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 12,
+          "name": "DAL5",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 13,
+          "name": "DAL6",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 14,
+          "name": "DAL7",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 15,
+          "name": "STEP",
+          "direction": "Output"
+        },
+        {
+          "number": 16,
+          "name": "DIRC",
+          "direction": "Output"
+        },
+        {
+          "number": 17,
+          "name": "EARLY",
+          "direction": "Output"
+        },
+        {
+          "number": 18,
+          "name": "LATE",
+          "direction": "Output"
+        },
+        {
+          "number": 19,
+          "name": "MR",
+          "direction": "Input"
+        },
+        {
+          "number": 20,
+          "name": "VSS",
+          "direction": "Ground"
+        },
+        {
+          "number": 21,
+          "name": "VCC",
+          "direction": "Power"
+        },
+        {
+          "number": 22,
+          "name": "TEST",
+          "direction": "Input"
+        },
+        {
+          "number": 23,
+          "name": "HLT",
+          "direction": "Input"
+        },
+        {
+          "number": 24,
+          "name": "CLK",
+          "direction": "Input"
+        },
+        {
+          "number": 25,
+          "name": "SSO",
+          "direction": "Output"
+        },
+        {
+          "number": 26,
+          "name": "RCLK",
+          "direction": "Input"
+        },
+        {
+          "number": 27,
+          "name": "RAWREAD",
+          "direction": "Input"
+        },
+        {
+          "number": 28,
+          "name": "HLD",
+          "direction": "Output"
+        },
+        {
+          "number": 29,
+          "name": "TG43",
+          "direction": "Output"
+        },
+        {
+          "number": 30,
+          "name": "WG",
+          "direction": "Output"
+        },
+        {
+          "number": 31,
+          "name": "WD",
+          "direction": "Output"
+        },
+        {
+          "number": 32,
+          "name": "READY",
+          "direction": "Input"
+        },
+        {
+          "number": 33,
+          "name": "WF/VFOE",
+          "direction": "Input"
+        },
+        {
+          "number": 34,
+          "name": "TR00",
+          "direction": "Input"
+        },
+        {
+          "number": 35,
+          "name": "IP",
+          "direction": "Input"
+        },
+        {
+          "number": 36,
+          "name": "WPRT",
+          "direction": "Input"
+        },
+        {
+          "number": 37,
+          "name": "DDEN",
+          "direction": "Input"
+        },
+        {
+          "number": 38,
+          "name": "DRQ",
+          "direction": "Output"
+        },
+        {
+          "number": 39,
+          "name": "INTRQ",
+          "direction": "Output"
+        },
+        {
+          "number": 40,
+          "name": "VDD",
+          "direction": "Power"
+        }
+      ],
+      "aliases": [
+        "FD1793B-02",
+        "WD1793"
+      ]
+    },
+    {
+      "part_number": "FDC9216B",
+      "package": "DIP-8",
+      "pin_count": 8,
+      "pins": [
+        {
+          "number": 1,
+          "name": "VDD",
+          "direction": "Power"
+        },
+        {
+          "number": 2,
+          "name": "PUMP",
+          "direction": "Output"
+        },
+        {
+          "number": 3,
+          "name": "VCO",
+          "direction": "Input"
+        },
+        {
+          "number": 4,
+          "name": "VSS",
+          "direction": "Ground"
+        },
+        {
+          "number": 5,
+          "name": "RDATA",
+          "direction": "Input"
+        },
+        {
+          "number": 6,
+          "name": "DWIN",
+          "direction": "Output"
+        },
+        {
+          "number": 7,
+          "name": "RCLK",
+          "direction": "Output"
+        },
+        {
+          "number": 8,
+          "name": "SEPDATA",
+          "direction": "Output"
+        }
+      ]
+    }
+  ]
+}

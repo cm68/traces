@@ -30,6 +30,7 @@ import (
 	"github.com/gotk3/gotk3/gdk"
 	"github.com/gotk3/gotk3/glib"
 	"github.com/gotk3/gotk3/gtk"
+	"gocv.io/x/gocv"
 )
 
 // Overlay names for persistent board features, split by visibility.
@@ -104,10 +105,12 @@ type TracesPanel struct {
 	// Preferences
 	prefs          *prefs.Prefs
 	showViaNumbers bool
+	showPinNames   bool
 }
 
 // NewTracesPanel creates a new traces panel.
 const prefKeyShowViaNumbers = "showViaNumbers"
+const prefKeyShowPinNames = "showPinNames"
 
 func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, p *prefs.Prefs) *TracesPanel {
 	tp := &TracesPanel{
@@ -117,6 +120,7 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, 
 		defaultViaRadius: 15,
 		prefs:            p,
 		showViaNumbers:   p.Bool(prefKeyShowViaNumbers, true),
+		showPinNames:     p.Bool(prefKeyShowPinNames, true),
 	}
 
 	tp.box, _ = gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 4)
@@ -181,6 +185,17 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, 
 	})
 	viaBox.PackStart(showViaNumCheck, false, false, 0)
 
+	showPinNameCheck, _ := gtk.CheckButtonNewWithLabel("Show pin names")
+	showPinNameCheck.SetActive(tp.showPinNames)
+	showPinNameCheck.Connect("toggled", func() {
+		tp.showPinNames = showPinNameCheck.GetActive()
+		tp.prefs.SetBool(prefKeyShowPinNames, tp.showPinNames)
+		tp.prefs.Save()
+		tp.rebuildFeaturesOverlay()
+		tp.canvas.Refresh()
+	})
+	viaBox.PackStart(showPinNameCheck, false, false, 0)
+
 	tp.addConnectorsBtn, _ = gtk.ButtonNewWithLabel("Add Connectors")
 	tp.addConnectorsBtn.Connect("clicked", func() { tp.onAddConnectors() })
 	viaBox.PackStart(tp.addConnectorsBtn, false, false, 0)
@@ -229,6 +244,16 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, 
 	traceBox.SetMarginBottom(4)
 
 	// (Clear Traces button removed — use Escape to cancel in-progress trace)
+
+	// Train + Auto-Trace buttons
+	traceAutoRow, _ := gtk.BoxNew(gtk.ORIENTATION_HORIZONTAL, 4)
+	trainTraceBtn, _ := gtk.ButtonNewWithLabel("Train Trace Detection")
+	trainTraceBtn.Connect("clicked", func() { tp.onTrainTraceDetection() })
+	autoTraceLayerBtn, _ := gtk.ButtonNewWithLabel("Auto-Trace Layer")
+	autoTraceLayerBtn.Connect("clicked", func() { tp.onAutoTraceLayer() })
+	traceAutoRow.PackStart(trainTraceBtn, false, false, 0)
+	traceAutoRow.PackStart(autoTraceLayerBtn, false, false, 0)
+	traceBox.PackStart(traceAutoRow, false, false, 0)
 
 	tp.traceStatusLabel, _ = gtk.LabelNew("Click via/connector to start trace")
 	tp.traceStatusLabel.SetLineWrap(true)
@@ -658,9 +683,12 @@ func (tp *TracesPanel) rebuildFeaturesOverlay() {
 
 	// 1. Connectors: split by side
 	for _, c := range tp.state.FeaturesLayer.GetConnectors() {
-		label := c.SignalName
-		if label == "" {
-			label = fmt.Sprintf("P%d", c.PinNumber)
+		label := ""
+		if tp.showPinNames {
+			label = c.SignalName
+			if label == "" {
+				label = fmt.Sprintf("P%d", c.PinNumber)
+			}
 		}
 		var col *color.RGBA
 		var target *canvas.Overlay
@@ -1075,12 +1103,13 @@ func (tp *TracesPanel) updateSelectedConnectorOverlay() {
 
 // onRightClickVia handles right-click on the canvas.
 func (tp *TracesPanel) onRightClickVia(x, y float64) {
-	// Cancel active operations on right-click
+	// Cancel vertex drag on right-click
 	if tp.draggingVertex {
 		tp.cancelVertexDrag()
 	}
+	// During polyline drawing, right-click is ignored (use Escape to cancel)
 	if tp.traceMode {
-		tp.cancelTrace()
+		return
 	}
 
 	cv := tp.state.FeaturesLayer.HitTestConfirmedVia(x, y)
@@ -1458,6 +1487,13 @@ func (tp *TracesPanel) deleteNearestVia(x, y float64, side pcbimage.Side) {
 // deleteConfirmedVia removes a confirmed via, its connected traces, underlying vias, and cleans up nets.
 func (tp *TracesPanel) deleteConfirmedVia(cv *via.ConfirmedVia) {
 	fmt.Printf("Delete confirmed via %s (front=%s, back=%s)\n", cv.ID, cv.FrontViaID, cv.BackViaID)
+
+	// Clear selection highlight if this is the selected via
+	if tp.selectedVia != nil && tp.selectedVia.ID == cv.ID {
+		tp.selectedVia = nil
+		tp.canvas.ClearOverlay("selected_via")
+	}
+
 	features := tp.state.FeaturesLayer
 
 	// Cascade: remove connected traces and clean up their net membership
@@ -1494,6 +1530,12 @@ func (tp *TracesPanel) deleteConfirmedVia(cv *via.ConfirmedVia) {
 
 // deleteConfirmedViaSide removes one side of a confirmed via and cleans up nets.
 func (tp *TracesPanel) deleteConfirmedViaSide(cv *via.ConfirmedVia, side pcbimage.Side) {
+	// Clear selection highlight if this is the selected via
+	if tp.selectedVia != nil && tp.selectedVia.ID == cv.ID {
+		tp.selectedVia = nil
+		tp.canvas.ClearOverlay("selected_via")
+	}
+
 	features := tp.state.FeaturesLayer
 	var removeID string
 	if side == pcbimage.SideFront {
@@ -3278,19 +3320,24 @@ func (tp *TracesPanel) autoTraceToAdjacentVia(cv *via.ConfirmedVia, direction in
 		}
 		defer mat.Close()
 
-		// Detect copper
-		copperMask := pcbtrace.AutoDetectCopper(mat, 4)
-		defer copperMask.Close()
-
-		// Cleanup
-		cleaned := pcbtrace.CleanupMask(copperMask, 2)
+		// Try trained classifier first, fall back to K-means
+		var cleaned gocv.Mat
+		if tp.state.ProjectPath != "" {
+			projDir := filepath.Dir(tp.state.ProjectPath)
+			clPath := filepath.Join(projDir, pcbtrace.TraceClassifierFilename(traceLayer))
+			if cl, err := pcbtrace.LoadTraceClassifier(clPath); err == nil && cl.Trained {
+				cleaned = pcbtrace.DetectTracesWithClassifier(mat, cl, 0.5)
+			}
+		}
+		if cleaned.Empty() {
+			// Fall back to K-means
+			copperMask := pcbtrace.AutoDetectCopper(mat, 4)
+			defer copperMask.Close()
+			cleaned = pcbtrace.CleanupMask(copperMask, 2)
+		}
 		defer cleaned.Close()
 
-		// Skeletonize
-		skeleton := pcbtrace.Skeletonize(cleaned)
-		defer skeleton.Close()
-
-		// Convert via centers to ROI-local coordinates
+		// Stamp circles at via centers so the mask reaches bare-copper pads
 		localStart := geometry.Point2D{
 			X: startCenter.X - float64(roiX),
 			Y: startCenter.Y - float64(roiY),
@@ -3299,6 +3346,21 @@ func (tp *TracesPanel) autoTraceToAdjacentVia(cv *via.ConfirmedVia, direction in
 			X: endCenter.X - float64(roiX),
 			Y: endCenter.Y - float64(roiY),
 		}
+		padRadius := int(0.020 * tp.state.DPI / 2)
+		if padRadius < 5 {
+			padRadius = 5
+		}
+		pcbtrace.StampCircle(cleaned, int(localStart.X), int(localStart.Y), padRadius)
+		pcbtrace.StampCircle(cleaned, int(localEnd.X), int(localEnd.Y), padRadius)
+
+		// Bridge narrow mask gaps
+		bridgeKernel := gocv.GetStructuringElement(gocv.MorphEllipse, image.Pt(7, 7))
+		gocv.MorphologyEx(cleaned, &cleaned, gocv.MorphClose, bridgeKernel)
+		bridgeKernel.Close()
+
+		// Skeletonize
+		skeleton := pcbtrace.Skeletonize(cleaned)
+		defer skeleton.Close()
 
 		// Search radius for nearest skeleton pixel
 		searchRadius := int(margin / 2)
@@ -3456,4 +3518,327 @@ func (tp *TracesPanel) showNetInfoForElement(elementID, displayLabel string) {
 		info = fmt.Sprintf("%s (%d vias, %d connectors)", parts[0], len(net.ViaIDs), len(net.ConnectorIDs))
 	}
 	tp.traceStatusLabel.SetText(info)
+}
+
+// onTrainTraceDetection collects color samples from existing manual traces and trains
+// a trace classifier for the selected layer.
+func (tp *TracesPanel) onTrainTraceDetection() {
+	layer := tp.selectedTraceLayer()
+
+	// Get board image for selected layer
+	var boardImg image.Image
+	if layer == pcbtrace.LayerFront {
+		if tp.state.FrontImage == nil || tp.state.FrontImage.Image == nil {
+			tp.traceStatusLabel.SetText("No front image loaded")
+			return
+		}
+		boardImg = tp.state.FrontImage.Image
+	} else {
+		if tp.state.BackImage == nil || tp.state.BackImage.Image == nil {
+			tp.traceStatusLabel.SetText("No back image loaded")
+			return
+		}
+		boardImg = tp.state.BackImage.Image
+	}
+
+	// Collect manual traces on this layer
+	allTraces := tp.state.FeaturesLayer.GetAllTraces()
+	var manualCount int
+	for _, t := range allTraces {
+		if t.Layer == layer && t.Source == pcbtrace.SourceManual {
+			manualCount++
+		}
+	}
+	if manualCount == 0 {
+		tp.traceStatusLabel.SetText("No manual traces on this layer to train from")
+		return
+	}
+
+	// Estimate trace half-width from DPI (15 mil default trace width)
+	halfWidth := 0.015 * tp.state.DPI / 2.0
+	if halfWidth < 3 {
+		halfWidth = 4.5 // Fallback for low/zero DPI
+	}
+
+	tp.traceStatusLabel.SetText(fmt.Sprintf("Training from %d manual traces...", manualCount))
+
+	go func() {
+		// Collect samples
+		ts := pcbtrace.CollectSamples(boardImg, allTraces, layer, halfWidth)
+
+		// Train classifier
+		classifier := &pcbtrace.TraceClassifier{}
+		classifier.Train(ts)
+
+		if !classifier.Trained {
+			glib.IdleAdd(func() {
+				tp.traceStatusLabel.SetText("Training failed: insufficient samples")
+			})
+			return
+		}
+
+		// Save to project directory
+		if tp.state.ProjectPath != "" {
+			projectDir := filepath.Dir(tp.state.ProjectPath)
+			tsPath := filepath.Join(projectDir, pcbtrace.TraceTrainingFilename(layer))
+			clPath := filepath.Join(projectDir, pcbtrace.TraceClassifierFilename(layer))
+			if err := ts.Save(tsPath); err != nil {
+				fmt.Printf("Warning: could not save training data: %v\n", err)
+			}
+			if err := classifier.Save(clPath); err != nil {
+				fmt.Printf("Warning: could not save classifier: %v\n", err)
+			}
+		}
+
+		stats := classifier.StatsString()
+		fmt.Printf("Trace classifier trained: %s\n", stats)
+
+		glib.IdleAdd(func() {
+			tp.traceStatusLabel.SetText(fmt.Sprintf("Trained from %d traces (%d on / %d off samples)\n%s",
+				manualCount, len(ts.OnTraceHSV), len(ts.OffTraceHSV), stats))
+		})
+	}()
+}
+
+// onAutoTraceLayer runs auto-trace using the trained classifier for the selected layer.
+// It generates a trace mask, skeletonizes it, and pathfinds between unconnected endpoints.
+func (tp *TracesPanel) onAutoTraceLayer() {
+	layer := tp.selectedTraceLayer()
+	side := tp.selectedSide()
+
+	// Load classifier
+	if tp.state.ProjectPath == "" {
+		tp.traceStatusLabel.SetText("Save project first")
+		return
+	}
+	projectDir := filepath.Dir(tp.state.ProjectPath)
+	clPath := filepath.Join(projectDir, pcbtrace.TraceClassifierFilename(layer))
+	classifier, err := pcbtrace.LoadTraceClassifier(clPath)
+	if err != nil || !classifier.Trained {
+		tp.traceStatusLabel.SetText("No trained classifier — click 'Train Trace Detection' first")
+		return
+	}
+
+	// Get board image
+	var boardImg image.Image
+	if layer == pcbtrace.LayerFront {
+		if tp.state.FrontImage == nil || tp.state.FrontImage.Image == nil {
+			tp.traceStatusLabel.SetText("No front image loaded")
+			return
+		}
+		boardImg = tp.state.FrontImage.Image
+	} else {
+		if tp.state.BackImage == nil || tp.state.BackImage.Image == nil {
+			tp.traceStatusLabel.SetText("No back image loaded")
+			return
+		}
+		boardImg = tp.state.BackImage.Image
+	}
+
+	tp.traceStatusLabel.SetText("Auto-tracing layer...")
+
+	// Collect endpoints: confirmed vias + connectors on selected side
+	type endpoint struct {
+		id     string
+		center geometry.Point2D
+	}
+	var endpoints []endpoint
+
+	for _, cv := range tp.state.FeaturesLayer.GetConfirmedVias() {
+		endpoints = append(endpoints, endpoint{id: cv.ID, center: cv.Center})
+	}
+	for _, conn := range tp.state.FeaturesLayer.GetConnectorsBySide(side) {
+		endpoints = append(endpoints, endpoint{id: conn.ID, center: conn.Center})
+	}
+
+	if len(endpoints) < 2 {
+		tp.traceStatusLabel.SetText("Need at least 2 endpoints (vias/connectors)")
+		return
+	}
+
+	// Max distance for pathfinding (1.5 inches * DPI, or 900px default)
+	dpi := tp.state.DPI
+	maxDist := 1.5 * dpi
+	if maxDist < 200 {
+		maxDist = 900
+	}
+	// Minimum path length: 10mm converted to pixels (10mm / 25.4mm per inch * DPI)
+	minPathPx := 10.0 / 25.4 * dpi
+	if minPathPx < 20 {
+		minPathPx = 20 // absolute floor
+	}
+	threshold := 0.5
+
+	go func() {
+		// Convert full image to Mat
+		mat, convErr := pcbtrace.ImageToMat(boardImg)
+		if convErr != nil {
+			glib.IdleAdd(func() {
+				tp.traceStatusLabel.SetText(fmt.Sprintf("Image conversion error: %v", convErr))
+			})
+			return
+		}
+		defer mat.Close()
+
+		// Generate mask using classifier
+		traceMask := pcbtrace.DetectTracesWithClassifier(mat, classifier, threshold)
+		defer traceMask.Close()
+
+		if traceMask.Empty() {
+			glib.IdleAdd(func() {
+				tp.traceStatusLabel.SetText("Classifier produced empty mask")
+			})
+			return
+		}
+
+		// Stamp filled circles at every endpoint so the mask reaches vias/connectors.
+		// Via pads are bare copper (different color from solder-masked traces), so
+		// the classifier mask often has holes there. This bridges the gap.
+		padRadius := int(0.020 * dpi / 2) // 20 mil pad radius
+		if padRadius < 5 {
+			padRadius = 5
+		}
+		for _, ep := range endpoints {
+			pcbtrace.StampCircle(traceMask, int(ep.center.X), int(ep.center.Y), padRadius)
+		}
+
+		// Extra morphological close with a larger kernel to bridge narrow gaps
+		// along trace paths that the classifier missed.
+		bridgeKernel := gocv.GetStructuringElement(gocv.MorphEllipse, image.Pt(7, 7))
+		gocv.MorphologyEx(traceMask, &traceMask, gocv.MorphClose, bridgeKernel)
+		bridgeKernel.Close()
+
+		nonZero := gocv.CountNonZero(traceMask)
+		totalPx := traceMask.Rows() * traceMask.Cols()
+		fmt.Printf("Auto-trace mask: %d/%d pixels (%.1f%%)\n", nonZero, totalPx,
+			100*float64(nonZero)/float64(totalPx))
+
+		// Skeletonize
+		skeleton := pcbtrace.Skeletonize(traceMask)
+		defer skeleton.Close()
+
+		skelPx := gocv.CountNonZero(skeleton)
+		fmt.Printf("Auto-trace skeleton: %d pixels\n", skelPx)
+
+		searchRadius := int(maxDist / 2)
+		if searchRadius < 100 {
+			searchRadius = 100
+		}
+
+		// Pathfind between unconnected endpoint pairs
+		type traceResult struct {
+			startID  string
+			endID    string
+			path     []geometry.Point2D
+			lengthPx float64
+		}
+		var results []traceResult
+		var mu sync.Mutex
+
+		// Build set of existing net membership to skip already-connected pairs
+		getNet := func(id string) string {
+			net := tp.state.FeaturesLayer.GetNetForElement(id)
+			if net != nil {
+				return net.ID
+			}
+			return ""
+		}
+
+		// Use a worker pool for parallel pathfinding
+		type pairWork struct {
+			i, j int
+		}
+		var pairs []pairWork
+		for i := 0; i < len(endpoints); i++ {
+			for j := i + 1; j < len(endpoints); j++ {
+				dx := endpoints[i].center.X - endpoints[j].center.X
+				dy := endpoints[i].center.Y - endpoints[j].center.Y
+				dist := math.Sqrt(dx*dx + dy*dy)
+				if dist > maxDist {
+					continue
+				}
+				// Skip if already in same net
+				netI := getNet(endpoints[i].id)
+				netJ := getNet(endpoints[j].id)
+				if netI != "" && netI == netJ {
+					continue
+				}
+				pairs = append(pairs, pairWork{i, j})
+			}
+		}
+
+		numWorkers := runtime.NumCPU()
+		if numWorkers > 8 {
+			numWorkers = 8
+		}
+		ch := make(chan pairWork, len(pairs))
+		var wg sync.WaitGroup
+
+		var shortCount int64
+		for w := 0; w < numWorkers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for pw := range ch {
+					ep1 := endpoints[pw.i]
+					ep2 := endpoints[pw.j]
+					path, ok := pcbtrace.FindPathOnSkeleton(skeleton, ep1.center, ep2.center, searchRadius)
+					if ok && len(path) > 1 {
+						path = pcbtrace.SimplifyPath(path, 2.0)
+						pxLen := pcbtrace.PathLength(path)
+						if pxLen < minPathPx {
+							mu.Lock()
+							shortCount++
+							mu.Unlock()
+							continue
+						}
+						mu.Lock()
+						results = append(results, traceResult{
+							startID: ep1.id,
+							endID:   ep2.id,
+							path:    path,
+							lengthPx: pxLen,
+						})
+						mu.Unlock()
+					}
+				}
+			}()
+		}
+
+		for _, pw := range pairs {
+			ch <- pw
+		}
+		close(ch)
+		wg.Wait()
+
+		fmt.Printf("Auto-trace layer: %d pairs tried, %d paths found, %d rejected (< %.0fpx / 10mm)\n",
+			len(pairs), len(results), shortCount, minPathPx)
+
+		// Create traces on UI thread
+		glib.IdleAdd(func() {
+			for _, r := range results {
+				traceID := fmt.Sprintf("trace-%03d", tp.state.FeaturesLayer.NextTraceSeq())
+				et := pcbtrace.ExtendedTrace{
+					Trace: pcbtrace.Trace{
+						ID: traceID, Layer: layer, Points: r.path,
+					},
+					Source: pcbtrace.SourceDetected,
+				}
+				tp.state.FeaturesLayer.AddTrace(et)
+				lengthMM := r.lengthPx / dpi * 25.4
+				fmt.Printf("Auto-detected trace %s: %s -> %s (%d pts, %.1fmm)\n",
+					traceID, r.startID, r.endID, len(r.path), lengthMM)
+			}
+
+			// Reconcile nets
+			tp.state.FeaturesLayer.ReconcileNets(5.0)
+
+			tp.rebuildFeaturesOverlay()
+			tp.canvas.Refresh()
+			tp.refreshNetList()
+
+			tp.traceStatusLabel.SetText(fmt.Sprintf("Auto-trace: created %d traces from %d endpoint pairs",
+				len(results), len(pairs)))
+		})
+	}()
 }

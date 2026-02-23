@@ -177,7 +177,7 @@ func normalizePartNumber(pn string) string {
 	}
 
 	// Try to extract the logic part (handles manufacturer prefixes)
-	logic := extractLogicPart(pn)
+	logic := ExtractLogicPart(pn)
 	if logic != "" {
 		pn = logic
 	}

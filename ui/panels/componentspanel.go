@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -102,6 +103,22 @@ func NewComponentsPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Wind
 			compIdx := cp.sortedIndices[idx]
 			cp.selectComponentByIndex(compIdx)
 		}
+	})
+	cp.listBox.Connect("button-press-event", func(_ *gtk.ListBox, ev *gdk.Event) bool {
+		btn := gdk.EventButtonNewFromEvent(ev)
+		if btn.Button() != gdk.BUTTON_SECONDARY {
+			return false
+		}
+		row := cp.listBox.GetRowAtY(int(btn.Y()))
+		if row == nil {
+			return false
+		}
+		idx := row.GetIndex()
+		if idx >= 0 && idx < len(cp.sortedIndices) {
+			compIdx := cp.sortedIndices[idx]
+			cp.showComponentListMenu(compIdx)
+		}
+		return true
 	})
 
 	cp.listScroll, _ = gtk.ScrolledWindowNew(nil, nil)
@@ -450,11 +467,11 @@ func (cp *ComponentsPanel) showEditDialog(index int) {
 	setTextViewText(cp.ocrTextEntry, comp.OCRText)
 	setTextViewText(cp.correctedTextEntry, comp.CorrectedText)
 
-	// Set orientation
-	if comp.OCROrientation != "" {
-		cp.setSelectedOrientation(comp.OCROrientation)
-	} else if cp.state.LastOCROrientation != "" {
+	// Set orientation: sticky direction always takes precedence
+	if cp.state.LastOCROrientation != "" {
 		cp.setSelectedOrientation(cp.state.LastOCROrientation)
+	} else if comp.OCROrientation != "" {
+		cp.setSelectedOrientation(comp.OCROrientation)
 	} else {
 		cp.setSelectedOrientation("N")
 	}
@@ -487,7 +504,22 @@ func (cp *ComponentsPanel) saveEditingComponent() {
 	orientation := cp.getSelectedOrientation()
 
 	cp.editingComp.ID = idText
+	cp.editingComp.Confirmed = true
+
+	// Auto-rename NEW* components from grid mapping after ID change
+	if renamed := component.PropagateGridNames(cp.state.Components, 100); renamed > 0 {
+		fmt.Printf("Auto-renamed %d components from grid mapping\n", renamed)
+	}
+
 	cp.editingComp.PartNumber = partText
+	// Auto-fill package from parts library if not already set
+	if partText != "" && pkgText == "" {
+		if pkgInfo := component.LookupPartPackage(partText); pkgInfo != nil {
+			pkgText = pkgInfo.Package
+			cp.packageEntry.SetText(pkgText)
+			fmt.Printf("[Save] Package lookup: %s -> %s (%d pins)\n", partText, pkgInfo.Package, pkgInfo.PinCount)
+		}
+	}
 	cp.editingComp.Package = pkgText
 	cp.editingComp.Manufacturer = mfrText
 	cp.editingComp.Place = placeText
@@ -497,10 +529,12 @@ func (cp *ComponentsPanel) saveEditingComponent() {
 	cp.editingComp.Description = descText
 	cp.editingComp.OCRText = ocrText
 	cp.editingComp.CorrectedText = corrText
-	cp.editingComp.OCROrientation = orientation
-
-	// Update sticky orientation
+	// Always update sticky orientation for next component
 	cp.state.LastOCROrientation = orientation
+	// Only persist orientation on the component if OCR was performed or it already had one
+	if strings.TrimSpace(ocrText) != "" || cp.editingComp.OCROrientation != "" {
+		cp.editingComp.OCROrientation = orientation
+	}
 
 	// Add corrected text as training sample
 	if strings.TrimSpace(corrText) != "" && strings.TrimSpace(ocrText) != "" {
@@ -752,6 +786,12 @@ func (cp *ComponentsPanel) runOCR() {
 	cp.editingComp.OCRText = text
 
 	info := parseComponentInfo(text)
+	// Apply OCR correction to part number (e.g., 74LSO4 -> 74LS04)
+	if info.PartNumber != "" {
+		if corrected, changed := component.CorrectOCRPartNumber(info.PartNumber); changed {
+			info.PartNumber = corrected
+		}
+	}
 	partText, _ := cp.partNumberEntry.GetText()
 	if info.PartNumber != "" && partText == "" {
 		cp.partNumberEntry.SetText(info.PartNumber)
@@ -1089,6 +1129,21 @@ func (cp *ComponentsPanel) trainLogoDetection(cropped *image.RGBA, w, h int, gro
 	}
 }
 
+// showComponentListMenu shows a right-click context menu for a component in the list.
+func (cp *ComponentsPanel) showComponentListMenu(compIdx int) {
+	if compIdx < 0 || compIdx >= len(cp.state.Components) {
+		return
+	}
+	menu, _ := gtk.MenuNew()
+	item, _ := gtk.MenuItemNewWithLabel("Delete")
+	item.Connect("activate", func() {
+		cp.deleteComponent(compIdx)
+	})
+	menu.Append(item)
+	menu.ShowAll()
+	menu.PopupAtPointer(nil)
+}
+
 // deleteComponent removes a component by index.
 func (cp *ComponentsPanel) deleteComponent(index int) {
 	if index < 0 || index >= len(cp.state.Components) {
@@ -1137,15 +1192,15 @@ func (cp *ComponentsPanel) OnKeyPressed(ev *gdk.EventKey) bool {
 		comp.Bounds.X -= step
 	case gdk.KEY_Right, gdk.KEY_KP_Right:
 		comp.Bounds.X += step
-	case gdk.KEY_plus, gdk.KEY_equal, gdk.KEY_KP_Add:
+	case gdk.KEY_KP_Add:
 		comp.Bounds.Height += step
-	case gdk.KEY_minus, gdk.KEY_KP_Subtract:
+	case gdk.KEY_KP_Subtract:
 		if comp.Bounds.Height > step {
 			comp.Bounds.Height -= step
 		}
-	case gdk.KEY_asterisk, gdk.KEY_KP_Multiply:
+	case gdk.KEY_KP_Multiply:
 		comp.Bounds.Width += step
-	case gdk.KEY_slash, gdk.KEY_KP_Divide:
+	case gdk.KEY_KP_Divide:
 		if comp.Bounds.Width > step {
 			comp.Bounds.Width -= step
 		}
@@ -1183,6 +1238,19 @@ func (cp *ComponentsPanel) onRightClickDeleteComponent(x, y float64) {
 			return
 		}
 	}
+}
+
+// nextNewID returns the next sequential "NEW" ID (NEW1, NEW2, ...) by scanning existing components.
+func (cp *ComponentsPanel) nextNewID() string {
+	maxN := 0
+	for _, c := range cp.state.Components {
+		if strings.HasPrefix(c.ID, "NEW") {
+			if n, err := strconv.Atoi(c.ID[3:]); err == nil && n > maxN {
+				maxN = n
+			}
+		}
+	}
+	return fmt.Sprintf("NEW%d", maxN+1)
 }
 
 // OnLeftClick handles left-click: select component if inside bounds, resize if near edge.
@@ -1294,7 +1362,7 @@ func (cp *ComponentsPanel) OnLeftClick(x, y float64) {
 
 	newX := rawX - avgW/2
 	newY := rawY - avgH/2
-	compID := component.SuggestComponentID(cp.state.Components, rawX, rawY, 100, "U")
+	compID := cp.nextNewID()
 
 	newComp := &component.Component{
 		ID: compID,
@@ -1401,9 +1469,7 @@ func (cp *ComponentsPanel) OnMiddleClickFloodFill(x, y float64) {
 
 	zoom := cp.canvas.GetZoom()
 
-	centerX := float64(trimmedBounds.X+trimmedBounds.Width/2) / zoom
-	centerY := float64(trimmedBounds.Y+trimmedBounds.Height/2) / zoom
-	compID := component.SuggestComponentID(cp.state.Components, centerX, centerY, 100, "U")
+	compID := cp.nextNewID()
 
 	dpi := cp.state.DPI
 	if dpi <= 0 {
@@ -1884,9 +1950,7 @@ func (cp *ComponentsPanel) onDetectComponents() {
 
 	// Create components from detected bounds
 	for _, db := range newBounds {
-		centerX := db.X + db.Width/2
-		centerY := db.Y + db.Height/2
-		compID := component.SuggestComponentID(cp.state.Components, centerX, centerY, 100, "U")
+		compID := cp.nextNewID()
 		cp.state.Components = append(cp.state.Components, &component.Component{
 			ID:     compID,
 			Bounds: db,
@@ -2419,60 +2483,83 @@ func parseComponentInfo(text string) componentInfo {
 		return false
 	}
 
-	partNumPattern := regexp.MustCompile(`[A-Za-z]`)
-	var fallbackPartNum string
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		withoutLogos := logoPattern.ReplaceAllString(line, "")
-		withoutLogos = strings.TrimSpace(withoutLogos)
-		if withoutLogos == "" {
-			continue
-		}
-		withoutLogos = strings.TrimRight(withoutLogos, "-_.,;:!/ ")
-		if withoutLogos == "" {
-			continue
-		}
-		if isLocationLine(withoutLogos) {
-			continue
-		}
-		if partNumPattern.MatchString(withoutLogos) && len(withoutLogos) >= 3 {
-			info.PartNumber = withoutLogos
-			break
-		}
-		if fallbackPartNum == "" {
-			fallbackPartNum = withoutLogos
-		}
+	// Try 74/54-series match first — these are high-confidence part numbers
+	// Find 74/54 directly, then look backwards for known manufacturer prefix
+	logic74Core := regexp.MustCompile(`(?i)(7[4A]|54)([A-Z0-9]{2,8})\b`)
+	prefixToMfr := map[string]string{
+		"SN": "Texas Instruments", "TL": "Texas Instruments", "UC": "Texas Instruments",
+		"DM": "National Semiconductor", "LM": "National Semiconductor", "DS": "National Semiconductor",
+		"MC": "Motorola", "MJ": "Motorola",
+		"UA": "Fairchild", "9N": "Fairchild",
+		"AM": "AMD",
+		"CD": "RCA", "CA": "RCA",
+		"HD": "Hitachi", "HA": "Hitachi",
+		"TC": "Toshiba",
+		"MB": "Fujitsu",
+		"N": "Signetics", "NE": "Signetics",
 	}
-	if info.PartNumber == "" && fallbackPartNum != "" {
-		info.PartNumber = fallbackPartNum
-	}
-
-	logic74Pattern := regexp.MustCompile(`(?i)\b([A-Z]{1,3})?((?:74|54)[A-Z]{0,4}\d{1,4})[A-Z]{0,3}\b`)
-	if matches := logic74Pattern.FindStringSubmatch(upperText); len(matches) > 0 {
-		prefix := matches[1]
-		corePart := strings.ToUpper(matches[2])
+	if loc := logic74Core.FindStringSubmatchIndex(upperText); loc != nil {
+		rawPart := upperText[loc[2]:loc[5]] // series + body
+		// Look backwards from match for a known manufacturer prefix
+		before := upperText[:loc[0]]
+		prefix := ""
+		for p := range prefixToMfr {
+			if strings.HasSuffix(before, p) && len(p) > len(prefix) {
+				prefix = p
+			}
+		}
+		// Apply OCR correction to get clean part number
+		corrected, _ := component.CorrectOCRPartNumber(prefix + rawPart)
+		// Extract core logic part (strips manufacturer prefix and package suffix)
+		// e.g., "DM74LS02N" -> "74LS02"
+		corePart := component.ExtractLogicPart(corrected)
+		if corePart == "" {
+			corePart = corrected
+			if prefix != "" && strings.HasPrefix(corePart, prefix) {
+				corePart = corePart[len(prefix):]
+			}
+		}
 		if corePart != "" {
 			info.PartNumber = corePart
 		}
 		if prefix != "" && info.Manufacturer == "" {
-			prefixToMfr := map[string]string{
-				"SN": "Texas Instruments", "TL": "Texas Instruments", "UC": "Texas Instruments",
-				"DM": "National Semiconductor", "LM": "National Semiconductor", "DS": "National Semiconductor",
-				"MC": "Motorola", "MJ": "Motorola",
-				"UA": "Fairchild", "9N": "Fairchild",
-				"AM": "AMD",
-				"CD": "RCA", "CA": "RCA",
-				"HD": "Hitachi", "HA": "Hitachi",
-				"TC": "Toshiba",
-				"MB": "Fujitsu",
-				"N": "Signetics", "NE": "Signetics",
-			}
-			if mfr, ok := prefixToMfr[strings.ToUpper(prefix)]; ok {
+			if mfr, ok := prefixToMfr[prefix]; ok {
 				info.Manufacturer = mfr
 			}
+		}
+	}
+
+	// If no 74/54-series match, fall back to generic first-line-with-letters
+	if info.PartNumber == "" {
+		partNumPattern := regexp.MustCompile(`[A-Za-z]`)
+		var fallbackPartNum string
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			withoutLogos := logoPattern.ReplaceAllString(line, "")
+			withoutLogos = strings.TrimSpace(withoutLogos)
+			if withoutLogos == "" {
+				continue
+			}
+			withoutLogos = strings.TrimRight(withoutLogos, "-_.,;:!/ ")
+			if withoutLogos == "" {
+				continue
+			}
+			if isLocationLine(withoutLogos) {
+				continue
+			}
+			if partNumPattern.MatchString(withoutLogos) && len(withoutLogos) >= 3 {
+				info.PartNumber = withoutLogos
+				break
+			}
+			if fallbackPartNum == "" {
+				fallbackPartNum = withoutLogos
+			}
+		}
+		if info.PartNumber == "" && fallbackPartNum != "" {
+			info.PartNumber = fallbackPartNum
 		}
 	}
 

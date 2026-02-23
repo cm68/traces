@@ -1106,10 +1106,131 @@ func SuggestComponentID(components []*Component, centerX, centerY, tolerance flo
 		return suggestion
 	}
 
-	// Fall back to sequential numbering
-	fallback := fmt.Sprintf("%s%d", fallbackPrefix, len(components)+1)
+	// Fall back to sequential NEW numbering
+	fallback := fmt.Sprintf("NEW%d", len(components)+1)
 	fmt.Printf("SuggestComponentID: no match, using fallback -> %s\n", fallback)
 	return fallback
+}
+
+// SuggestGridIDExact is like SuggestGridID but only uses exact coordinate matches
+// (within tolerance). It does not interpolate between known coordinates.
+func (m *GridMapping) SuggestGridIDExact(centerX, centerY float64) string {
+	if m == nil || (len(m.LetterCoords) == 0 && len(m.NumberCoords) == 0) {
+		return ""
+	}
+
+	letterCoord := centerY
+	if m.LetterAxis == "X" {
+		letterCoord = centerX
+	}
+
+	numberCoord := centerX
+	if m.NumberAxis == "Y" {
+		numberCoord = centerY
+	}
+
+	matchedLetter := ""
+	for _, coord := range m.LetterCoords {
+		if math.Abs(coord.Value-letterCoord) <= m.Tolerance {
+			matchedLetter = coord.ID
+			break
+		}
+	}
+
+	matchedNumber := ""
+	for _, coord := range m.NumberCoords {
+		if math.Abs(coord.Value-numberCoord) <= m.Tolerance {
+			matchedNumber = coord.ID
+			break
+		}
+	}
+
+	if matchedLetter != "" && matchedNumber != "" {
+		if m.Format == "NL" {
+			return matchedNumber + matchedLetter
+		}
+		return matchedLetter + matchedNumber
+	}
+
+	if matchedLetter != "" {
+		if m.Format == "NL" {
+			return "?" + matchedLetter
+		}
+		return matchedLetter + "?"
+	}
+
+	if matchedNumber != "" {
+		if m.Format == "NL" {
+			return matchedNumber + "?"
+		}
+		return "?" + matchedNumber
+	}
+
+	return ""
+}
+
+// PropagateGridNames uses manually named grid components to auto-name NEW* components.
+// Requires at least 2 components with valid grid IDs to infer axis mapping.
+// Only uses exact coordinate matches (no interpolation).
+// Returns the number of components renamed.
+func PropagateGridNames(components []*Component, tolerance float64) int {
+	// Count components with valid grid IDs
+	var named []*Component
+	for _, c := range components {
+		if ParseGridID(c.ID) != nil {
+			named = append(named, c)
+		}
+	}
+	if len(named) < 2 {
+		return 0
+	}
+
+	mapping := BuildGridMapping(components, tolerance)
+	if mapping == nil {
+		return 0
+	}
+
+	renamed := 0
+	for _, c := range components {
+		if !strings.HasPrefix(c.ID, "NEW") && !strings.Contains(c.ID, "?") {
+			continue
+		}
+
+		centerX := c.Bounds.X + c.Bounds.Width/2
+		centerY := c.Bounds.Y + c.Bounds.Height/2
+		suggestion := mapping.SuggestGridIDExact(centerX, centerY)
+		if suggestion == "" {
+			continue
+		}
+
+		// Check if the suggestion is more informative than the current name
+		if isMoreInformative(suggestion, c.ID) {
+			fmt.Printf("PropagateGridNames: %s -> %s\n", c.ID, suggestion)
+			c.ID = suggestion
+			renamed++
+		}
+	}
+	return renamed
+}
+
+// isMoreInformative returns true if newID carries more grid info than oldID.
+// Ranking: NEW* < partial (?12 or A?) < full (A12).
+func isMoreInformative(newID, oldID string) bool {
+	return gridInfoLevel(newID) > gridInfoLevel(oldID)
+}
+
+// gridInfoLevel returns 0 for NEW*, 1 for partial (?X or X?), 2 for full grid IDs.
+func gridInfoLevel(id string) int {
+	if strings.HasPrefix(id, "NEW") {
+		return 0
+	}
+	if strings.Contains(id, "?") {
+		return 1
+	}
+	if ParseGridID(id) != nil {
+		return 2
+	}
+	return 0
 }
 
 // overlapInfo holds information about a component that overlaps with a target position.

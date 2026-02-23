@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -182,6 +183,17 @@ type TrainingSample struct {
 	MarkingPct    float64 `json:"marking_pct"` // Percentage of pixels at marking peak
 }
 
+// SizeTemplate represents an expected component size derived from training data.
+type SizeTemplate struct {
+	WidthMM     float64 // Mean width in mm
+	HeightMM    float64 // Mean height in mm
+	MinWidthMM  float64 // Min observed width in cluster
+	MaxWidthMM  float64 // Max observed width in cluster
+	MinHeightMM float64 // Min observed height in cluster
+	MaxHeightMM float64 // Max observed height in cluster
+	Count       int     // Number of training samples in this cluster
+}
+
 // TrainingSet holds training samples for conditioning the detector.
 type TrainingSet struct {
 	Samples []TrainingSample `json:"samples"`
@@ -252,9 +264,11 @@ func (ts *TrainingSet) DeriveParams() DetectionParams {
 
 	fmt.Printf("  Size range: %.1f-%.1f x %.1f-%.1f mm\n", minWidth, maxWidth, minHeight, maxHeight)
 
-	// Cluster samples into distinct color profiles based on V value
-	// Two samples are in the same cluster if their V values are within 30 of each other
-	const clusterThreshold = 30.0
+	// Cluster samples into distinct color profiles based on V value.
+	// Uses max-diameter clustering: a sample joins a cluster only if the resulting
+	// V range (max-min) stays within the threshold. This prevents chaining
+	// (e.g., 8→24→40→56→72 all merging into one huge cluster).
+	const clusterMaxDiameter = 20.0
 	var profiles []ColorProfile
 	used := make([]bool, len(samples))
 
@@ -266,59 +280,61 @@ func (ts *TrainingSet) DeriveParams() DetectionParams {
 		// Start new cluster with this sample
 		cluster := []sampleData{samples[i]}
 		used[i] = true
+		clusterMinV := samples[i].bgVal
+		clusterMaxV := samples[i].bgVal
 
-		// Find other samples within threshold
+		// Find other samples that fit within the diameter
 		for j := i + 1; j < len(samples); j++ {
 			if used[j] {
 				continue
 			}
-			// Check if within threshold of any sample in cluster
-			for _, cs := range cluster {
-				if abs64(samples[j].bgVal-cs.bgVal) <= clusterThreshold {
-					cluster = append(cluster, samples[j])
-					used[j] = true
-					break
-				}
+			newMin := clusterMinV
+			newMax := clusterMaxV
+			if samples[j].bgVal < newMin {
+				newMin = samples[j].bgVal
+			}
+			if samples[j].bgVal > newMax {
+				newMax = samples[j].bgVal
+			}
+			if newMax-newMin <= clusterMaxDiameter {
+				cluster = append(cluster, samples[j])
+				used[j] = true
+				clusterMinV = newMin
+				clusterMaxV = newMax
 			}
 		}
 
-		// Create profile from cluster
-		var minV, maxV, maxSat float64 = 255, 0, 0
+		// Create profile from cluster with tight margins
+		var maxSat float64
 		for _, cs := range cluster {
-			if cs.bgVal < minV {
-				minV = cs.bgVal
-			}
-			if cs.bgVal > maxV {
-				maxV = cs.bgVal
-			}
 			if cs.satMax > maxSat {
 				maxSat = cs.satMax
 			}
 		}
 
-		// Add generous margins to the V range to catch similar components
+		const margin = 8.0 // Half a histogram bucket
 		profile := ColorProfile{
-			ValueMin: minV * 0.3,          // 70% below observed min (very permissive)
-			ValueMax: maxV * 2.0,          // 100% above observed max (very permissive)
-			SatMax:   maxSat * 3.0,        // 3x observed max saturation
+			ValueMin: clusterMinV - margin,
+			ValueMax: clusterMaxV + margin,
+			SatMax:   maxSat + 20,
 		}
-		// Clamp ranges
 		if profile.ValueMin < 0 {
 			profile.ValueMin = 0
 		}
-		if profile.ValueMax > 255 {
-			profile.ValueMax = 255 // Allow full range - don't cap at 200
+		if profile.ValueMax > 120 {
+			profile.ValueMax = 120 // Components are dark; board surfaces are brighter
 		}
-		if profile.SatMax < 100 {
-			profile.SatMax = 100
+		if profile.SatMax < 80 {
+			profile.SatMax = 80
 		}
-		if profile.SatMax > 255 {
-			profile.SatMax = 255
+		if profile.SatMax > 200 {
+			profile.SatMax = 200
 		}
 
 		profiles = append(profiles, profile)
-		fmt.Printf("  Profile %d: V=%.0f-%.0f, SatMax=%.0f (from %d samples)\n",
-			len(profiles), profile.ValueMin, profile.ValueMax, profile.SatMax, len(cluster))
+		fmt.Printf("  Profile %d: V=%.0f-%.0f, SatMax=%.0f (from %d samples, raw V=%.0f-%.0f)\n",
+			len(profiles), profile.ValueMin, profile.ValueMax, profile.SatMax,
+			len(cluster), clusterMinV, clusterMaxV)
 	}
 
 	// Calculate fallback single threshold (for compatibility)
@@ -332,47 +348,156 @@ func (ts *TrainingSet) DeriveParams() DetectionParams {
 	avgSat := sumSat / n
 
 	params := DetectionParams{
-		// Fallback thresholds (generous)
-		ValueMax: avgBgVal * 2.0,
-		SatMax:   avgSat * 3.0,
+		// Fallback thresholds
+		ValueMax: avgBgVal + 30,
+		SatMax:   avgSat * 1.5,
 
 		// Multiple color profiles for distinct component types
 		ColorProfiles: profiles,
 
-		// Size constraints: very permissive - allow smaller and larger than samples
-		MinWidth:  minWidth * 0.5,  // Allow 50% smaller
-		MaxWidth:  maxWidth * 2.0,  // Allow 100% larger
-		MinHeight: minHeight * 0.5, // Allow 50% smaller
-		MaxHeight: maxHeight * 2.0, // Allow 100% larger
+		// Size constraints: moderate margins around observed sizes
+		MinWidth:  minWidth * 0.7,
+		MaxWidth:  maxWidth * 1.5,
+		MinHeight: minHeight * 0.7,
+		MaxHeight: maxHeight * 1.5,
 
-		// Very permissive aspect ratio and quality
-		MinAspectRatio: 0.3,
-		MaxAspectRatio: 20.0,
-		MinSolidity:    0.3,
+		// Aspect ratio and quality
+		MinAspectRatio: 0.5,
+		MaxAspectRatio: 15.0,
+		MinSolidity:    0.4,
 		MinWhitePixels: 0.0,
 	}
 
-	// Ensure reasonable bounds for fallback (permissive)
+	// Ensure reasonable bounds for fallback
 	if params.ValueMax < 80 {
 		params.ValueMax = 80
 	}
-	if params.ValueMax > 255 {
-		params.ValueMax = 255
+	if params.ValueMax > 120 {
+		params.ValueMax = 120
 	}
-	if params.SatMax < 100 {
-		params.SatMax = 100
+	if params.SatMax < 80 {
+		params.SatMax = 80
 	}
-	if params.SatMax > 255 {
-		params.SatMax = 255
+	if params.SatMax > 200 {
+		params.SatMax = 200
 	}
+
+	// Compute cell size from training data: min dimension / 3
+	minDim := minWidth
+	if minHeight < minDim {
+		minDim = minHeight
+	}
+	params.CellSizeMM = minDim / 3.0
+	if params.CellSizeMM < 0.5 {
+		params.CellSizeMM = 0.5
+	}
+
+	// Build size templates by clustering widths into narrow/wide DIP groups
+	params.SizeTemplates = clusterSizeTemplates(ts.Samples)
 
 	fmt.Printf("  Derived %d color profiles\n", len(profiles))
 	fmt.Printf("  Fallback: ValueMax=%.0f SatMax=%.0f\n", params.ValueMax, params.SatMax)
 	fmt.Printf("  Derived size: %.1f-%.1f x %.1f-%.1f mm\n",
 		params.MinWidth, params.MaxWidth, params.MinHeight, params.MaxHeight)
+	fmt.Printf("  Cell size: %.2f mm\n", params.CellSizeMM)
+	fmt.Printf("  Size templates: %d\n", len(params.SizeTemplates))
+	for i, t := range params.SizeTemplates {
+		fmt.Printf("    Template %d: %.1fx%.1f mm (w=%.1f-%.1f, h=%.1f-%.1f, n=%d)\n",
+			i+1, t.WidthMM, t.HeightMM, t.MinWidthMM, t.MaxWidthMM, t.MinHeightMM, t.MaxHeightMM, t.Count)
+	}
 	fmt.Printf("=============================================\n")
 
 	return params
+}
+
+// clusterSizeTemplates groups training samples by DIP width class (narrow vs wide)
+// and then by length (snapped to 0.1" = 2.54mm multiples).
+// Returns one template per unique (width-class, length) combination.
+func clusterSizeTemplates(samples []TrainingSample) []SizeTemplate {
+	// Width threshold: 11mm separates narrow DIP (~6-8mm) from wide DIP (~15mm)
+	const widthThreshold = 11.0
+	const pinPitch = 2.54 // 0.1 inch in mm
+
+	type sizeKey struct {
+		wide       bool
+		lengthUnit int // length in units of pinPitch
+	}
+
+	groups := make(map[sizeKey][]TrainingSample)
+
+	for _, s := range samples {
+		// Determine orientation: shorter dimension is width
+		w, h := s.WidthMM, s.HeightMM
+		if w > h {
+			w, h = h, w
+		}
+
+		wide := w > widthThreshold
+		lengthUnit := int(math.Round(h / pinPitch))
+
+		key := sizeKey{wide: wide, lengthUnit: lengthUnit}
+		groups[key] = append(groups[key], s)
+	}
+
+	var templates []SizeTemplate
+	for key, group := range groups {
+		var sumW, sumH, minW, maxW, minH, maxH float64
+		minW, minH = 1e9, 1e9
+
+		for _, s := range group {
+			w, h := s.WidthMM, s.HeightMM
+			if w > h {
+				w, h = h, w
+			}
+			sumW += w
+			sumH += h
+			if w < minW {
+				minW = w
+			}
+			if w > maxW {
+				maxW = w
+			}
+			if h < minH {
+				minH = h
+			}
+			if h > maxH {
+				maxH = h
+			}
+		}
+
+		n := float64(len(group))
+		meanW := sumW / n
+		meanH := sumH / n
+
+		// Add tolerance: +/- 1.5mm on width, +/- half a pin pitch on height
+		t := SizeTemplate{
+			WidthMM:     meanW,
+			HeightMM:    meanH,
+			MinWidthMM:  minW - 1.5,
+			MaxWidthMM:  maxW + 1.5,
+			MinHeightMM: float64(key.lengthUnit)*pinPitch - pinPitch*0.75,
+			MaxHeightMM: float64(key.lengthUnit)*pinPitch + pinPitch*0.75,
+			Count:       len(group),
+		}
+		if t.MinWidthMM < 1 {
+			t.MinWidthMM = 1
+		}
+		if t.MinHeightMM < 1 {
+			t.MinHeightMM = 1
+		}
+
+		templates = append(templates, t)
+	}
+
+	// Sort by width then height for consistent output
+	sort.Slice(templates, func(i, j int) bool {
+		if templates[i].WidthMM != templates[j].WidthMM {
+			return templates[i].WidthMM < templates[j].WidthMM
+		}
+		return templates[i].HeightMM < templates[j].HeightMM
+	})
+
+	return templates
 }
 
 // abs64 returns the absolute value of a float64.

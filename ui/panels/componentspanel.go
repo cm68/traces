@@ -80,6 +80,10 @@ func NewComponentsPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Wind
 	ocrSilkscreenBtn.Connect("clicked", func() { cp.onOCRSilkscreen() })
 	btnRow.PackStart(ocrSilkscreenBtn, true, true, 0)
 
+	trainBtn, _ := gtk.ButtonNewWithLabel("Train Components")
+	trainBtn.Connect("clicked", func() { cp.onTrainComponents() })
+	btnRow.PackStart(trainBtn, true, true, 0)
+
 	detectBtn, _ := gtk.ButtonNewWithLabel("Detect Components")
 	detectBtn.Connect("clicked", func() { cp.onDetectComponents() })
 	btnRow.PackStart(detectBtn, true, true, 0)
@@ -1437,12 +1441,41 @@ func (cp *ComponentsPanel) updateComponentOverlay() {
 	cp.canvas.Refresh()
 }
 
-// onDetectComponents uses existing components as training data to detect new ones.
-func (cp *ComponentsPanel) onDetectComponents() {
+// onTrainComponents adds existing components to the global training set without detecting.
+func (cp *ComponentsPanel) onTrainComponents() {
 	if len(cp.state.Components) == 0 {
-		fmt.Println("[Detect] No existing components to train from")
+		fmt.Println("[Train] No components to train from")
 		return
 	}
+	if cp.state.FrontImage == nil || cp.state.FrontImage.Image == nil {
+		fmt.Println("[Train] No front image loaded")
+		return
+	}
+
+	frontImg := cp.state.FrontImage.Image
+	dpi := cp.state.DPI
+	if dpi <= 0 {
+		dpi = 1200
+	}
+
+	if cp.state.GlobalComponentTraining == nil {
+		cp.state.GlobalComponentTraining = component.NewTrainingSet()
+	}
+
+	added := 0
+	for _, comp := range cp.state.Components {
+		sample := component.ExtractSampleFeatures(frontImg, comp.Bounds, dpi)
+		cp.state.GlobalComponentTraining.Add(sample)
+		added++
+	}
+
+	cp.state.SaveGlobalComponentTraining()
+	fmt.Printf("Trained %d component samples (global total: %d)\n",
+		added, len(cp.state.GlobalComponentTraining.Samples))
+}
+
+// onDetectComponents detects components using global training data plus any on this board.
+func (cp *ComponentsPanel) onDetectComponents() {
 	if cp.state.FrontImage == nil || cp.state.FrontImage.Image == nil {
 		fmt.Println("[Detect] No front image loaded")
 		return
@@ -1454,29 +1487,99 @@ func (cp *ComponentsPanel) onDetectComponents() {
 		dpi = 1200
 	}
 
-	// Build training set from existing components
-	ts := component.NewTrainingSet()
-	for _, comp := range cp.state.Components {
-		sample := component.ExtractSampleFeatures(frontImg, comp.Bounds, dpi)
-		ts.Add(sample)
-	}
-
-	fmt.Printf("[Detect] Built training set from %d existing components\n", len(ts.Samples))
-
-	// Merge into global training set and save
 	if cp.state.GlobalComponentTraining == nil {
 		cp.state.GlobalComponentTraining = component.NewTrainingSet()
 	}
-	for _, s := range ts.Samples {
-		cp.state.GlobalComponentTraining.Add(s)
-	}
-	cp.state.SaveGlobalComponentTraining()
 
-	// Derive detection parameters (uses global training for broader coverage)
+	// Add any existing components on this board to the global training set
+	if len(cp.state.Components) > 0 {
+		for _, comp := range cp.state.Components {
+			sample := component.ExtractSampleFeatures(frontImg, comp.Bounds, dpi)
+			cp.state.GlobalComponentTraining.Add(sample)
+		}
+		cp.state.SaveGlobalComponentTraining()
+		fmt.Printf("[Detect] Added %d components from this board to global training\n", len(cp.state.Components))
+	}
+
+	if len(cp.state.GlobalComponentTraining.Samples) == 0 {
+		fmt.Println("[Detect] No training data available — use Train Components first")
+		return
+	}
+
+	fmt.Printf("[Detect] Using %d global training samples\n", len(cp.state.GlobalComponentTraining.Samples))
+
+	// Derive detection parameters from global training set
 	params := cp.state.GlobalComponentTraining.DeriveParams()
 
-	// Run detection
-	result, err := component.DetectComponents(frontImg, dpi, params)
+	// Detect board bounds using variance grid
+	mmToPixels := dpi / 25.4
+	cellMM := params.CellSizeMM
+	if cellMM <= 0 {
+		cellMM = 2.0
+	}
+	cellSizePx := int(cellMM * mmToPixels)
+	if cellSizePx < 4 {
+		cellSizePx = 4
+	}
+
+	// Use a coarser cell for board detection (5x the component cell)
+	boardCellPx := cellSizePx * 5
+	board := component.DetectBoardBounds(frontImg, boardCellPx)
+
+	if board == nil {
+		fmt.Println("[Detect] Could not detect board bounds")
+		return
+	}
+
+	if false {
+		// Draw on-board cells in green, off-board in dim red, bounds in yellow
+		green := color.RGBA{R: 0, G: 200, B: 0, A: 100}
+		dimRed := color.RGBA{R: 150, G: 0, B: 0, A: 60}
+		yellow := color.RGBA{R: 255, G: 255, B: 0, A: 255}
+
+		gridOverlay := &canvas.Overlay{Color: yellow}
+
+		for gy := 0; gy < board.GridRows; gy++ {
+			for gx := 0; gx < board.GridCols; gx++ {
+				c := &dimRed
+				if board.OnBoard[gy*board.GridCols+gx] == 1 {
+					c = &green
+				}
+				gridOverlay.Rectangles = append(gridOverlay.Rectangles, canvas.OverlayRect{
+					X:      gx * boardCellPx,
+					Y:      gy * boardCellPx,
+					Width:  boardCellPx,
+					Height: boardCellPx,
+					Fill:   canvas.FillSolid,
+					Color:  c,
+				})
+			}
+		}
+
+		// Board bounds rectangle in yellow
+		gridOverlay.Rectangles = append(gridOverlay.Rectangles, canvas.OverlayRect{
+			X:      int(board.Bounds.X),
+			Y:      int(board.Bounds.Y),
+			Width:  int(board.Bounds.Width),
+			Height: int(board.Bounds.Height),
+			Fill:   canvas.FillNone,
+		})
+
+		cp.canvas.SetOverlay("detect_bounds", gridOverlay)
+		cp.canvas.Refresh()
+	}
+	fmt.Printf("[Detect] Board bounds: (%.0f,%.0f) %.0fx%.0f, threshold=%.1f\n",
+		board.Bounds.X, board.Bounds.Y, board.Bounds.Width, board.Bounds.Height, board.Threshold)
+
+	// Store board bounds in state for other operations
+	cp.state.FrontBoardBounds = &geometry.RectInt{
+		X: int(board.Bounds.X), Y: int(board.Bounds.Y),
+		Width: int(board.Bounds.Width), Height: int(board.Bounds.Height),
+	}
+
+	// Run detection within board bounds
+	boardRect := &board.Bounds
+	result, err := component.DetectComponentsWithBounds(frontImg, dpi, params, boardRect)
 	if err != nil {
 		fmt.Printf("[Detect] Detection failed: %v\n", err)
 		return
@@ -1520,7 +1623,7 @@ func (cp *ComponentsPanel) onDetectComponents() {
 		cp.state.Components = append(cp.state.Components, det)
 	}
 
-	fmt.Printf("Detected %d new components from %d training samples\n", len(newComps), len(ts.Samples))
+	fmt.Printf("Detected %d new components from %d training samples\n", len(newComps), len(cp.state.GlobalComponentTraining.Samples))
 
 	cp.rebuildSortedIndices()
 	cp.refreshList()

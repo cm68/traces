@@ -83,9 +83,13 @@ type State struct {
 	FrontRotationCenter geometry.Point2D
 	BackRotationCenter  geometry.Point2D
 
-	// Crop bounds (detected during initial load, in original image coords)
+	// Crop bounds (detected during initial load, in rotated-image coords)
 	FrontCropBounds geometry.RectInt
 	BackCropBounds  geometry.RectInt
+
+	// Import rotation (detected during initial import by variance-based board detection, degrees)
+	FrontImportRotation float64
+	BackImportRotation  float64
 
 	// Per-side sampled color parameters (nil = use defaults)
 	FrontColorParams *ColorParams
@@ -340,6 +344,9 @@ func (s *State) LoadProject(path string) error {
 		return err
 	}
 
+	// Clear all per-project state before loading new project
+	s.ResetForNewProject()
+
 	s.mu.Lock()
 	s.ProjectPath = path
 	s.Modified = false
@@ -382,9 +389,11 @@ func (s *State) LoadProject(path string) error {
 	s.FrontRotationCenter = proj.FrontRotationCenter
 	s.BackRotationCenter = proj.BackRotationCenter
 
-	// Restore crop bounds
+	// Restore crop bounds and import rotation
 	s.FrontCropBounds = proj.FrontCropBounds
 	s.BackCropBounds = proj.BackCropBounds
+	s.FrontImportRotation = proj.FrontImportRotation
+	s.BackImportRotation = proj.BackImportRotation
 	s.mu.Unlock()
 
 	// Restore normalized image paths and viewport
@@ -656,9 +665,11 @@ func (s *State) SaveProject(path string) error {
 		// Rotation centers
 		FrontRotationCenter: s.FrontRotationCenter,
 		BackRotationCenter:  s.BackRotationCenter,
-		// Crop bounds
-		FrontCropBounds: s.FrontCropBounds,
-		BackCropBounds:  s.BackCropBounds,
+		// Crop bounds and import rotation
+		FrontCropBounds:     s.FrontCropBounds,
+		BackCropBounds:      s.BackCropBounds,
+		FrontImportRotation: s.FrontImportRotation,
+		BackImportRotation:  s.BackImportRotation,
 		// Normalized image paths
 		FrontNormalizedPath: s.FrontNormalizedPath,
 		BackNormalizedPath:  s.BackNormalizedPath,
@@ -767,9 +778,10 @@ func (s *State) ImportFrontImage(path string) error {
 	}
 	layer.Side = image.SideFront
 
-	// Auto-detect board bounds and apply initial rotation/crop
+	// Auto-detect board bounds, orthogonalize, and crop
 	var cropBounds geometry.RectInt
-	layer.Image, cropBounds = autoRotateAndCrop(layer.Image)
+	var importRotation float64
+	layer.Image, cropBounds, importRotation = autoRotateAndCrop(layer.Image)
 	layer.CropX = cropBounds.X
 	layer.CropY = cropBounds.Y
 	layer.CropWidth = cropBounds.Width
@@ -780,6 +792,7 @@ func (s *State) ImportFrontImage(path string) error {
 
 	s.mu.Lock()
 	s.FrontImage = layer
+	s.FrontImportRotation = importRotation
 	s.FrontBoardBounds = nil // bounds are now (0,0) since we cropped
 	s.FrontCropBounds = cropBounds
 	s.FrontDetectionResult = nil // Clear old detection - user must re-detect on rotated image
@@ -807,8 +820,15 @@ func (s *State) LoadFrontImage(path string) error {
 
 	s.mu.Lock()
 	cropBounds := s.FrontCropBounds
+	importRotation := s.FrontImportRotation
 	autoRotation := s.FrontAutoRotation
 	s.mu.Unlock()
+
+	// Apply saved import rotation (if any) - must be before crop
+	// since crop bounds are in rotated-image coordinates
+	if importRotation != 0 {
+		layer.Image = alignment.RotateGoImage(layer.Image, importRotation)
+	}
 
 	// Apply saved crop bounds (if any)
 	if cropBounds.Width > 0 && cropBounds.Height > 0 {
@@ -846,9 +866,10 @@ func (s *State) ImportBackImage(path string) error {
 	}
 	layer.Side = image.SideBack
 
-	// Auto-detect board bounds and apply initial rotation/crop
+	// Auto-detect board bounds, orthogonalize, and crop
 	var cropBounds geometry.RectInt
-	layer.Image, cropBounds = autoRotateAndCrop(layer.Image)
+	var importRotation float64
+	layer.Image, cropBounds, importRotation = autoRotateAndCrop(layer.Image)
 	layer.CropX = cropBounds.X
 	layer.CropY = cropBounds.Y
 	layer.CropWidth = cropBounds.Width
@@ -862,6 +883,7 @@ func (s *State) ImportBackImage(path string) error {
 
 	s.mu.Lock()
 	s.BackImage = layer
+	s.BackImportRotation = importRotation
 	s.BackBoardBounds = nil // bounds are now (0,0) since we cropped
 	s.BackCropBounds = cropBounds
 	s.BackDetectionResult = nil // Clear old detection - user must re-detect on rotated image
@@ -889,8 +911,15 @@ func (s *State) LoadBackImage(path string) error {
 
 	s.mu.Lock()
 	cropBounds := s.BackCropBounds
+	importRotation := s.BackImportRotation
 	autoRotation := s.BackAutoRotation
 	s.mu.Unlock()
+
+	// Apply saved import rotation (if any) - must be before crop
+	// since crop bounds are in rotated-image coordinates
+	if importRotation != 0 {
+		layer.Image = alignment.RotateGoImage(layer.Image, importRotation)
+	}
 
 	// Apply saved crop bounds (if any)
 	if cropBounds.Width > 0 && cropBounds.Height > 0 {
@@ -966,9 +995,11 @@ func (s *State) ResetForNewProject() {
 	s.FrontRotationCenter = geometry.Point2D{}
 	s.BackRotationCenter = geometry.Point2D{}
 
-	// Zero crop bounds
+	// Zero crop bounds and import rotation
 	s.FrontCropBounds = geometry.RectInt{}
 	s.BackCropBounds = geometry.RectInt{}
+	s.FrontImportRotation = 0
+	s.BackImportRotation = 0
 
 	// Clear detection results
 	s.FrontDetectionResult = nil
@@ -979,12 +1010,29 @@ func (s *State) ResetForNewProject() {
 	// Clear color params
 	s.FrontColorParams = nil
 	s.BackColorParams = nil
+	s.ViaColorParams = nil
+
+	// Clear DPI
+	s.DPI = 0
 
 	// Clear components and features
 	s.Components = nil
 	s.ComponentTraining = nil
 	s.LogoTraining = nil
 	s.FeaturesLayer = features.NewDetectedFeaturesLayer()
+	s.ViaTrainingSet = via.NewTrainingSet()
+
+	// Clear normalized image paths
+	s.FrontNormalizedPath = ""
+	s.BackNormalizedPath = ""
+
+	// Clear viewport state
+	s.ViewZoom = 0
+	s.ViewScrollX = 0
+	s.ViewScrollY = 0
+
+	// Clear sticky OCR orientation
+	s.LastOCROrientation = ""
 }
 
 // LoadRawFrontImage loads the front side image without any processing.
@@ -1217,20 +1265,24 @@ func (s *State) HasNormalizedImages() bool {
 	return s.FrontNormalizedPath != "" || s.BackNormalizedPath != ""
 }
 
-// autoRotateAndCrop detects board bounds, rotates based on contacts, and crops.
-// Returns the cropped image and the crop bounds that were detected.
-func autoRotateAndCrop(img goimage.Image) (goimage.Image, geometry.RectInt) {
-	// First, just detect board bounds (no rotation yet)
-	rotResult := alignment.DetectBoardRotationFromImage(img)
-	if !rotResult.Detected {
-		// No cropping - return original image with zero bounds (meaning full image)
-		return img, geometry.RectInt{}
+// autoRotateAndCrop detects board bounds using S+V variance, orthogonalizes, and crops.
+// Returns the cropped image, crop bounds (in rotated-image coords), and rotation angle.
+func autoRotateAndCrop(img goimage.Image) (goimage.Image, geometry.RectInt, float64) {
+	result := alignment.DetectBoardByVariance(img)
+	if !result.Detected {
+		return img, geometry.RectInt{}, 0
 	}
 
-	// Crop to board bounds first
-	cropped := cropImage(img, rotResult.Bounds)
+	// Apply rotation if detected
+	rotated := img
+	if result.Angle != 0 {
+		rotated = alignment.RotateGoImage(img, result.Angle)
+	}
 
-	return cropped, rotResult.Bounds
+	// Crop to detected bounds
+	cropped := cropImage(rotated, result.Bounds)
+
+	return cropped, result.Bounds, result.Angle
 }
 
 // fineRotateByContacts detects contacts and applies rotation to align them horizontally.
@@ -1353,6 +1405,10 @@ type ProjectFile struct {
 	// Crop bounds (v3+) - detected during initial load
 	FrontCropBounds geometry.RectInt `json:"front_crop,omitempty"`
 	BackCropBounds  geometry.RectInt `json:"back_crop,omitempty"`
+
+	// Import rotation (v14+) - detected by variance-based board detection
+	FrontImportRotation float64 `json:"front_import_rotation,omitempty"`
+	BackImportRotation  float64 `json:"back_import_rotation,omitempty"`
 
 	// Detected contacts (v2+)
 	FrontContacts []ContactData `json:"front_contacts,omitempty"`

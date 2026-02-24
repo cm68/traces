@@ -246,35 +246,42 @@ func DetectPins(backImg image.Image, comp *Component, expectedPins []ExpectedPin
 			roughCenters[i].X, roughCenters[i].Y, maxRadialDist, imgW, imgH)
 		distances := radialScanToGreen(backImg, cx, cy, maxRadialDist, imgW, imgH)
 
-		// All rays must terminate before maxDist (fully surrounded by green)
-		allBounded := true
+		// Separate bounded rays (hit green ring) from unbounded (through traces)
+		var bounded []float64
 		for _, d := range distances {
-			if d >= maxRadialDist-1 {
-				allBounded = false
-				break
+			if d < maxRadialDist-1 {
+				bounded = append(bounded, d)
+			}
+		}
+		numBounded := len(bounded)
+
+		radius := 0.0
+		relSD := 1.0
+		if numBounded > 0 {
+			sort.Float64s(bounded)
+			// 25th percentile of bounded rays — robust to trace inflation.
+			// Traces inflate some rays, but non-trace directions give the true
+			// pad radius. The 25th percentile captures the short (correct) rays.
+			idx25 := numBounded / 4
+			radius = bounded[idx25]
+
+			// Variance computed on bounded rays only
+			var sumD, sumDSq float64
+			for _, d := range bounded {
+				sumD += d
+				sumDSq += d * d
+			}
+			meanD := sumD / float64(numBounded)
+			variance := sumDSq/float64(numBounded) - meanD*meanD
+			stdDev := math.Sqrt(math.Abs(variance))
+			if meanD > 0 {
+				relSD = stdDev / meanD
 			}
 		}
 
-		sorted := make([]float64, len(distances))
-		copy(sorted, distances)
-		sort.Float64s(sorted)
-		radius := sorted[len(sorted)/2]
-
-		var sumD, sumDSq float64
-		for _, d := range distances {
-			sumD += d
-			sumDSq += d * d
-		}
-		meanD := sumD / float64(len(distances))
-		variance := sumDSq/float64(len(distances)) - meanD*meanD
-		stdDev := math.Sqrt(math.Abs(variance))
-		relSD := 0.0
-		if meanD > 0 {
-			relSD = stdDev / meanD
-		}
-
-		// Pristine: fully green-bounded AND low relative variance (round pad, no traces)
-		pristine := allBounded && relSD < 0.15
+		// "Pristine" = enough bounded rays for a reliable measurement.
+		// Don't require ALL rays — traces cross through most pads.
+		pristine := numBounded >= 8 && relSD < 0.25
 
 		profiles[i] = padProfile{
 			center:    geometry.Point2D{X: cx, Y: cy},
@@ -284,25 +291,40 @@ func DetectPins(backImg image.Image, comp *Component, expectedPins []ExpectedPin
 		}
 	}
 
-	// Consensus radius from pristine pads
-	var pristineRadii []float64
+	// Consensus radius: use ALL detected pad radii (each already uses
+	// 25th-percentile of bounded rays, so is robust to traces).
+	// Take the 25th percentile across pads — trace inflation can only increase
+	// radii, so lower percentile captures the true pad size.
+	var allRadii []float64
+	var pristineCount int
 	for i, p := range profiles {
+		if detected[i] && p.radius > 0 {
+			allRadii = append(allRadii, p.radius)
+		}
 		if detected[i] && p.pristine {
-			pristineRadii = append(pristineRadii, p.radius)
+			pristineCount++
 		}
 	}
 
 	consensusRadius := 0.0
-	if len(pristineRadii) > 0 {
-		sort.Float64s(pristineRadii)
-		consensusRadius = pristineRadii[len(pristineRadii)/2]
+	if len(allRadii) > 0 {
+		sort.Float64s(allRadii)
+		// 25th percentile across all pads
+		idx25 := len(allRadii) / 4
+		consensusRadius = allRadii[idx25]
 	}
 	if consensusRadius < minRadius {
 		consensusRadius = minRadius
 	}
 
-	fmt.Printf("  Pristine pads: %d/%d, consensus radius: %.1f px\n",
-		len(pristineRadii), countTrue(detected), consensusRadius)
+	if len(allRadii) > 0 {
+		fmt.Printf("  Pristine pads: %d/%d, consensus radius: %.1f px (from %d radii, range %.1f-%.1f)\n",
+			pristineCount, countTrue(detected), consensusRadius,
+			len(allRadii), allRadii[0], allRadii[len(allRadii)-1])
+	} else {
+		fmt.Printf("  Pristine pads: 0/%d, consensus radius: %.1f px (fallback)\n",
+			countTrue(detected), consensusRadius)
+	}
 
 	// ── Phase 3: rigid grid fit using only pristine pad centers ──
 	expected := make([]geometry.Point2D, n)
@@ -350,38 +372,78 @@ func DetectPins(backImg image.Image, comp *Component, expectedPins []ExpectedPin
 	fmt.Printf("  Validated: %d/%d pins\n", countTrue(valid), countTrue(detected))
 
 	// ── Phase 5: pin 1 identification ──
-	// Re-measure squareness from fitted positions for valid pins
-	pin1Idx := 0
-	maxSq := -1.0
-	for i := range expectedPins {
-		if !valid[i] {
+	// Pin 1 has a square pad. Detect it by checking diagonal corners at 1.15×
+	// radius — a square pad has bright pixels there, a round pad has green mask.
+	half := n / 2
+	corners := [4]int{0, half - 1, half, n - 1}
+
+	// Check each corner position for squareness
+	pin1Corner := -1
+	maxCornerBright := 0
+	for ci, idx := range corners {
+		if !valid[idx] {
 			continue
 		}
-		fc := fittedCenters[i]
-		distances := radialScanToGreen(backImg, fc.X, fc.Y, maxRadialDist, imgW, imgH)
-		var sumD, sumDSq float64
-		for _, d := range distances {
-			sumD += d
-			sumDSq += d * d
-		}
-		meanD := sumD / float64(len(distances))
-		variance := sumDSq/float64(len(distances)) - meanD*meanD
-		sq := math.Sqrt(math.Abs(variance))
-		if sq > maxSq {
-			maxSq = sq
-			pin1Idx = i
+		fc := fittedCenters[idx]
+		bright := countSquareCorners(backImg, fc.X, fc.Y, consensusRadius, imgW, imgH)
+		fmt.Printf("  Corner %d (idx %d): %d/4 bright diagonal corners\n", ci, idx, bright)
+		if bright > maxCornerBright {
+			maxCornerBright = bright
+			pin1Corner = ci
 		}
 	}
 
-	half := n / 2
-	reversed := false
-	if half > 1 && pin1Idx < half {
-		reversed = pin1Idx >= half/2
-	} else if half > 1 && pin1Idx >= half {
-		reversed = (pin1Idx - half) < half/2
+	// Fall back: if no corner has 3+ bright diagonals, pick first valid corner
+	if pin1Corner < 0 || maxCornerBright < 3 {
+		for ci, idx := range corners {
+			if valid[idx] {
+				pin1Corner = ci
+				break
+			}
+			_ = ci
+		}
+		if pin1Corner < 0 {
+			pin1Corner = 0
+		}
+		fmt.Printf("  Pin 1: no square pad found (max=%d), defaulting to corner %d\n",
+			maxCornerBright, pin1Corner)
+	} else {
+		fmt.Printf("  Pin 1 at corner %d (idx %d, %d/4 bright)\n",
+			pin1Corner, corners[pin1Corner], maxCornerBright)
 	}
 
-	fmt.Printf("  Pin 1 at idx %d (sq=%.2f), reversed=%v\n", pin1Idx, maxSq, reversed)
+	// Build pin number mapping from the identified corner.
+	// DIP numbering: pin 1..N/2 UP one side, then N/2+1..N DOWN the other.
+	// Pin N/2+1 is across from pin N/2 (far end), pin N is across from pin 1.
+	pinNums := make([]int, n)
+	switch pin1Corner {
+	case 0: // pin 1 at idx 0 (top of row 1)
+		// 1..N/2 down row 1, N/2+1..N up row 2
+		for i := 0; i < n; i++ {
+			pinNums[i] = i + 1
+		}
+	case 1: // pin 1 at idx half-1 (bottom of row 1)
+		// 1..N/2 up row 1 (idx half-1 → 0), N/2+1..N down row 2 (idx n-1 → half)
+		for i := 0; i < half; i++ {
+			pinNums[i] = half - i
+		}
+		for i := half; i < n; i++ {
+			pinNums[i] = n + half - i
+		}
+	case 2: // pin 1 at idx half (bottom of row 2)
+		// 1..N/2 up row 2 (idx half → n-1), N/2+1..N down row 1 (idx 0 → half-1)
+		for i := 0; i < half; i++ {
+			pinNums[i] = half + 1 + i
+		}
+		for i := half; i < n; i++ {
+			pinNums[i] = i - half + 1
+		}
+	case 3: // pin 1 at idx n-1 (top of row 2)
+		// 1..N/2 down row 2, N/2+1..N up row 1
+		for i := 0; i < n; i++ {
+			pinNums[i] = n - i
+		}
+	}
 
 	// ── Phase 6: create ConfirmedVias ──
 	var results []*via.ConfirmedVia
@@ -391,16 +453,7 @@ func DetectPins(backImg image.Image, comp *Component, expectedPins []ExpectedPin
 			continue
 		}
 
-		var pinNum int
-		if !reversed {
-			pinNum = i + 1
-		} else {
-			if i < half {
-				pinNum = half - i
-			} else {
-				pinNum = n + half - i
-			}
-		}
+		pinNum := pinNums[i]
 
 		fc := fittedCenters[i]
 		id := fmt.Sprintf("cvia-%03d", nextID())
@@ -718,6 +771,34 @@ func radialScanToGreen(img image.Image, cx, cy, maxDist float64, imgW, imgH int)
 		distances[i] = dist
 	}
 	return distances
+}
+
+// countSquareCorners checks the 4 diagonal corners at 1.15× radius from center.
+// A square pad has bright metallic pixels there (inside the square corners),
+// while a round pad has green solder mask (outside the inscribed circle).
+// Returns 0-4 indicating how many corners are bright.
+func countSquareCorners(img image.Image, cx, cy, radius float64, imgW, imgH int) int {
+	// At distance 1.15r from center in diagonal directions:
+	// - Square pad (half-side ≈ r): diagonal ≈ 1.414r → inside (bright)
+	// - Round pad (radius r): 1.15r > r → outside (dark/green)
+	d := radius * 1.15 / math.Sqrt(2)
+	bright := 0
+	for _, off := range [4][2]float64{{d, d}, {d, -d}, {-d, d}, {-d, -d}} {
+		px := int(cx + off[0])
+		py := int(cy + off[1])
+		if px < 0 || py < 0 || px >= imgW || py >= imgH {
+			continue
+		}
+		r32, g32, b32, _ := img.At(px, py).RGBA()
+		rf := float64(r32 >> 8)
+		gf := float64(g32 >> 8)
+		bf := float64(b32 >> 8)
+		_, s, v := colorutil.RGBToHSV(rf, gf, bf)
+		if v > 100 && s < 120 {
+			bright++
+		}
+	}
+	return bright
 }
 
 // generateSquarePoints returns a square boundary polygon centered at (cx, cy)

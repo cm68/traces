@@ -640,23 +640,12 @@ func (tp *TracesPanel) onDetectVias() {
 
 		tp.state.FeaturesLayer.AddVias(result.Vias)
 
-		houghCount := 0
-		contourCount := 0
-		for _, v := range result.Vias {
-			switch v.Method {
-			case via.MethodHoughCircle:
-				houghCount++
-			case via.MethodContourFit:
-				contourCount++
-			}
-		}
-
 		glib.IdleAdd(func() {
 			tp.rebuildFeaturesOverlay()
 			front, back := tp.state.FeaturesLayer.ViaCountBySide()
 			tp.viaCountLabel.SetText(fmt.Sprintf("Vias: %d front, %d back", front, back))
-			tp.viaStatusLabel.SetText(fmt.Sprintf("%s: %d vias (%d Hough, %d contour)",
-				layerName, len(result.Vias), houghCount, contourCount))
+			tp.viaStatusLabel.SetText(fmt.Sprintf("%s: %d vias detected",
+				layerName, len(result.Vias)))
 			tp.state.Emit(app.EventFeaturesChanged, nil)
 		})
 	}()
@@ -740,7 +729,7 @@ func (tp *TracesPanel) rebuildFeaturesOverlay() {
 		}
 	}
 
-	// 3. Detected vias: cyan (front) / magenta (back) outline — always visible
+	// 3. Detected vias: cyan (front) / magenta (back) solid filled circles
 	skipMatched := tp.state.FeaturesLayer.ConfirmedViaCount() > 0
 	for _, side := range []pcbimage.Side{pcbimage.SideFront, pcbimage.SideBack} {
 		var col *color.RGBA
@@ -753,20 +742,13 @@ func (tp *TracesPanel) rebuildFeaturesOverlay() {
 			if skipMatched && v.BothSidesConfirmed {
 				continue
 			}
-			if len(v.PadBoundary) >= 3 {
-				viasOverlay.Polygons = append(viasOverlay.Polygons, canvas.OverlayPolygon{
-					Points: v.PadBoundary,
-					Filled: false,
-					Color:  col,
-				})
-			} else {
-				bounds := v.Bounds()
-				viasOverlay.Rectangles = append(viasOverlay.Rectangles, canvas.OverlayRect{
-					X: bounds.X, Y: bounds.Y, Width: bounds.Width, Height: bounds.Height,
-					Fill:  canvas.FillNone,
-					Color: col,
-				})
-			}
+			viasOverlay.Circles = append(viasOverlay.Circles, canvas.OverlayCircle{
+				X:      v.Center.X,
+				Y:      v.Center.Y,
+				Radius: v.Radius,
+				Filled: true,
+				Color:  col,
+			})
 		}
 	}
 
@@ -1195,6 +1177,7 @@ func (tp *TracesPanel) showGeneralViaMenu(imgX, imgY float64) {
 		menu.Append(item)
 	}
 
+	addItem("Dump Grayscale Region", func() { tp.dumpGrayscaleRegion(imgX, imgY) })
 	addItem("Add Confirmed Via", func() { tp.addConfirmedViaAt(imgX, imgY) })
 	addItem("Delete Front Via", func() { tp.deleteNearestVia(imgX, imgY, pcbimage.SideFront) })
 	addItem("Delete Back Via", func() { tp.deleteNearestVia(imgX, imgY, pcbimage.SideBack) })
@@ -1208,6 +1191,77 @@ func (tp *TracesPanel) showGeneralViaMenu(imgX, imgY float64) {
 
 	menu.ShowAll()
 	menu.PopupAtPointer(nil)
+}
+
+// dumpGrayscaleRegion prints a ~30x30 grayscale matrix of a 3mm square
+// centered on (imgX, imgY) to stdout for diagnostic purposes.
+func (tp *TracesPanel) dumpGrayscaleRegion(imgX, imgY float64) {
+	isFront := tp.selectedLayer() == "Front"
+	var layer *pcbimage.Layer
+	if isFront {
+		layer = tp.state.FrontImage
+	} else {
+		layer = tp.state.BackImage
+	}
+	if layer == nil || layer.Image == nil {
+		fmt.Println("No image loaded")
+		return
+	}
+
+	dpi := tp.state.DPI
+	if dpi == 0 && layer.DPI > 0 {
+		dpi = layer.DPI
+	}
+	if dpi == 0 {
+		fmt.Println("DPI unknown")
+		return
+	}
+
+	// 1.5mm in pixels: 1.5mm = 1.5/25.4 inches
+	regionPx := int(1.5 / 25.4 * dpi)
+	half := regionPx / 2
+
+	cx, cy := int(imgX+0.5), int(imgY+0.5)
+	bounds := layer.Image.Bounds()
+
+	// Clamp region to image bounds
+	x0 := cx - half
+	y0 := cy - half
+	x1 := x0 + regionPx
+	y1 := y0 + regionPx
+	if x0 < bounds.Min.X {
+		x0 = bounds.Min.X
+	}
+	if y0 < bounds.Min.Y {
+		y0 = bounds.Min.Y
+	}
+	if x1 > bounds.Max.X {
+		x1 = bounds.Max.X
+	}
+	if y1 > bounds.Max.Y {
+		y1 = bounds.Max.Y
+	}
+
+	w := x1 - x0
+	h := y1 - y0
+	if w <= 0 || h <= 0 {
+		fmt.Println("Region outside image")
+		return
+	}
+
+	fmt.Printf("\n=== Grayscale dump at (%.0f, %.0f), 1.5mm square, %dx%d px ===\n",
+		imgX, imgY, w, h)
+	fmt.Printf("DPI=%.0f  region=[%d,%d]-[%d,%d]\n\n", dpi, x0, y0, x1, y1)
+
+	for py := y0; py < y1; py++ {
+		for px := x0; px < x1; px++ {
+			r, g, b, _ := layer.Image.At(px, py).RGBA()
+			gray := (19595*r + 38470*g + 7471*b + 1<<15) >> 24
+			fmt.Printf("%4d", gray)
+		}
+		fmt.Println()
+	}
+	fmt.Println()
 }
 
 // traceHit identifies a hit on a trace segment.
@@ -2887,8 +2941,7 @@ func (tp *TracesPanel) tryMatchVias() {
 		return
 	}
 	if !tp.state.Aligned {
-		tp.viaStatusLabel.SetText("Images must be aligned before matching")
-		return
+		fmt.Println("Warning: state.Aligned is false — proceeding anyway")
 	}
 
 	tp.viaStatusLabel.SetText("Matching vias...")

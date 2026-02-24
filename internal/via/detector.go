@@ -25,7 +25,24 @@ func DetectViasFromImage(srcImg image.Image, side img.Side, params DetectionPara
 	return DetectVias(mat, side, params)
 }
 
-// DetectVias detects vias in an OpenCV Mat.
+// DetectViaLocations detects vias and returns just their centers and radii.
+// This is the general-purpose entry point for callers that just need via positions.
+func DetectViaLocations(srcImg image.Image, side img.Side, dpi float64) ([]ViaLocation, error) {
+	params := DefaultParams().WithDPI(dpi)
+	result, err := DetectViasFromImage(srcImg, side, params)
+	if err != nil {
+		return nil, err
+	}
+	locs := make([]ViaLocation, len(result.Vias))
+	for i, v := range result.Vias {
+		locs[i] = ViaLocation{Center: v.Center, Radius: v.Radius}
+	}
+	return locs, nil
+}
+
+// DetectVias detects vias in an OpenCV Mat using a hybrid pipeline:
+// grayscale distance-transform finds candidates, then color analysis
+// confirms metallic pad material (low saturation) vs solder mask artifacts.
 func DetectVias(srcImg gocv.Mat, side img.Side, params DetectionParams) (*ViaDetectionResult, error) {
 	if srcImg.Empty() {
 		return nil, fmt.Errorf("empty image")
@@ -43,29 +60,47 @@ func DetectVias(srcImg gocv.Mat, side img.Side, params DetectionParams) (*ViaDet
 			params.MinRadiusPixels, params.MaxRadiusPixels)
 	}
 
-	// Convert to grayscale for Hough circles
+	// Convert to grayscale for geometry detection
 	gray := gocv.NewMat()
 	defer gray.Close()
 	gocv.CvtColor(srcImg, &gray, gocv.ColorBGRToGray)
 
-	// Blur to reduce noise
-	blurred := gocv.NewMat()
-	defer blurred.Close()
-	gocv.GaussianBlur(gray, &blurred, image.Point{9, 9}, 2, 2, gocv.BorderDefault)
+	// Convert to HSV for color confirmation
+	hsv := gocv.NewMat()
+	defer hsv.Close()
+	gocv.CvtColor(srcImg, &hsv, gocv.ColorBGRToHSV)
 
-	// Create metallic/bright mask using HSV filtering
-	metallicMask := createMetallicMask(srcImg, params)
-	defer metallicMask.Close()
+	// Create brightness mask from grayscale
+	brightMask := createBrightMask(gray, params)
+	defer brightMask.Close()
 
-	// Primary detection: Hough circles on masked grayscale
-	houghVias := detectHoughCircles(blurred, metallicMask, params, side)
+	// Step 1: Distance transform to find centers of round bright regions.
+	candidates := findDistTransformPeaks(brightMask, params, side)
 
-	// Secondary detection: Contour analysis for missed vias
-	contourVias := detectContourCircles(metallicMask, params, side, houghVias)
+	// Step 2: Verify radial symmetry and contrast
+	verified := verifyRadialSymmetry(candidates, brightMask, gray, params)
 
-	// Combine and deduplicate
-	allVias := append(houghVias, contourVias...)
-	result.Vias = deduplicateVias(allVias, params)
+	// Step 3: Color confirmation — reject candidates that are solder mask
+	// (high saturation) rather than metallic via pads (low saturation)
+	verified = confirmMetallicColor(verified, hsv, params)
+
+	// Step 4: Optional Hough cross-validation
+	if params.RequireHoughConfirm {
+		blurred := gocv.NewMat()
+		defer blurred.Close()
+		gocv.GaussianBlur(gray, &blurred, image.Point{9, 9}, 2, 2, gocv.BorderDefault)
+
+		houghCandidates := detectHoughCenters(blurred, brightMask, params)
+		verified = crossValidateWithHough(verified, houghCandidates, params)
+	}
+
+	// Step 5: Deduplicate (prefer largest radius)
+	result.Vias = deduplicateVias(verified, params)
+
+	// Step 6: Refine center and find outer radius for each via
+	for i := range result.Vias {
+		refineViaGeometry(&result.Vias[i], brightMask)
+	}
 
 	// Assign IDs
 	for i := range result.Vias {
@@ -75,31 +110,374 @@ func DetectVias(srcImg gocv.Mat, side img.Side, params DetectionParams) (*ViaDet
 	return result, nil
 }
 
-// createMetallicMask creates a binary mask for metallic/bright regions.
-func createMetallicMask(srcImg gocv.Mat, params DetectionParams) gocv.Mat {
-	hsv := gocv.NewMat()
-	defer hsv.Close()
-	gocv.CvtColor(srcImg, &hsv, gocv.ColorBGRToHSV)
+// createBrightMask creates a binary mask of bright regions using grayscale
+// thresholding. Vias are bright round blobs — hue and saturation are
+// irrelevant and fragile for non-uniform surfaces.
+func createBrightMask(gray gocv.Mat, params DetectionParams) gocv.Mat {
+	// Light blur to reduce pixel noise without smearing small vias
+	blurred := gocv.NewMat()
+	defer blurred.Close()
+	gocv.GaussianBlur(gray, &blurred, image.Point{5, 5}, 0, 0, gocv.BorderDefault)
 
+	// Simple brightness threshold
 	mask := gocv.NewMat()
-	gocv.InRangeWithScalar(hsv,
-		gocv.NewScalar(params.HueMin, params.SatMin, params.ValMin, 0),
-		gocv.NewScalar(params.HueMax, params.SatMax, params.ValMax, 0),
-		&mask)
+	gocv.Threshold(blurred, &mask, float32(params.ValMin), 255, gocv.ThresholdBinary)
 
-	// Morphological cleanup: close gaps, then remove noise
-	kernel := gocv.GetStructuringElement(gocv.MorphEllipse, image.Point{3, 3})
-	defer kernel.Close()
+	// Morphological close to fill small gaps (e.g. drill holes in vias)
+	closeKernel := gocv.GetStructuringElement(gocv.MorphEllipse, image.Point{5, 5})
+	defer closeKernel.Close()
+	gocv.MorphologyEx(mask, &mask, gocv.MorphClose, closeKernel)
 
-	gocv.MorphologyEx(mask, &mask, gocv.MorphClose, kernel)
-	gocv.MorphologyEx(mask, &mask, gocv.MorphOpen, kernel)
+	// Morphological open with smaller kernel to remove noise without eroding vias
+	openKernel := gocv.GetStructuringElement(gocv.MorphEllipse, image.Point{3, 3})
+	defer openKernel.Close()
+	gocv.MorphologyEx(mask, &mask, gocv.MorphOpen, openKernel)
 
 	return mask
 }
 
-// detectHoughCircles finds circles using Hough transform.
-func detectHoughCircles(gray, mask gocv.Mat, params DetectionParams, side img.Side) []Via {
-	// Apply mask to grayscale image
+// findDistTransformPeaks finds via candidates using the distance transform.
+// For each bright pixel, the distance transform gives the distance to the nearest
+// dark pixel. Local maxima correspond to centers of round bright regions —
+// a via pad connected to a narrow trace still peaks at the pad center because
+// the trace is narrow and produces small distance values.
+func findDistTransformPeaks(mask gocv.Mat, params DetectionParams, side img.Side) []Via {
+	dist := gocv.NewMat()
+	defer dist.Close()
+	labels := gocv.NewMat()
+	defer labels.Close()
+	gocv.DistanceTransform(mask, &dist, &labels, gocv.DistL2, gocv.DistanceMask5, gocv.DistanceLabelCComp)
+
+	// Dilate to find local maxima efficiently: a pixel is a peak if its
+	// value equals the dilated value (i.e., it's the max in its neighborhood).
+	kernelSize := 2*params.MinRadiusPixels + 1
+	if kernelSize%2 == 0 {
+		kernelSize++
+	}
+	peakKernel := gocv.GetStructuringElement(gocv.MorphEllipse, image.Point{kernelSize, kernelSize})
+	defer peakKernel.Close()
+
+	dilated := gocv.NewMat()
+	defer dilated.Close()
+	gocv.Dilate(dist, &dilated, peakKernel)
+
+	minR := float32(params.MinRadiusPixels)
+	maxR := float32(params.MaxRadiusPixels)
+	margin := params.MaxRadiusPixels
+	rows, cols := dist.Rows(), dist.Cols()
+
+	var vias []Via
+	for y := margin; y < rows-margin; y++ {
+		for x := margin; x < cols-margin; x++ {
+			val := dist.GetFloatAt(y, x)
+			if val < minR || val > maxR {
+				continue
+			}
+			// Local maximum: value equals dilated value
+			if val < dilated.GetFloatAt(y, x) {
+				continue
+			}
+			vias = append(vias, Via{
+				Center: geometry.Point2D{X: float64(x), Y: float64(y)},
+				Radius: float64(val),
+				Side:   side,
+				Method: MethodContourFit,
+			})
+		}
+	}
+	return vias
+}
+
+// verifyRadialSymmetry checks each candidate by walking outward from the center
+// at multiple angles and measuring where the bright mask ends. A round via has
+// a uniform transition radius in all directions; a via merged with a trace will
+// have some directions that extend much farther.
+func verifyRadialSymmetry(candidates []Via, mask, gray gocv.Mat, params DetectionParams) []Via {
+	var verified []Via
+	for _, v := range candidates {
+		symmetry := computeRadialSymmetry(mask, v.Center, v.Radius)
+		if symmetry < params.CircularityMin {
+			continue
+		}
+
+		contrast := computeContrast(gray, v.Center, v.Radius)
+		if contrast < params.ContrastMin {
+			continue
+		}
+
+		v.Circularity = symmetry
+		v.Confidence = symmetry * math.Min(contrast/2.0, 1.0)
+		verified = append(verified, v)
+	}
+	return verified
+}
+
+// confirmMetallicColor checks each candidate via against the HSV color image
+// to confirm it's a metallic pad (low saturation, bright) rather than a solder
+// mask artifact or silkscreen (high saturation, specific hue). Via pads are
+// silver/tin — they have low saturation regardless of brightness variations.
+func confirmMetallicColor(candidates []Via, hsv gocv.Mat, params DetectionParams) []Via {
+	rows, cols := hsv.Rows(), hsv.Cols()
+
+	var confirmed []Via
+	for _, v := range candidates {
+		cx, cy := int(v.Center.X+0.5), int(v.Center.Y+0.5)
+		r := int(v.Radius + 0.5)
+		if r < 1 {
+			r = 1
+		}
+
+		// Sample saturation inside the candidate circle
+		var satSum float64
+		var count int
+		for dy := -r; dy <= r; dy++ {
+			for dx := -r; dx <= r; dx++ {
+				if dx*dx+dy*dy > r*r {
+					continue
+				}
+				px, py := cx+dx, cy+dy
+				if px < 0 || px >= cols || py < 0 || py >= rows {
+					continue
+				}
+				// HSV is 3 channels: H=0, S=1, V=2
+				sat := float64(hsv.GetUCharAt(py, px*3+1))
+				satSum += sat
+				count++
+			}
+		}
+
+		if count == 0 {
+			continue
+		}
+
+		avgSat := satSum / float64(count)
+		// Metallic surfaces have low saturation (< SatMax).
+		// Solder mask is typically green/red with saturation > 100.
+		if avgSat <= params.SatMax {
+			confirmed = append(confirmed, v)
+		}
+	}
+	return confirmed
+}
+
+// computeRadialSymmetry walks outward from center at 32 evenly-spaced angles,
+// finding where the bright mask edge is in each direction. It computes a
+// circularity score using median-based outlier rejection:
+//
+//  1. Collect 32 transition distances (center to mask edge)
+//  2. Compute median distance as the "expected outer radius"
+//  3. Classify outliers: distance > 1.5× median (trace connections extending far)
+//  4. Inlier fraction: what portion of directions agree with the median
+//  5. Inlier uniformity: 1 - CV(inlier distances), where CV = stddev/mean
+//  6. Score = inlierFraction × uniformity
+//
+// A perfect circle scores 1.0. A via with 2-3 trace connections scores ~0.8.
+// An irregular or elongated blob scores below 0.5.
+func computeRadialSymmetry(mask gocv.Mat, center geometry.Point2D, radius float64) float64 {
+	const numAngles = 32
+	cx, cy := center.X, center.Y
+	rows, cols := mask.Rows(), mask.Cols()
+	maxWalk := radius * 3.0
+
+	// Walk each angle to find transition distance
+	dists := make([]float64, numAngles)
+	for i := 0; i < numAngles; i++ {
+		angle := float64(i) * 2.0 * math.Pi / numAngles
+		dx := math.Cos(angle)
+		dy := math.Sin(angle)
+
+		transR := maxWalk
+		for step := 1.0; step <= maxWalk; step += 1.0 {
+			px := int(cx + dx*step + 0.5)
+			py := int(cy + dy*step + 0.5)
+			if px < 0 || px >= cols || py < 0 || py >= rows || mask.GetUCharAt(py, px) == 0 {
+				transR = step
+				break
+			}
+		}
+		dists[i] = transR
+	}
+
+	// Compute median transition distance as robust "expected radius"
+	sorted := make([]float64, numAngles)
+	copy(sorted, dists)
+	sort.Float64s(sorted)
+	median := sorted[numAngles/2]
+
+	if median < 2.0 {
+		return 0 // Too small to be meaningful
+	}
+
+	// Classify inliers: transition within 1.5× median.
+	// Trace connections extend much farther and become outliers.
+	outlierThreshold := median * 1.5
+	var inlierDists []float64
+	for _, d := range dists {
+		if d <= outlierThreshold {
+			inlierDists = append(inlierDists, d)
+		}
+	}
+
+	inlierFraction := float64(len(inlierDists)) / numAngles
+	if len(inlierDists) < 4 {
+		return 0
+	}
+
+	// Compute uniformity: 1 - CV(inlier distances)
+	// CV = coefficient of variation = stddev / mean
+	// Low CV means inlier boundary distances are tightly clustered → circular
+	var sum float64
+	for _, d := range inlierDists {
+		sum += d
+	}
+	mean := sum / float64(len(inlierDists))
+
+	var variance float64
+	for _, d := range inlierDists {
+		diff := d - mean
+		variance += diff * diff
+	}
+	variance /= float64(len(inlierDists))
+	stddev := math.Sqrt(variance)
+
+	cv := stddev / mean
+	uniformity := 1.0 - cv
+	if uniformity < 0 {
+		uniformity = 0
+	}
+
+	return inlierFraction * uniformity
+}
+
+// refineViaGeometry improves the via center and finds the outer radius.
+// It walks outward at many angles, uses median-based outlier rejection
+// (same as computeRadialSymmetry) to discard trace-connection directions,
+// and computes a refined center and outer radius from the inlier boundary.
+func refineViaGeometry(v *Via, mask gocv.Mat) {
+	const numAngles = 32
+	cx, cy := v.Center.X, v.Center.Y
+	inscribed := v.Radius
+	rows, cols := mask.Rows(), mask.Cols()
+	maxWalk := inscribed * 3.0
+
+	// Walk outward at each angle to find boundary points
+	type boundaryPt struct {
+		x, y float64
+		dist float64
+	}
+	pts := make([]boundaryPt, numAngles)
+	rawDists := make([]float64, numAngles)
+
+	for i := 0; i < numAngles; i++ {
+		angle := float64(i) * 2.0 * math.Pi / numAngles
+		dx := math.Cos(angle)
+		dy := math.Sin(angle)
+
+		transR := maxWalk
+		for step := 1.0; step <= maxWalk; step += 1.0 {
+			px := int(cx + dx*step + 0.5)
+			py := int(cy + dy*step + 0.5)
+			if px < 0 || px >= cols || py < 0 || py >= rows || mask.GetUCharAt(py, px) == 0 {
+				transR = step
+				break
+			}
+		}
+		pts[i] = boundaryPt{x: cx + dx*transR, y: cy + dy*transR, dist: transR}
+		rawDists[i] = transR
+	}
+
+	// Median-based outlier rejection (consistent with computeRadialSymmetry)
+	sorted := make([]float64, numAngles)
+	copy(sorted, rawDists)
+	sort.Float64s(sorted)
+	median := sorted[numAngles/2]
+	outlierThreshold := median * 1.5
+
+	var inliers []boundaryPt
+	for _, p := range pts {
+		if p.dist <= outlierThreshold {
+			inliers = append(inliers, p)
+		}
+	}
+	if len(inliers) < 4 {
+		return
+	}
+
+	// Refined center: centroid of inlier boundary points
+	var sx, sy float64
+	for _, p := range inliers {
+		sx += p.x
+		sy += p.y
+	}
+	newCX := sx / float64(len(inliers))
+	newCY := sy / float64(len(inliers))
+
+	// Outer radius: median distance from new center to inlier boundary points
+	dists := make([]float64, len(inliers))
+	for i, p := range inliers {
+		dx := p.x - newCX
+		dy := p.y - newCY
+		dists[i] = math.Sqrt(dx*dx + dy*dy)
+	}
+	sort.Float64s(dists)
+	outerRadius := dists[len(dists)/2]
+
+	// Only update if the refinement makes sense
+	if outerRadius >= inscribed*0.5 && outerRadius <= inscribed*2.0 {
+		v.Center = geometry.Point2D{X: newCX, Y: newCY}
+		v.Radius = outerRadius
+	}
+}
+
+// computeContrast computes the ratio of mean grayscale brightness inside the
+// circle vs. an annular ring from 1.5r to 2.5r outside the circle.
+// The wider gap ensures we're sampling actual background, not pad edge.
+func computeContrast(gray gocv.Mat, center geometry.Point2D, radius float64) float64 {
+	cx, cy := int(center.X+0.5), int(center.Y+0.5)
+	r := int(radius + 0.5)
+	innerR := int(radius*1.5 + 0.5)
+	outerR := int(radius*2.5 + 0.5)
+	rows, cols := gray.Rows(), gray.Cols()
+
+	var innerSum, outerSum float64
+	var innerCount, outerCount int
+
+	for dy := -outerR; dy <= outerR; dy++ {
+		for dx := -outerR; dx <= outerR; dx++ {
+			d2 := dx*dx + dy*dy
+			px, py := cx+dx, cy+dy
+			if px < 0 || px >= cols || py < 0 || py >= rows {
+				continue
+			}
+			val := float64(gray.GetUCharAt(py, px))
+			if d2 <= r*r {
+				innerSum += val
+				innerCount++
+			} else if d2 >= innerR*innerR && d2 <= outerR*outerR {
+				outerSum += val
+				outerCount++
+			}
+		}
+	}
+
+	if innerCount == 0 || outerCount == 0 {
+		return 0
+	}
+	outerMean := outerSum / float64(outerCount)
+	if outerMean == 0 {
+		return 0
+	}
+	return (innerSum / float64(innerCount)) / outerMean
+}
+
+// houghCandidate holds a Hough-detected circle center and radius.
+type houghCandidate struct {
+	center geometry.Point2D
+	radius float64
+}
+
+// detectHoughCenters runs Hough circle detection for cross-validation only.
+func detectHoughCenters(gray, mask gocv.Mat, params DetectionParams) []houghCandidate {
 	masked := gocv.NewMat()
 	defer masked.Close()
 	gray.CopyToWithMask(&masked, mask)
@@ -116,85 +494,40 @@ func detectHoughCircles(gray, mask gocv.Mat, params DetectionParams, side img.Si
 		return nil
 	}
 
-	var vias []Via
+	candidates := make([]houghCandidate, circles.Cols())
 	for i := 0; i < circles.Cols(); i++ {
-		cx := float64(circles.GetFloatAt(0, i*3))
-		cy := float64(circles.GetFloatAt(0, i*3+1))
-		r := float64(circles.GetFloatAt(0, i*3+2))
-
-		vias = append(vias, Via{
-			Center:      geometry.Point2D{X: cx, Y: cy},
-			Radius:      r,
-			Side:        side,
-			Circularity: 1.0, // Hough assumes perfect circles
-			Confidence:  0.9,
-			Method:      MethodHoughCircle,
-		})
+		candidates[i] = houghCandidate{
+			center: geometry.Point2D{
+				X: float64(circles.GetFloatAt(0, i*3)),
+				Y: float64(circles.GetFloatAt(0, i*3+1)),
+			},
+			radius: float64(circles.GetFloatAt(0, i*3+2)),
+		}
 	}
-
-	return vias
+	return candidates
 }
 
-// detectContourCircles finds circular regions via contour analysis.
-func detectContourCircles(mask gocv.Mat, params DetectionParams, side img.Side, existing []Via) []Via {
-	contours := gocv.FindContours(mask, gocv.RetrievalExternal, gocv.ChainApproxSimple)
-	defer contours.Close()
-
-	var vias []Via
-
-	// Calculate expected area range
-	minArea := math.Pi * float64(params.MinRadiusPixels*params.MinRadiusPixels) * 0.5
-	maxArea := math.Pi * float64(params.MaxRadiusPixels*params.MaxRadiusPixels) * 2.0
-
-	for i := 0; i < contours.Size(); i++ {
-		contour := contours.At(i)
-		area := gocv.ContourArea(contour)
-
-		// Size filter
-		if area < minArea || area > maxArea {
-			continue
-		}
-
-		// Circularity check: 4*pi*area / perimeter^2
-		perimeter := gocv.ArcLength(contour, true)
-		if perimeter == 0 {
-			continue
-		}
-		circularity := (4 * math.Pi * area) / (perimeter * perimeter)
-
-		if circularity < params.CircularityMin {
-			continue
-		}
-
-		// Get center via minimum enclosing circle
-		cx, cy, radius := gocv.MinEnclosingCircle(contour)
-		center := geometry.Point2D{X: float64(cx), Y: float64(cy)}
-
-		// Skip if radius outside expected range
-		if float64(radius) < float64(params.MinRadiusPixels)*0.5 ||
-			float64(radius) > float64(params.MaxRadiusPixels)*2.0 {
-			continue
-		}
-
-		// Skip if too close to an existing Hough-detected via
-		if isNearExisting(center, existing, float64(params.MinRadiusPixels)) {
-			continue
-		}
-
-		vias = append(vias, Via{
-			Center:      center,
-			Radius:      float64(radius),
-			Side:        side,
-			Circularity: circularity,
-			Confidence:  circularity * 0.8, // Lower base confidence for contour method
-			Method:      MethodContourFit,
-		})
+// crossValidateWithHough keeps only contour-detected vias that have a
+// corresponding Hough detection within one radius distance.
+func crossValidateWithHough(contourVias []Via, houghCandidates []houghCandidate, params DetectionParams) []Via {
+	if len(houghCandidates) == 0 {
+		return nil
 	}
 
-	return vias
+	var confirmed []Via
+	for _, v := range contourVias {
+		for _, h := range houghCandidates {
+			dist := distance(v.Center, h.center)
+			if dist < v.Radius {
+				confirmed = append(confirmed, v)
+				break
+			}
+		}
+	}
+	return confirmed
 }
 
-// deduplicateVias removes duplicate vias detected by both methods.
+// deduplicateVias removes overlapping detections, preferring the largest radius.
 func deduplicateVias(vias []Via, params DetectionParams) []Via {
 	if len(vias) <= 1 {
 		return vias
@@ -202,18 +535,16 @@ func deduplicateVias(vias []Via, params DetectionParams) []Via {
 
 	threshold := float64(params.MinRadiusPixels)
 
-	// Sort by confidence (descending) so we keep the best detections
+	// Sort by radius (descending) so we keep the largest detections
 	sort.Slice(vias, func(i, j int) bool {
-		return vias[i].Confidence > vias[j].Confidence
+		return vias[i].Radius > vias[j].Radius
 	})
 
 	var result []Via
 	for _, v := range vias {
 		isDup := false
 		for i := range result {
-			dist := distance(v.Center, result[i].Center)
-			if dist < threshold {
-				// Keep the one with higher confidence (already sorted)
+			if distance(v.Center, result[i].Center) < threshold {
 				isDup = true
 				break
 			}
@@ -224,16 +555,6 @@ func deduplicateVias(vias []Via, params DetectionParams) []Via {
 	}
 
 	return result
-}
-
-// isNearExisting returns true if center is within threshold distance of any existing via.
-func isNearExisting(center geometry.Point2D, vias []Via, threshold float64) bool {
-	for _, v := range vias {
-		if distance(center, v.Center) < threshold {
-			return true
-		}
-	}
-	return false
 }
 
 // distance calculates Euclidean distance between two points.

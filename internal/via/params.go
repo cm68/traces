@@ -9,22 +9,29 @@ func DefaultParams() DetectionParams {
 		HueMin: 0,
 		HueMax: 180, // All hues - metallic surfaces vary
 		SatMin: 0,
-		SatMax: 100, // Low saturation for metallic appearance
-		ValMin: 180,
-		ValMax: 255, // High brightness
+		SatMax: 120, // Low-ish saturation; allows some oxidation/flux tint
+		ValMin: 150, // Bright; contrast check rejects uniform mid-brightness areas
+		ValMax: 255,
 
 		// Typical via sizes
-		MinDiamInches: 0.010, // 10 mil via
-		MaxDiamInches: 0.050, // 50 mil via
+		MinDiamInches: 0.030, // ~0.76mm diameter (handles small vias)
+		MaxDiamInches: 0.120, // ~3mm diameter
 
-		// Shape constraint - vias should be fairly circular
-		CircularityMin: 0.65,
+		// Radial symmetry: combined inlier-fraction × uniformity from 32 angles.
+		// A perfect circle scores 1.0. A via with 2-3 trace connections ~0.8.
+		// 0.55 tolerates some pad irregularity while rejecting non-circular blobs.
+		CircularityMin: 0.55,
 
-		// Hough circle detection tuning
-		HoughDP:       1.2, // Slightly lower resolution for speed
-		HoughMinDist:  20,  // Will be recalculated based on DPI
-		HoughParam1:   80,  // Canny high threshold
-		HoughParam2:   30,  // Accumulator threshold (lower = more sensitive)
+		// Contour verification
+		FillRatioMin: 0.80, // 80% of enclosing circle must be metallic
+		ContrastMin:  1.2,  // Via must be 1.2x brighter than surroundings
+
+		// Hough circle detection tuning (cross-validation only)
+		HoughDP:             1.2,   // Slightly lower resolution for speed
+		HoughMinDist:        20,    // Will be recalculated based on DPI
+		HoughParam1:         100,   // Require stronger edges
+		HoughParam2:         50,    // Much stricter accumulator
+		RequireHoughConfirm: false, // Optional strictest mode
 	}
 }
 

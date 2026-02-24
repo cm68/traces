@@ -61,8 +61,10 @@ func main() {
 	fmt.Printf("  Size: %.3f\" - %.3f\" (radius %d-%d px)\n",
 		params.MinDiamInches, params.MaxDiamInches, params.MinRadiusPixels, params.MaxRadiusPixels)
 	fmt.Printf("  Circularity min: %.2f\n", params.CircularityMin)
-	fmt.Printf("  Hough: dp=%.1f minDist=%d param1=%.0f param2=%.0f\n",
-		params.HoughDP, params.HoughMinDist, params.HoughParam1, params.HoughParam2)
+	fmt.Printf("  Fill ratio min: %.2f\n", params.FillRatioMin)
+	fmt.Printf("  Contrast min: %.1f\n", params.ContrastMin)
+	fmt.Printf("  Hough cross-validate: %v (dp=%.1f minDist=%d param1=%.0f param2=%.0f)\n",
+		params.RequireHoughConfirm, params.HoughDP, params.HoughMinDist, params.HoughParam1, params.HoughParam2)
 
 	// Run detection
 	fmt.Printf("\nDetecting vias...\n")
@@ -82,16 +84,5 @@ func main() {
 			v.ID, v.Center.X, v.Center.Y, v.Radius, v.Circularity, v.Confidence, v.Method)
 	}
 
-	// Summary by method
-	houghCount := 0
-	contourCount := 0
-	for _, v := range result.Vias {
-		switch v.Method {
-		case via.MethodHoughCircle:
-			houghCount++
-		case via.MethodContourFit:
-			contourCount++
-		}
-	}
-	fmt.Printf("\nSummary: %d Hough, %d Contour\n", houghCount, contourCount)
+	fmt.Printf("\nTotal: %d vias detected\n", len(result.Vias))
 }

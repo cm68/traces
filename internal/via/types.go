@@ -116,6 +116,12 @@ func pointInPolygon(x, y float64, polygon []geometry.Point2D) bool {
 	return inside
 }
 
+// ViaLocation is a minimal representation of a detected via: center and radius.
+type ViaLocation struct {
+	Center geometry.Point2D `json:"center"` // Center in image coordinates (pixels)
+	Radius float64          `json:"radius"` // Radius in pixels
+}
+
 // ViaDetectionResult holds the results of via detection on an image.
 type ViaDetectionResult struct {
 	Vias   []Via          // All detected vias
@@ -143,11 +149,16 @@ type DetectionParams struct {
 	// Shape constraint
 	CircularityMin float64 // Minimum circularity (0-1), e.g., 0.65
 
-	// Hough circle detection parameters
-	HoughDP       float64 // Inverse ratio of accumulator resolution (1.0-2.0)
-	HoughMinDist  int     // Minimum distance between circle centers (pixels)
-	HoughParam1   float64 // Canny edge detector high threshold
-	HoughParam2   float64 // Accumulator threshold for circle detection
+	// Contour verification
+	FillRatioMin float64 // Min fraction of enclosing circle filled by contour (0.80)
+	ContrastMin  float64 // Min brightness ratio inside vs. annular ring outside (1.5)
+
+	// Hough circle detection parameters (used for cross-validation)
+	HoughDP             float64 // Inverse ratio of accumulator resolution (1.0-2.0)
+	HoughMinDist        int     // Minimum distance between circle centers (pixels)
+	HoughParam1         float64 // Canny edge detector high threshold
+	HoughParam2         float64 // Accumulator threshold for circle detection
+	RequireHoughConfirm bool    // If true, only keep candidates also found by Hough
 
 	// DPI for size calculations
 	DPI float64

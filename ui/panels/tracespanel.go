@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -225,7 +226,7 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, 
 	helpTexts := []string{
 		"Cyan=front  Magenta=back  Blue=both",
 		"Click via/conn: start trace  Click empty: add via",
-		"While drawing: click waypoints, end on via/conn",
+		"While drawing: click waypoints, right/mid cancels",
 		"Right-click: menu  Arrow keys: nudge selected via",
 	}
 	for _, t := range helpTexts {
@@ -1184,8 +1185,9 @@ func (tp *TracesPanel) onRightClickVia(x, y float64) {
 	if tp.draggingVertex {
 		tp.cancelVertexDrag()
 	}
-	// During polyline drawing, right-click is ignored (use Escape to cancel)
+	// During polyline drawing, right-click cancels the trace
 	if tp.traceMode {
+		tp.cancelTrace()
 		return
 	}
 
@@ -1210,6 +1212,18 @@ func (tp *TracesPanel) onRightClickVia(x, y float64) {
 	}
 
 	tp.showGeneralViaMenu(x, y)
+}
+
+// onMiddleClick handles middle-click on the canvas — cancels trace drawing.
+func (tp *TracesPanel) onMiddleClick(x, y float64) {
+	if tp.draggingVertex {
+		tp.cancelVertexDrag()
+		return
+	}
+	if tp.traceMode {
+		tp.cancelTrace()
+		return
+	}
 }
 
 // showConfirmedViaMenu shows the context menu for a confirmed via.
@@ -1244,6 +1258,9 @@ func (tp *TracesPanel) showConfirmedViaMenu(cv *via.ConfirmedVia) {
 
 	addItem(netLabel, func() { tp.nameNetlist(cv) })
 	addItem(pinLabel, func() { tp.namePin(cv) })
+	if cv.ComponentID != "" && cv.PinNumber != "" {
+		addItem("Renumber Pin (whole package)...", func() { tp.renumberPin(cv) })
+	}
 	addSep()
 	addItem("Delete Via", func() { tp.deleteConfirmedVia(cv) })
 	addItem("Delete Front", func() { tp.deleteConfirmedViaSide(cv, pcbimage.SideFront) })
@@ -2366,6 +2383,226 @@ func (tp *TracesPanel) namePin(cv *via.ConfirmedVia) {
 		tp.state.Emit(app.EventConfirmedViasChanged, nil)
 	}
 	dlg.Destroy()
+}
+
+// renumberPin sets the pin number for the clicked via and renumbers all other pins
+// on the same component using DIP convention. Pops up a dialog asking for the pin
+// number of the clicked via, then computes the rest from the grid layout.
+func (tp *TracesPanel) renumberPin(cv *via.ConfirmedVia) {
+	if cv.ComponentID == "" {
+		return
+	}
+
+	dlg, _ := gtk.DialogNewWithButtons("Renumber Pin", tp.win,
+		gtk.DIALOG_MODAL|gtk.DIALOG_DESTROY_WITH_PARENT,
+		[]interface{}{"Cancel", gtk.RESPONSE_CANCEL},
+		[]interface{}{"OK", gtk.RESPONSE_OK})
+	dlg.SetDefaultSize(300, 120)
+	dlg.SetDefaultResponse(gtk.RESPONSE_OK)
+
+	contentArea, _ := dlg.GetContentArea()
+
+	infoLabel, _ := gtk.LabelNew(fmt.Sprintf("Component: %s  Current pin: %s\nEnter the correct pin number for this via.\nAll other pins on this component will be renumbered.", cv.ComponentID, cv.PinNumber))
+	infoLabel.SetHAlign(gtk.ALIGN_START)
+	infoLabel.SetLineWrap(true)
+	contentArea.PackStart(infoLabel, false, false, 4)
+
+	pinEntry, _ := gtk.EntryNew()
+	pinEntry.SetActivatesDefault(true)
+	if cv.PinNumber != "" {
+		pinEntry.SetText(cv.PinNumber)
+	}
+	pinEntry.SetPlaceholderText("e.g. 1, 14")
+
+	lbl, _ := gtk.LabelNew("Pin number:")
+	lbl.SetHAlign(gtk.ALIGN_START)
+	contentArea.PackStart(lbl, false, false, 4)
+	contentArea.PackStart(pinEntry, false, false, 4)
+	dlg.ShowAll()
+
+	response := dlg.Run()
+	pinText, _ := pinEntry.GetText()
+	dlg.Destroy()
+	if response != gtk.RESPONSE_OK {
+		return
+	}
+	newPinNum, err := strconv.Atoi(strings.TrimSpace(pinText))
+	if err != nil || newPinNum < 1 {
+		fmt.Println("Invalid pin number:", pinText)
+		return
+	}
+
+	// Find all confirmed vias for this component
+	compID := cv.ComponentID
+	var compVias []*via.ConfirmedVia
+	for _, v := range tp.state.FeaturesLayer.GetConfirmedVias() {
+		if v.ComponentID == compID {
+			compVias = append(compVias, v)
+		}
+	}
+	if len(compVias) < 2 {
+		cv.PinNumber = strconv.Itoa(newPinNum)
+		component.ResolveSignalName(cv, tp.state.Components, tp.state.ComponentLibrary)
+		tp.rebuildFeaturesOverlay()
+		tp.canvas.Refresh()
+		tp.state.Emit(app.EventConfirmedViasChanged, nil)
+		return
+	}
+
+	// Sort all pins by X then Y to get a deterministic spatial order.
+	// Print them so the user can see exactly what we're working with.
+	sorted := make([]*via.ConfirmedVia, len(compVias))
+	copy(sorted, compVias)
+	sort.Slice(sorted, func(i, j int) bool {
+		if math.Abs(sorted[i].Center.X-sorted[j].Center.X) > 5 {
+			return sorted[i].Center.X < sorted[j].Center.X
+		}
+		return sorted[i].Center.Y < sorted[j].Center.Y
+	})
+
+	fmt.Printf("Renumber %s: %d pins sorted by (X, Y):\n", compID, len(sorted))
+	for i, v := range sorted {
+		fmt.Printf("  [%2d] %s at (%.0f, %.0f) current pin %s\n",
+			i, v.ID, v.Center.X, v.Center.Y, v.PinNumber)
+	}
+
+	// Split into two rows using median X.
+	// Collect all X values, find median, split on it.
+	xs := make([]float64, len(sorted))
+	ys := make([]float64, len(sorted))
+	for i, v := range sorted {
+		xs[i] = v.Center.X
+		ys[i] = v.Center.Y
+	}
+	sortedXs := make([]float64, len(xs))
+	copy(sortedXs, xs)
+	sort.Float64s(sortedXs)
+	sortedYs := make([]float64, len(ys))
+	copy(sortedYs, ys)
+	sort.Float64s(sortedYs)
+
+	// Determine orientation from pin spread
+	xSpread := sortedXs[len(sortedXs)-1] - sortedXs[0]
+	ySpread := sortedYs[len(sortedYs)-1] - sortedYs[0]
+	vertical := ySpread >= xSpread
+
+	fmt.Printf("  X spread=%.0f, Y spread=%.0f → %s DIP\n",
+		xSpread, ySpread, map[bool]string{true: "vertical", false: "horizontal"}[vertical])
+
+	// Split into two rows using the SHORT axis median
+	var row1, row2 []*via.ConfirmedVia
+	if vertical {
+		// Short axis = X. Split at median X.
+		medX := sortedXs[len(sortedXs)/2]
+		// Use gap midpoint: find the biggest gap between sorted X values
+		splitX := medX
+		if len(sortedXs) >= 4 {
+			maxGap := 0.0
+			for i := 1; i < len(sortedXs); i++ {
+				gap := sortedXs[i] - sortedXs[i-1]
+				if gap > maxGap {
+					maxGap = gap
+					splitX = (sortedXs[i] + sortedXs[i-1]) / 2
+				}
+			}
+		}
+		fmt.Printf("  Splitting rows at X=%.0f\n", splitX)
+		for _, v := range compVias {
+			if v.Center.X < splitX {
+				row1 = append(row1, v)
+			} else {
+				row2 = append(row2, v)
+			}
+		}
+		// Sort each row by Y (along the long axis)
+		sort.Slice(row1, func(i, j int) bool { return row1[i].Center.Y < row1[j].Center.Y })
+		sort.Slice(row2, func(i, j int) bool { return row2[i].Center.Y < row2[j].Center.Y })
+	} else {
+		// Short axis = Y. Split at median Y.
+		medY := sortedYs[len(sortedYs)/2]
+		splitY := medY
+		if len(sortedYs) >= 4 {
+			maxGap := 0.0
+			for i := 1; i < len(sortedYs); i++ {
+				gap := sortedYs[i] - sortedYs[i-1]
+				if gap > maxGap {
+					maxGap = gap
+					splitY = (sortedYs[i] + sortedYs[i-1]) / 2
+				}
+			}
+		}
+		fmt.Printf("  Splitting rows at Y=%.0f\n", splitY)
+		for _, v := range compVias {
+			if v.Center.Y < splitY {
+				row1 = append(row1, v)
+			} else {
+				row2 = append(row2, v)
+			}
+		}
+		// Sort each row by X (along the long axis)
+		sort.Slice(row1, func(i, j int) bool { return row1[i].Center.X < row1[j].Center.X })
+		sort.Slice(row2, func(i, j int) bool { return row2[i].Center.X < row2[j].Center.X })
+	}
+
+	fmt.Printf("  Row 1 (%d pins):", len(row1))
+	for _, v := range row1 {
+		fmt.Printf(" %s(%.0f,%.0f)", v.PinNumber, v.Center.X, v.Center.Y)
+	}
+	fmt.Println()
+	fmt.Printf("  Row 2 (%d pins):", len(row2))
+	for _, v := range row2 {
+		fmt.Printf(" %s(%.0f,%.0f)", v.PinNumber, v.Center.X, v.Center.Y)
+	}
+	fmt.Println()
+
+	// Build DIP U-shape: row1 forward, then row2 reversed.
+	ordered := make([]*via.ConfirmedVia, 0, len(compVias))
+	ordered = append(ordered, row1...)
+	for i := len(row2) - 1; i >= 0; i-- {
+		ordered = append(ordered, row2[i])
+	}
+
+	fmt.Printf("  DIP U-shape order:\n")
+	for i, v := range ordered {
+		fmt.Printf("    slot %2d: %s at (%.0f, %.0f)\n", i, v.ID, v.Center.X, v.Center.Y)
+	}
+
+	// Find which slot the clicked via occupies
+	clickedSlot := -1
+	for i, v := range ordered {
+		if v.ID == cv.ID {
+			clickedSlot = i
+			break
+		}
+	}
+	if clickedSlot < 0 {
+		fmt.Println("Could not find clicked via in ordered list")
+		return
+	}
+
+	// Assign pin numbers: clicked via = newPinNum, others follow by offset
+	total := len(ordered)
+	fmt.Printf("  Clicked %s at slot %d → pin %d\n", cv.ID, clickedSlot, newPinNum)
+	for i, v := range ordered {
+		offset := i - clickedSlot
+		pin := newPinNum + offset
+		for pin < 1 {
+			pin += total
+		}
+		for pin > total {
+			pin -= total
+		}
+		oldPin := v.PinNumber
+		v.PinNumber = strconv.Itoa(pin)
+		component.ResolveSignalName(v, tp.state.Components, tp.state.ComponentLibrary)
+		fmt.Printf("    slot %2d: pin %s → %d  %s (%.0f, %.0f)\n",
+			i, oldPin, pin, v.ID, v.Center.X, v.Center.Y)
+	}
+
+	fmt.Printf("Renumbered %d pins for %s\n", total, compID)
+	tp.rebuildFeaturesOverlay()
+	tp.canvas.Refresh()
+	tp.state.Emit(app.EventConfirmedViasChanged, nil)
 }
 
 // isOutputPin returns true if the confirmed via is an output pin according to the

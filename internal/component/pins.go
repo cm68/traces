@@ -526,8 +526,10 @@ func validatePadCenter(img image.Image, cx, cy, radius float64, imgW, imgH int) 
 	return float64(metallicCount)/float64(totalCount) > 0.25
 }
 
-// fitRigidGrid computes the optimal rigid transform (rotation + translation)
-// mapping expected positions to detected centers, with outlier rejection.
+// fitRigidGrid computes the optimal translation (no rotation) mapping expected
+// positions to detected centers, with outlier rejection. DIP holes are drilled
+// by machine on a perfectly axis-aligned grid, so rotation is never correct —
+// any apparent tilt comes from asymmetric solder pulling center estimates.
 // Returns the fitted position for every expected pin.
 func fitRigidGrid(expected, detected []geometry.Point2D, mask []bool, pitchPx float64) []geometry.Point2D {
 	n := len(expected)
@@ -543,48 +545,23 @@ func fitRigidGrid(expected, detected []geometry.Point2D, mask []bool, pitchPx fl
 			return result
 		}
 
-		var emx, emy, dmx, dmy float64
+		// Translation only: average offset from expected to detected
+		var tx, ty float64
 		for i := 0; i < n; i++ {
 			if !inlier[i] {
 				continue
 			}
-			emx += expected[i].X
-			emy += expected[i].Y
-			dmx += detected[i].X
-			dmy += detected[i].Y
+			tx += detected[i].X - expected[i].X
+			ty += detected[i].Y - expected[i].Y
 		}
 		cf := float64(cnt)
-		emx /= cf
-		emy /= cf
-		dmx /= cf
-		dmy /= cf
-
-		var num, den float64
-		for i := 0; i < n; i++ {
-			if !inlier[i] {
-				continue
-			}
-			ex := expected[i].X - emx
-			ey := expected[i].Y - emy
-			dx := detected[i].X - dmx
-			dy := detected[i].Y - dmy
-			num += ex*dy - ey*dx
-			den += ex*dx + ey*dy
-		}
-
-		theta := 0.0
-		if cnt >= 2 {
-			theta = math.Atan2(num, den)
-		}
-		cos, sin := math.Cos(theta), math.Sin(theta)
-
-		tx := dmx - (cos*emx - sin*emy)
-		ty := dmy - (sin*emx + cos*emy)
+		tx /= cf
+		ty /= cf
 
 		for i := 0; i < n; i++ {
 			result[i] = geometry.Point2D{
-				X: cos*expected[i].X - sin*expected[i].Y + tx,
-				Y: sin*expected[i].X + cos*expected[i].Y + ty,
+				X: expected[i].X + tx,
+				Y: expected[i].Y + ty,
 			}
 		}
 

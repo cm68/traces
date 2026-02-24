@@ -275,6 +275,14 @@ func (cp *ComponentsPanel) buildEditForm() *gtk.ScrolledWindow {
 		} else {
 			rb, _ = gtk.RadioButtonNewWithLabelFromWidget(firstRadio, dir)
 		}
+		d := dir // capture for closure
+		rb.Connect("toggled", func() {
+			if !rb.GetActive() {
+				return
+			}
+			cp.state.LastOCROrientation = d
+			cp.updatePreviewImage()
+		})
 		cp.ocrOrientation = append(cp.ocrOrientation, rb)
 		orientBox.PackStart(rb, false, false, 0)
 	}
@@ -2107,6 +2115,7 @@ func (cp *ComponentsPanel) onDetectComponents() {
 	cp.updateComponentOverlay()
 	cp.state.SetModified(true)
 }
+
 
 // onOCRSilkscreen runs OCR on the silkscreen to find component labels.
 func (cp *ComponentsPanel) onOCRSilkscreen() {

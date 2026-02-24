@@ -13,8 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"strings"
-
 	"pcb-tracer/internal/app"
 	"pcb-tracer/internal/component"
 	"pcb-tracer/internal/connector"
@@ -173,6 +171,10 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, 
 	tp.matchViasBtn, _ = gtk.ButtonNewWithLabel("Match Vias")
 	tp.matchViasBtn.Connect("clicked", func() { tp.tryMatchVias() })
 	viaBox.PackStart(tp.matchViasBtn, false, false, 0)
+
+	detectPinsBtn, _ := gtk.ButtonNewWithLabel("Detect Pins")
+	detectPinsBtn.Connect("clicked", func() { tp.onDetectPins() })
+	viaBox.PackStart(detectPinsBtn, false, false, 0)
 
 	showViaNumCheck, _ := gtk.CheckButtonNewWithLabel("Show via numbers")
 	showViaNumCheck.SetActive(tp.showViaNumbers)
@@ -364,6 +366,15 @@ func NewTracesPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, 
 	// Redraw features overlay when connectors are created/rebuilt
 	state.On(app.EventConnectorsCreated, func(_ interface{}) {
 		tp.rebuildFeaturesOverlay()
+	})
+
+	// Rebuild overlay when confirmed vias change (e.g. pin detection from components panel)
+	state.On(app.EventConfirmedViasChanged, func(_ interface{}) {
+		glib.IdleAdd(func() {
+			tp.rebuildFeaturesOverlay()
+			tp.updateViaCounts()
+			tp.canvas.Refresh()
+		})
 	})
 
 	// Rebuild overlay when nets change (trace colors depend on net status)
@@ -827,6 +838,88 @@ func (tp *TracesPanel) onClearVias() {
 	tp.state.Emit(app.EventFeaturesChanged, nil)
 }
 
+// onDetectPins detects solder joint pins on the back image for all DIP components.
+func (tp *TracesPanel) onDetectPins() {
+	if tp.state.BackImage == nil || tp.state.BackImage.Image == nil {
+		fmt.Println("[DetectPins] No back image loaded")
+		return
+	}
+	dpi := tp.state.DPI
+	if dpi <= 0 {
+		fmt.Println("[DetectPins] DPI not set")
+		return
+	}
+	if len(tp.state.Components) == 0 {
+		fmt.Println("[DetectPins] No components defined")
+		return
+	}
+
+	backImg := tp.state.BackImage.Image
+
+	// Compute coordinate offset: component bounds are in front-image coordinates,
+	// but we're searching the back image. Both are rendered in the canvas with their
+	// respective ManualOffset. A point at front_pixel renders at front_pixel + frontOffset,
+	// and a point at back_pixel renders at back_pixel + backOffset.
+	// For the same physical location: back_pixel = front_pixel + frontOffset - backOffset.
+	offsetX := float64(tp.state.FrontManualOffset.X - tp.state.BackManualOffset.X)
+	offsetY := float64(tp.state.FrontManualOffset.Y - tp.state.BackManualOffset.Y)
+	fmt.Printf("[DetectPins] Front offset: (%d,%d), Back offset: (%d,%d), delta: (%.0f,%.0f)\n",
+		tp.state.FrontManualOffset.X, tp.state.FrontManualOffset.Y,
+		tp.state.BackManualOffset.X, tp.state.BackManualOffset.Y, offsetX, offsetY)
+
+	totalPins := 0
+	// Start ID counter from the current max so IDs don't collide.
+	nextNum := tp.state.FeaturesLayer.NextConfirmedViaNumber()
+
+	for _, comp := range tp.state.Components {
+		if _, ok := component.ParseDIPPinCount(comp.Package); !ok {
+			continue
+		}
+
+		expectedPins := component.ExpectedDIPPinPositions(comp, dpi)
+		if len(expectedPins) == 0 {
+			fmt.Printf("[DetectPins] %s (%s): no expected pin positions\n", comp.ID, comp.Package)
+			continue
+		}
+
+		// Shift expected positions from front-image coords to back-image coords
+		for i := range expectedPins {
+			expectedPins[i].Position.X += offsetX
+			expectedPins[i].Position.Y += offsetY
+		}
+
+		fmt.Printf("[DetectPins] %s (%s): searching for %d pins\n", comp.ID, comp.Package, len(expectedPins))
+
+		detected := component.DetectPins(backImg, comp, expectedPins, dpi, func() int {
+			n := nextNum
+			nextNum++
+			return n
+		})
+
+		for _, cv := range detected {
+			// Shift detected center back from back-image coords to canvas coords
+			cv.Center.X -= offsetX
+			cv.Center.Y -= offsetY
+			for j := range cv.IntersectionBoundary {
+				cv.IntersectionBoundary[j].X -= offsetX
+				cv.IntersectionBoundary[j].Y -= offsetY
+			}
+			tp.state.FeaturesLayer.AddConfirmedVia(cv)
+			component.ResolveSignalName(cv, tp.state.Components, tp.state.ComponentLibrary)
+			totalPins++
+		}
+
+		fmt.Printf("[DetectPins] %s: detected %d/%d pins\n", comp.ID, len(detected), len(expectedPins))
+	}
+
+	fmt.Printf("[DetectPins] Total: %d pins detected\n", totalPins)
+	tp.state.SetModified(true)
+	tp.rebuildFeaturesOverlay()
+	tp.canvas.Refresh()
+	tp.state.Emit(app.EventFeaturesChanged, nil)
+	tp.state.Emit(app.EventConfirmedViasChanged, nil)
+}
+
 // loadTrainingSet loads the training set from the global lib/ location.
 func (tp *TracesPanel) loadTrainingSet() {
 	trainingPath, err := via.GetTrainingPath()
@@ -1193,7 +1286,7 @@ func (tp *TracesPanel) showGeneralViaMenu(imgX, imgY float64) {
 	menu.PopupAtPointer(nil)
 }
 
-// dumpGrayscaleRegion prints a ~30x30 grayscale matrix of a 3mm square
+// dumpGrayscaleRegion prints a grayscale matrix of a 2mm square
 // centered on (imgX, imgY) to stdout for diagnostic purposes.
 func (tp *TracesPanel) dumpGrayscaleRegion(imgX, imgY float64) {
 	isFront := tp.selectedLayer() == "Front"
@@ -1217,8 +1310,8 @@ func (tp *TracesPanel) dumpGrayscaleRegion(imgX, imgY float64) {
 		return
 	}
 
-	// 1.5mm in pixels: 1.5mm = 1.5/25.4 inches
-	regionPx := int(1.5 / 25.4 * dpi)
+	// 2mm in pixels: 2mm = 2/25.4 inches — enough context around features
+	regionPx := int(2.0 / 25.4 * dpi)
 	half := regionPx / 2
 
 	cx, cy := int(imgX+0.5), int(imgY+0.5)
@@ -1249,7 +1342,7 @@ func (tp *TracesPanel) dumpGrayscaleRegion(imgX, imgY float64) {
 		return
 	}
 
-	fmt.Printf("\n=== Grayscale dump at (%.0f, %.0f), 1.5mm square, %dx%d px ===\n",
+	fmt.Printf("\n=== Grayscale dump at (%.0f, %.0f), 2mm square, %dx%d px ===\n",
 		imgX, imgY, w, h)
 	fmt.Printf("DPI=%.0f  region=[%d,%d]-[%d,%d]\n\n", dpi, x0, y0, x1, y1)
 
@@ -1481,7 +1574,10 @@ func (tp *TracesPanel) autoAssignPin(cv *via.ConfirmedVia) {
 			return
 		}
 		cv.PinNumber = guessed
-		tp.resolveSignalName(cv)
+		pinDir := component.ResolveSignalName(cv, tp.state.Components, tp.state.ComponentLibrary)
+		if pinDir == connector.DirectionOutput && cv.SignalName != "" {
+			tp.renameNetForOutputPin(cv)
+		}
 		fmt.Printf("[autoAssign] %s -> %s pin %s", cv.ID, cv.ComponentID, cv.PinNumber)
 		if cv.SignalName != "" {
 			fmt.Printf(" (%s)", cv.SignalName)
@@ -2248,7 +2344,10 @@ func (tp *TracesPanel) namePin(cv *via.ConfirmedVia) {
 		cv.PinNumber = pinText
 
 		// Look up signal name from parts library
-		tp.resolveSignalName(cv)
+		pinDir := component.ResolveSignalName(cv, tp.state.Components, tp.state.ComponentLibrary)
+		if pinDir == connector.DirectionOutput && cv.SignalName != "" {
+			tp.renameNetForOutputPin(cv)
+		}
 
 		label := ""
 		if cv.SignalName != "" {
@@ -2305,64 +2404,9 @@ func (tp *TracesPanel) isOutputPin(cv *via.ConfirmedVia) bool {
 	return false
 }
 
-// resolveSignalName looks up the pin's function name from the parts library and sets
-// cv.SignalName (e.g. "C3-GND"). If the pin direction is Output and the via's net has
-// a low-priority name (auto-generated or component.pin), the net is renamed.
-func (tp *TracesPanel) resolveSignalName(cv *via.ConfirmedVia) {
-	if cv.ComponentID == "" || cv.PinNumber == "" {
-		return
-	}
-
-	// Find the board component
-	var comp *component.Component
-	for _, c := range tp.state.Components {
-		if c.ID == cv.ComponentID {
-			comp = c
-			break
-		}
-	}
-	if comp == nil || comp.PartNumber == "" || comp.Package == "" {
-		return
-	}
-
-	// Look up part definition
-	lib := tp.state.ComponentLibrary
-	if lib == nil {
-		return
-	}
-	partDef := lib.GetByAlias(comp.PartNumber, comp.Package)
-	if partDef == nil {
-		return
-	}
-
-	// Find the pin by number
-	pinNum, err := strconv.Atoi(cv.PinNumber)
-	if err != nil {
-		return
-	}
-
-	var pinName string
-	var pinDir connector.SignalDirection
-	for _, pin := range partDef.Pins {
-		if pin.Number == pinNum {
-			pinName = pin.Name
-			pinDir = pin.Direction
-			break
-		}
-	}
-	if pinName == "" {
-		return
-	}
-
-	cv.SignalName = cv.ComponentID + "-" + pinName
-	fmt.Printf("Resolved signal name: %s pin %d = %s (%s)\n", cv.ComponentID, pinNum, cv.SignalName, pinDir)
-
-	// Auto-rename net only for Output pins
-	if pinDir != connector.DirectionOutput {
-		return
-	}
-
-	// Find the net containing this via — only rename low-priority or non-manual names
+// renameNetForOutputPin auto-renames the net containing cv if the net has a
+// low-priority name. Called after resolving a signal name for an output pin.
+func (tp *TracesPanel) renameNetForOutputPin(cv *via.ConfirmedVia) {
 	for _, net := range tp.state.FeaturesLayer.GetNets() {
 		if net.ContainsVia(cv.ID) {
 			if !net.ManualName && netlist.IsLowPriorityName(net.Name) {
@@ -2372,19 +2416,6 @@ func (tp *TracesPanel) resolveSignalName(cv *via.ConfirmedVia) {
 			break
 		}
 	}
-}
-
-// parseDIPPinCount extracts the pin count from a DIP package string (e.g. "DIP-16" → 16).
-func parseDIPPinCount(pkg string) (int, bool) {
-	pkg = strings.ToUpper(strings.TrimSpace(pkg))
-	if !strings.HasPrefix(pkg, "DIP-") {
-		return 0, false
-	}
-	n, err := strconv.Atoi(pkg[4:])
-	if err != nil || n < 4 || n%2 != 0 {
-		return 0, false
-	}
-	return n, true
 }
 
 // guessPin estimates a pin number for a via based on distance from already-named pins.
@@ -2397,7 +2428,7 @@ func (tp *TracesPanel) guessPin(cv *via.ConfirmedVia, componentID string) string
 	// Try DIP-specific logic if the component has a DIP package
 	for _, comp := range tp.state.Components {
 		if comp.ID == componentID {
-			if pinCount, ok := parseDIPPinCount(comp.Package); ok {
+			if pinCount, ok := component.ParseDIPPinCount(comp.Package); ok {
 				if guess := tp.guessDIPPin(cv, comp, pinCount); guess != "" {
 					return guess
 				}

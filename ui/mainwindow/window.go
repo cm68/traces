@@ -642,16 +642,18 @@ func (mw *MainWindow) onNewProject() {
 	mw.prefs.Save()
 
 	mw.state.ResetForNewProject()
+	mw.canvas.ClearAllOverlays()
+	mw.canvas.ClearConnectorLabels()
 
-	mw.updateStatus("Loading front image...")
-	if err := mw.state.LoadRawFrontImage(frontPath); err != nil {
-		mw.showError("Failed to load front image: " + err.Error())
+	mw.updateStatus("Importing front image...")
+	if err := mw.state.ImportFrontImage(frontPath); err != nil {
+		mw.showError("Failed to import front image: " + err.Error())
 		return
 	}
 
-	mw.updateStatus("Loading back image...")
-	if err := mw.state.LoadRawBackImage(backPath); err != nil {
-		mw.showError("Failed to load back image: " + err.Error())
+	mw.updateStatus("Importing back image...")
+	if err := mw.state.ImportBackImage(backPath); err != nil {
+		mw.showError("Failed to import back image: " + err.Error())
 		return
 	}
 
@@ -686,6 +688,8 @@ func (mw *MainWindow) onOpenProject() {
 	}
 
 	mw.prefs.SetString(prefKeyLastDir, filepath.Dir(path))
+	mw.canvas.ClearAllOverlays()
+	mw.canvas.ClearConnectorLabels()
 
 	if err := mw.state.LoadProject(path); err != nil {
 		mw.showError("Failed to load project: " + err.Error())

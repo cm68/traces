@@ -113,6 +113,11 @@ type State struct {
 	// Via training set for machine learning
 	ViaTrainingSet *via.TrainingSet
 
+	// Via-based alignment results
+	FrontViaResult *via.ViaDetectionResult
+	BackViaResult  *via.ViaDetectionResult
+	ViaAlignResult *alignment.ViaAlignmentResult
+
 	// Global component detection training (shared across all projects)
 	GlobalComponentTraining *component.TrainingSet
 
@@ -769,36 +774,72 @@ func (s *State) SaveProject(path string) error {
 	return nil
 }
 
-// ImportFrontImage imports the front side image with automatic detection and processing.
-// This detects board bounds, crops, and fine-tunes rotation. Use for new imports only.
+// ImportFrontImage loads the front image, straightens it, and crops to board bounds.
 func (s *State) ImportFrontImage(path string) error {
 	layer, err := image.Load(path)
 	if err != nil {
 		return err
 	}
 	layer.Side = image.SideFront
+	fmt.Printf("ImportFrontImage: loaded %dx%d from %s\n",
+		layer.Image.Bounds().Dx(), layer.Image.Bounds().Dy(), path)
 
-	// Auto-detect board bounds, orthogonalize, and crop
-	var cropBounds geometry.RectInt
-	var importRotation float64
-	layer.Image, cropBounds, importRotation = autoRotateAndCrop(layer.Image)
-	layer.CropX = cropBounds.X
-	layer.CropY = cropBounds.Y
-	layer.CropWidth = cropBounds.Width
-	layer.CropHeight = cropBounds.Height
+	// Detect board rotation angle and bounds
+	result := alignment.DetectBoardRotationFromImage(layer.Image)
+	angle := 0.0
+	fmt.Printf("ImportFrontImage: detection result: detected=%v angle=%.2f° bounds=(%d,%d) %dx%d\n",
+		result.Detected, result.Angle, result.Bounds.X, result.Bounds.Y,
+		result.Bounds.Width, result.Bounds.Height)
+	if result.Detected {
+		angle = result.Angle
 
-	// Fine-tune rotation using contact detection
-	layer.Image = fineRotateByContacts(layer.Image, s.BoardSpec, layer.DPI)
+		if math.Abs(angle) > 0.05 && math.Abs(angle) < 10 {
+			// Pass 1: coarse rotation from contour MinAreaRect + crop
+			cropped, b := alignment.RotateAndCropToBoard(layer.Image, result)
+			layer.Image = cropped
+			layer.CropX = b.X
+			layer.CropY = b.Y
+			layer.CropWidth = b.Width
+			layer.CropHeight = b.Height
+		} else {
+			if math.Abs(angle) >= 10 {
+				fmt.Printf("ImportFrontImage: angle %.2f° too large, skipping rotation\n", angle)
+				angle = 0
+			} else {
+				fmt.Printf("ImportFrontImage: angle %.2f° too small, skipping rotation\n", angle)
+			}
+			// No rotation — crop using detected bounds directly
+			b := result.Bounds
+			fmt.Printf("ImportFrontImage: cropping to (%d,%d) %dx%d\n",
+				b.X, b.Y, b.Width, b.Height)
+			layer.Image = CropImage(layer.Image, b)
+			layer.CropX = b.X
+			layer.CropY = b.Y
+			layer.CropWidth = b.Width
+			layer.CropHeight = b.Height
+		}
+
+		// Pass 2: fine rotation from contact edge angle
+		dpi := layer.DPI
+		if dpi == 0 {
+			dpi = s.DPI
+		}
+		layer.Image = fineRotateAndCrop(layer.Image, s.BoardSpec, dpi, "front")
+
+		fmt.Printf("ImportFrontImage: final image: %dx%d\n",
+			layer.Image.Bounds().Dx(), layer.Image.Bounds().Dy())
+	} else {
+		fmt.Printf("ImportFrontImage: board detection FAILED, using full image\n")
+	}
 
 	s.mu.Lock()
 	s.FrontImage = layer
-	s.FrontImportRotation = importRotation
-	s.FrontBoardBounds = nil // bounds are now (0,0) since we cropped
-	s.FrontCropBounds = cropBounds
-	s.FrontDetectionResult = nil // Clear old detection - user must re-detect on rotated image
+	s.FrontImportRotation = angle
+	s.FrontCropBounds = geometry.RectInt{}
+	s.FrontBoardBounds = nil
+	s.FrontDetectionResult = nil
 	s.Aligned = false
 	s.AlignedFront = nil
-	// Set DPI from TIFF metadata if available and not already set
 	if layer.DPI > 0 && s.DPI == 0 {
 		s.DPI = layer.DPI
 	}
@@ -810,7 +851,7 @@ func (s *State) ImportFrontImage(path string) error {
 }
 
 // LoadFrontImage loads the front side image using saved crop bounds from project.
-// This does NOT auto-detect - it applies previously saved processing parameters.
+// Falls back to auto-detection if no saved bounds are available.
 func (s *State) LoadFrontImage(path string) error {
 	layer, err := image.Load(path)
 	if err != nil {
@@ -824,30 +865,43 @@ func (s *State) LoadFrontImage(path string) error {
 	autoRotation := s.FrontAutoRotation
 	s.mu.Unlock()
 
-	// Apply saved import rotation (if any) - must be before crop
-	// since crop bounds are in rotated-image coordinates
-	if importRotation != 0 {
-		layer.Image = alignment.RotateGoImage(layer.Image, importRotation)
-	}
-
-	// Apply saved crop bounds (if any)
 	if cropBounds.Width > 0 && cropBounds.Height > 0 {
-		layer.Image = cropImage(layer.Image, cropBounds)
+		// Apply saved import rotation (if any) - must be before crop
+		// since crop bounds are in rotated-image coordinates
+		if importRotation != 0 {
+			layer.Image = alignment.RotateGoImage(layer.Image, importRotation)
+		}
+
+		layer.Image = CropImage(layer.Image, cropBounds)
 		layer.CropX = cropBounds.X
 		layer.CropY = cropBounds.Y
 		layer.CropWidth = cropBounds.Width
 		layer.CropHeight = cropBounds.Height
-	}
 
-	// Apply saved fine rotation (if any)
-	if autoRotation != 0 {
-		layer.Image = alignment.RotateGoImage(layer.Image, autoRotation)
+		// Apply saved fine rotation (if any)
+		if autoRotation != 0 {
+			layer.Image = alignment.RotateGoImage(layer.Image, autoRotation)
+		}
+	} else {
+		// No saved bounds — auto-detect and crop
+		fmt.Printf("LoadFrontImage: no saved crop bounds, auto-detecting\n")
+		layer.Image, cropBounds, importRotation = autoRotateAndCrop(layer.Image)
+		layer.CropX = cropBounds.X
+		layer.CropY = cropBounds.Y
+		layer.CropWidth = cropBounds.Width
+		layer.CropHeight = cropBounds.Height
+
+		layer.Image = fineRotateByContacts(layer.Image, s.BoardSpec, layer.DPI)
+
+		s.mu.Lock()
+		s.FrontCropBounds = cropBounds
+		s.FrontImportRotation = importRotation
+		s.mu.Unlock()
 	}
 
 	s.mu.Lock()
 	s.FrontImage = layer
 	s.FrontBoardBounds = nil
-	// Set DPI from TIFF metadata if available and not already set
 	if layer.DPI > 0 && s.DPI == 0 {
 		s.DPI = layer.DPI
 	}
@@ -857,39 +911,75 @@ func (s *State) LoadFrontImage(path string) error {
 	return nil
 }
 
-// ImportBackImage imports the back side image with automatic detection and processing.
-// This detects board bounds, crops, fine-tunes rotation, and flips. Use for new imports only.
+// ImportBackImage loads the back image, flips it, straightens it, and crops to board bounds.
 func (s *State) ImportBackImage(path string) error {
 	layer, err := image.Load(path)
 	if err != nil {
 		return err
 	}
 	layer.Side = image.SideBack
+	fmt.Printf("ImportBackImage: loaded %dx%d from %s\n",
+		layer.Image.Bounds().Dx(), layer.Image.Bounds().Dy(), path)
 
-	// Auto-detect board bounds, orthogonalize, and crop
-	var cropBounds geometry.RectInt
-	var importRotation float64
-	layer.Image, cropBounds, importRotation = autoRotateAndCrop(layer.Image)
-	layer.CropX = cropBounds.X
-	layer.CropY = cropBounds.Y
-	layer.CropWidth = cropBounds.Width
-	layer.CropHeight = cropBounds.Height
-
-	// Fine-tune rotation using contact detection
-	layer.Image = fineRotateByContacts(layer.Image, s.BoardSpec, layer.DPI)
-
-	// Flip horizontally - back is viewed from the other side
+	// Flip horizontally — back is viewed from the other side
 	layer.Image = flipHorizontal(layer.Image)
+	fmt.Printf("ImportBackImage: after flip: %dx%d\n",
+		layer.Image.Bounds().Dx(), layer.Image.Bounds().Dy())
+
+	// Detect board rotation angle and bounds
+	result := alignment.DetectBoardRotationFromImage(layer.Image)
+	angle := 0.0
+	fmt.Printf("ImportBackImage: detection result: detected=%v angle=%.2f° bounds=(%d,%d) %dx%d\n",
+		result.Detected, result.Angle, result.Bounds.X, result.Bounds.Y,
+		result.Bounds.Width, result.Bounds.Height)
+	if result.Detected {
+		angle = result.Angle
+
+		if math.Abs(angle) > 0.05 && math.Abs(angle) < 10 {
+			// Pass 1: coarse rotation from contour MinAreaRect + crop
+			cropped, b := alignment.RotateAndCropToBoard(layer.Image, result)
+			layer.Image = cropped
+			layer.CropX = b.X
+			layer.CropY = b.Y
+			layer.CropWidth = b.Width
+			layer.CropHeight = b.Height
+		} else {
+			if math.Abs(angle) >= 10 {
+				fmt.Printf("ImportBackImage: angle %.2f° too large, skipping rotation\n", angle)
+				angle = 0
+			} else {
+				fmt.Printf("ImportBackImage: angle %.2f° too small, skipping rotation\n", angle)
+			}
+			// No rotation — crop using detected bounds directly
+			b := result.Bounds
+			fmt.Printf("ImportBackImage: cropping to (%d,%d) %dx%d\n",
+				b.X, b.Y, b.Width, b.Height)
+			layer.Image = CropImage(layer.Image, b)
+			layer.CropX = b.X
+			layer.CropY = b.Y
+			layer.CropWidth = b.Width
+			layer.CropHeight = b.Height
+		}
+
+		// Pass 2: fine rotation from contact edge angle
+		dpi := layer.DPI
+		if dpi == 0 {
+			dpi = s.DPI
+		}
+		layer.Image = fineRotateAndCrop(layer.Image, s.BoardSpec, dpi, "back")
+
+		fmt.Printf("ImportBackImage: final image: %dx%d\n",
+			layer.Image.Bounds().Dx(), layer.Image.Bounds().Dy())
+	}
 
 	s.mu.Lock()
 	s.BackImage = layer
-	s.BackImportRotation = importRotation
-	s.BackBoardBounds = nil // bounds are now (0,0) since we cropped
-	s.BackCropBounds = cropBounds
-	s.BackDetectionResult = nil // Clear old detection - user must re-detect on rotated image
+	s.BackImportRotation = angle
+	s.BackCropBounds = geometry.RectInt{}
+	s.BackBoardBounds = nil
+	s.BackDetectionResult = nil
 	s.Aligned = false
 	s.AlignedBack = nil
-	// Set DPI from TIFF metadata if available and not already set
 	if layer.DPI > 0 && s.DPI == 0 {
 		s.DPI = layer.DPI
 	}
@@ -901,7 +991,7 @@ func (s *State) ImportBackImage(path string) error {
 }
 
 // LoadBackImage loads the back side image using saved crop bounds from project.
-// This does NOT auto-detect - it applies previously saved processing parameters.
+// Falls back to auto-detection if no saved bounds are available.
 func (s *State) LoadBackImage(path string) error {
 	layer, err := image.Load(path)
 	if err != nil {
@@ -915,24 +1005,37 @@ func (s *State) LoadBackImage(path string) error {
 	autoRotation := s.BackAutoRotation
 	s.mu.Unlock()
 
-	// Apply saved import rotation (if any) - must be before crop
-	// since crop bounds are in rotated-image coordinates
-	if importRotation != 0 {
-		layer.Image = alignment.RotateGoImage(layer.Image, importRotation)
-	}
-
-	// Apply saved crop bounds (if any)
 	if cropBounds.Width > 0 && cropBounds.Height > 0 {
-		layer.Image = cropImage(layer.Image, cropBounds)
+		// Apply saved import rotation (if any) - must be before crop
+		if importRotation != 0 {
+			layer.Image = alignment.RotateGoImage(layer.Image, importRotation)
+		}
+
+		layer.Image = CropImage(layer.Image, cropBounds)
 		layer.CropX = cropBounds.X
 		layer.CropY = cropBounds.Y
 		layer.CropWidth = cropBounds.Width
 		layer.CropHeight = cropBounds.Height
-	}
 
-	// Apply saved fine rotation (if any)
-	if autoRotation != 0 {
-		layer.Image = alignment.RotateGoImage(layer.Image, autoRotation)
+		// Apply saved fine rotation (if any)
+		if autoRotation != 0 {
+			layer.Image = alignment.RotateGoImage(layer.Image, autoRotation)
+		}
+	} else {
+		// No saved bounds — auto-detect and crop
+		fmt.Printf("LoadBackImage: no saved crop bounds, auto-detecting\n")
+		layer.Image, cropBounds, importRotation = autoRotateAndCrop(layer.Image)
+		layer.CropX = cropBounds.X
+		layer.CropY = cropBounds.Y
+		layer.CropWidth = cropBounds.Width
+		layer.CropHeight = cropBounds.Height
+
+		layer.Image = fineRotateByContacts(layer.Image, s.BoardSpec, layer.DPI)
+
+		s.mu.Lock()
+		s.BackCropBounds = cropBounds
+		s.BackImportRotation = importRotation
+		s.mu.Unlock()
 	}
 
 	// Flip horizontally - back is viewed from the other side
@@ -941,7 +1044,6 @@ func (s *State) LoadBackImage(path string) error {
 	s.mu.Lock()
 	s.BackImage = layer
 	s.BackBoardBounds = nil
-	// Set DPI from TIFF metadata if available and not already set
 	if layer.DPI > 0 && s.DPI == 0 {
 		s.DPI = layer.DPI
 	}
@@ -1011,6 +1113,11 @@ func (s *State) ResetForNewProject() {
 	s.FrontColorParams = nil
 	s.BackColorParams = nil
 	s.ViaColorParams = nil
+
+	// Clear via alignment results
+	s.FrontViaResult = nil
+	s.BackViaResult = nil
+	s.ViaAlignResult = nil
 
 	// Clear DPI
 	s.DPI = 0
@@ -1268,10 +1375,17 @@ func (s *State) HasNormalizedImages() bool {
 // autoRotateAndCrop detects board bounds using S+V variance, orthogonalizes, and crops.
 // Returns the cropped image, crop bounds (in rotated-image coords), and rotation angle.
 func autoRotateAndCrop(img goimage.Image) (goimage.Image, geometry.RectInt, float64) {
+	b := img.Bounds()
+	fmt.Printf("autoRotateAndCrop: input %dx%d\n", b.Dx(), b.Dy())
+
 	result := alignment.DetectBoardByVariance(img)
 	if !result.Detected {
+		fmt.Printf("autoRotateAndCrop: board detection FAILED, returning uncropped image\n")
 		return img, geometry.RectInt{}, 0
 	}
+
+	fmt.Printf("autoRotateAndCrop: detected bounds (%d,%d) %dx%d, angle=%.2f°\n",
+		result.Bounds.X, result.Bounds.Y, result.Bounds.Width, result.Bounds.Height, result.Angle)
 
 	// Apply rotation if detected
 	rotated := img
@@ -1280,7 +1394,9 @@ func autoRotateAndCrop(img goimage.Image) (goimage.Image, geometry.RectInt, floa
 	}
 
 	// Crop to detected bounds
-	cropped := cropImage(rotated, result.Bounds)
+	cropped := CropImage(rotated, result.Bounds)
+	cb := cropped.Bounds()
+	fmt.Printf("autoRotateAndCrop: cropped to %dx%d\n", cb.Dx(), cb.Dy())
 
 	return cropped, result.Bounds, result.Angle
 }
@@ -1312,6 +1428,44 @@ func fineRotateByContacts(img goimage.Image, spec board.Spec, dpi float64) goima
 	fmt.Printf("Fine rotation: applied %.2f° rotation\n", angle)
 
 	return rotated
+}
+
+// fineRotateAndCrop detects contacts, rotates to make them level, and crops black borders.
+func fineRotateAndCrop(img goimage.Image, spec board.Spec, dpi float64, label string) goimage.Image {
+	if dpi == 0 {
+		fmt.Printf("fineRotateAndCrop[%s]: no DPI, skipping\n", label)
+		return img
+	}
+	result, err := alignment.DetectContactsOnTopEdge(img, spec, dpi, nil)
+	if err != nil || result == nil || len(result.Contacts) < 10 {
+		n := 0
+		if result != nil {
+			n = len(result.Contacts)
+		}
+		fmt.Printf("fineRotateAndCrop[%s]: not enough contacts (%d), skipping\n", label, n)
+		return img
+	}
+
+	angle := result.ContactAngle
+	fmt.Printf("fineRotateAndCrop[%s]: contact angle=%.2f° from %d contacts\n", label, angle, len(result.Contacts))
+
+	if math.Abs(angle) < 0.05 {
+		fmt.Printf("fineRotateAndCrop[%s]: angle too small, skipping\n", label)
+		return img
+	}
+
+	// Rotate to level the contacts, then crop back to original dimensions
+	// centered in the expanded canvas. For small angles (~1°), this preserves
+	// all board content with only tiny black slivers in the corners.
+	rotated := alignment.RotateGoImage(img, angle)
+	rb := rotated.Bounds()
+	ob := img.Bounds()
+	cropX := (rb.Dx() - ob.Dx()) / 2
+	cropY := (rb.Dy() - ob.Dy()) / 2
+	bounds := geometry.RectInt{X: cropX, Y: cropY, Width: ob.Dx(), Height: ob.Dy()}
+	fmt.Printf("fineRotateAndCrop[%s]: rotated %.2f°, crop (%d,%d) %dx%d on %dx%d\n",
+		label, angle, cropX, cropY, ob.Dx(), ob.Dy(), rb.Dx(), rb.Dy())
+	return CropImage(rotated, bounds)
 }
 
 // LoadComponents loads components from a JSON file.
@@ -1490,7 +1644,7 @@ func transformBoundsAfterRotation(origBounds geometry.RectInt, origW, origH, new
 }
 
 // cropImage crops an image to the specified bounds.
-func cropImage(img goimage.Image, bounds geometry.RectInt) goimage.Image {
+func CropImage(img goimage.Image, bounds geometry.RectInt) goimage.Image {
 	// Clamp bounds to image dimensions
 	imgBounds := img.Bounds()
 	x := bounds.X

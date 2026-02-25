@@ -42,6 +42,9 @@ type MainWindow struct {
 	frontOpacitySlider *gtk.Scale
 	backOpacitySlider  *gtk.Scale
 
+	// Zoom display
+	zoomValueLabel *gtk.Label
+
 	// Checkerboard toggle
 	checkerboardCheck *gtk.CheckButton
 
@@ -166,10 +169,12 @@ func (mw *MainWindow) setupUI() {
 		fmt.Printf("OnZoomChange: saving zoom=%.3f\n", zoom)
 		mw.prefs.SetFloat(prefKeyZoom, zoom)
 		mw.prefs.Save()
+		mw.updateZoomLabel(zoom)
 	})
 
 	// Restore zoom
 	mw.restoreZoom()
+	mw.updateZoomLabel(mw.canvas.GetZoom())
 
 	// Restore last project
 	mw.restoreLastProject()
@@ -202,6 +207,10 @@ func (mw *MainWindow) createToolbar() *gtk.Box {
 	actualBtn, _ := gtk.ButtonNewWithLabel("1:1")
 	actualBtn.Connect("clicked", func() { mw.onActualSize() })
 	hbox.PackStart(actualBtn, false, false, 0)
+
+	mw.zoomValueLabel, _ = gtk.LabelNew("")
+	mw.zoomValueLabel.SetWidthChars(6)
+	hbox.PackStart(mw.zoomValueLabel, false, false, 0)
 
 	// Separator
 	sep1, _ := gtk.SeparatorNew(gtk.ORIENTATION_VERTICAL)
@@ -469,6 +478,11 @@ func (mw *MainWindow) syncLayers() {
 // updateStatus updates the status bar text.
 func (mw *MainWindow) updateStatus(text string) {
 	mw.statusBar.SetText(text)
+}
+
+// updateZoomLabel updates the zoom display in the toolbar.
+func (mw *MainWindow) updateZoomLabel(zoom float64) {
+	mw.zoomValueLabel.SetText(fmt.Sprintf("%.0f%%", zoom*100))
 }
 
 // restoreWindowSize restores the window size from preferences.

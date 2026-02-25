@@ -18,7 +18,7 @@ import (
 
 const (
 	minZoom  = 0.1
-	maxZoom  = 10.0
+	maxZoom  = 1.5
 	zoomStep = 1.25
 )
 

@@ -98,6 +98,9 @@ type ImageCanvas struct {
 	// Background mode: false = checkerboard, true = solid black
 	solidBlackBackground bool
 
+	// Last button-press modifier state (gdk.ModifierType bitmask)
+	lastModifiers uint
+
 	// Callbacks
 	onZoomChange   func(zoom float64)
 	onSelect       func(x1, y1, x2, y2 float64) // Called with image coordinates
@@ -180,6 +183,7 @@ func NewImageCanvas() *ImageCanvas {
 	// Mouse button press
 	da.Connect("button-press-event", func(da *gtk.DrawingArea, ev *gdk.Event) bool {
 		btn := gdk.EventButtonNewFromEvent(ev)
+		ic.lastModifiers = btn.State()
 		x, y := btn.X(), btn.Y()
 		imgX, imgY := x/ic.zoom, y/ic.zoom
 
@@ -663,6 +667,12 @@ func (ic *ImageCanvas) OnSelect(callback func(x1, y1, x2, y2 float64)) {
 // OnRightSelect sets a callback for shift+right-drag rectangle selection.
 func (ic *ImageCanvas) OnRightSelect(callback func(x1, y1, x2, y2 float64)) {
 	ic.onRightSelect = callback
+}
+
+// LastModifiers returns the GDK modifier state from the most recent button-press event.
+// Use gdk.SHIFT_MASK etc. to test individual modifiers.
+func (ic *ImageCanvas) LastModifiers() uint {
+	return ic.lastModifiers
 }
 
 // OnLeftClick sets a callback for left-click events.

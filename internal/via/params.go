@@ -14,7 +14,7 @@ func DefaultParams() DetectionParams {
 		ValMax: 255,
 
 		// Typical via sizes
-		MinDiamInches: 0.030, // ~0.76mm diameter (handles small vias)
+		MinDiamInches: 0.039, // ~1mm diameter
 		MaxDiamInches: 0.120, // ~3mm diameter
 
 		// Radial symmetry: combined inlier-fraction × uniformity from 32 angles.

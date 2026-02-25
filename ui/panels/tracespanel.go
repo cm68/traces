@@ -17,6 +17,7 @@ import (
 	"pcb-tracer/internal/app"
 	"pcb-tracer/internal/component"
 	"pcb-tracer/internal/connector"
+	"pcb-tracer/internal/features"
 	pcbimage "pcb-tracer/internal/image"
 	"pcb-tracer/internal/netlist"
 	pcbtrace "pcb-tracer/internal/trace"
@@ -500,21 +501,21 @@ func (tp *TracesPanel) OnKeyPressed(ev *gdk.EventKey) bool {
 			dx = -step
 		case gdk.KEY_Right:
 			dx = step
-		default:
-			return false
 		}
 
-		for _, cv := range tp.selectedVias {
-			cv.Center.X += dx
-			cv.Center.Y += dy
-			cv.IntersectionBoundary = geometry.GenerateCirclePoints(cv.Center.X, cv.Center.Y, cv.Radius, 32)
+		if dx != 0 || dy != 0 {
+			for _, cv := range tp.selectedVias {
+				cv.Center.X += dx
+				cv.Center.Y += dy
+				cv.IntersectionBoundary = geometry.GenerateCirclePoints(cv.Center.X, cv.Center.Y, cv.Radius, 32)
+			}
+			tp.rebuildFeaturesOverlay()
+			tp.updateSelectedViaOverlay()
+			tp.canvas.Refresh()
+			tp.viaStatusLabel.SetText(fmt.Sprintf("Nudged %d vias by (%.0f, %.0f)", len(tp.selectedVias), dx, dy))
+			tp.state.Emit(app.EventConfirmedViasChanged, nil)
+			return true
 		}
-		tp.rebuildFeaturesOverlay()
-		tp.updateSelectedViaOverlay()
-		tp.canvas.Refresh()
-		tp.viaStatusLabel.SetText(fmt.Sprintf("Nudged %d vias by (%.0f, %.0f)", len(tp.selectedVias), dx, dy))
-		tp.state.Emit(app.EventConfirmedViasChanged, nil)
-		return true
 	}
 
 	// Arrow-key nudging for selected via
@@ -525,26 +526,29 @@ func (tp *TracesPanel) OnKeyPressed(ev *gdk.EventKey) bool {
 		}
 
 		cv := tp.selectedVia
+		var dx, dy float64
 		switch keyval {
 		case gdk.KEY_Up:
-			cv.Center.Y -= step
+			dy = -step
 		case gdk.KEY_Down:
-			cv.Center.Y += step
+			dy = step
 		case gdk.KEY_Left:
-			cv.Center.X -= step
+			dx = -step
 		case gdk.KEY_Right:
-			cv.Center.X += step
-		default:
-			return false
+			dx = step
 		}
 
-		cv.IntersectionBoundary = geometry.GenerateCirclePoints(cv.Center.X, cv.Center.Y, cv.Radius, 32)
-		tp.rebuildFeaturesOverlay()
-		tp.updateSelectedViaOverlay()
-		tp.canvas.Refresh()
-		tp.viaStatusLabel.SetText(fmt.Sprintf("%s center: (%.0f, %.0f)", cv.ID, cv.Center.X, cv.Center.Y))
-		tp.state.Emit(app.EventConfirmedViasChanged, nil)
-		return true
+		if dx != 0 || dy != 0 {
+			cv.Center.X += dx
+			cv.Center.Y += dy
+			cv.IntersectionBoundary = geometry.GenerateCirclePoints(cv.Center.X, cv.Center.Y, cv.Radius, 32)
+			tp.rebuildFeaturesOverlay()
+			tp.updateSelectedViaOverlay()
+			tp.canvas.Refresh()
+			tp.viaStatusLabel.SetText(fmt.Sprintf("%s center: (%.0f, %.0f)", cv.ID, cv.Center.X, cv.Center.Y))
+			tp.state.Emit(app.EventConfirmedViasChanged, nil)
+			return true
+		}
 	}
 
 	// Arrow-key nudging for selected connector
@@ -555,32 +559,33 @@ func (tp *TracesPanel) OnKeyPressed(ev *gdk.EventKey) bool {
 		}
 
 		conn := tp.selectedConnector
+		var dx, dy float64
 		switch keyval {
 		case gdk.KEY_Up:
-			conn.Center.Y -= step
-			conn.Bounds.Y -= int(step)
+			dy = -step
 		case gdk.KEY_Down:
-			conn.Center.Y += step
-			conn.Bounds.Y += int(step)
+			dy = step
 		case gdk.KEY_Left:
-			conn.Center.X -= step
-			conn.Bounds.X -= int(step)
+			dx = -step
 		case gdk.KEY_Right:
-			conn.Center.X += step
-			conn.Bounds.X += int(step)
-		default:
-			return false
+			dx = step
 		}
 
-		tp.rebuildFeaturesOverlay()
-		tp.updateSelectedConnectorOverlay()
-		tp.canvas.Refresh()
-		tp.viaStatusLabel.SetText(fmt.Sprintf("%s center: (%.0f, %.0f)", conn.ID, conn.Center.X, conn.Center.Y))
-		tp.state.Emit(app.EventConnectorsChanged, nil)
-		return true
+		if dx != 0 || dy != 0 {
+			conn.Center.X += dx
+			conn.Center.Y += dy
+			conn.Bounds.X += int(dx)
+			conn.Bounds.Y += int(dy)
+			tp.rebuildFeaturesOverlay()
+			tp.updateSelectedConnectorOverlay()
+			tp.canvas.Refresh()
+			tp.viaStatusLabel.SetText(fmt.Sprintf("%s center: (%.0f, %.0f)", conn.ID, conn.Center.X, conn.Center.Y))
+			tp.state.Emit(app.EventConnectorsChanged, nil)
+			return true
+		}
 	}
 
-	// Delete key: delete multi-selected vias, or single via under hover cursor
+	// Delete key: delete multi-selected vias, single selected via, or via under hover cursor
 	if keyval == gdk.KEY_Delete {
 		if len(tp.selectedVias) > 0 {
 			vias := make([]*via.ConfirmedVia, len(tp.selectedVias))
@@ -591,10 +596,29 @@ func (tp *TracesPanel) OnKeyPressed(ev *gdk.EventKey) bool {
 			}
 			return true
 		}
+		if tp.selectedVia != nil {
+			cv := tp.selectedVia
+			tp.deselectVia()
+			tp.deleteConfirmedVia(cv)
+			return true
+		}
 		if tp.state.FeaturesLayer != nil {
+			// Try confirmed vias first
 			if cv := tp.state.FeaturesLayer.HitTestConfirmedVia(tp.hoverX, tp.hoverY); cv != nil {
 				tp.deleteConfirmedVia(cv)
 				return true
+			}
+			// Then try any detected (unconfirmed) via under the cursor
+			if ref := tp.state.FeaturesLayer.HitTest(tp.hoverX, tp.hoverY); ref != nil {
+				if _, ok := ref.Feature.(features.ViaFeature); ok {
+					tp.state.FeaturesLayer.RemoveVia(ref.Feature.FeatureID())
+					tp.rebuildFeaturesOverlay()
+					tp.updateViaCounts()
+					tp.canvas.Refresh()
+					tp.viaStatusLabel.SetText(fmt.Sprintf("Deleted %s", ref.Feature.FeatureID()))
+					tp.state.Emit(app.EventFeaturesChanged, nil)
+					return true
+				}
 			}
 		}
 	}
@@ -1653,7 +1677,98 @@ func (tp *TracesPanel) deleteTraceSegment(hit *traceHit) {
 	tp.canvas.Refresh()
 }
 
-// addConfirmedViaAt places a confirmed via at the exact click point.
+// findViaAtPoint tries to detect a via near (x, y) in the given image.
+// It crops a region around the click point, runs via detection, and returns
+// the detected center and radius of the closest candidate.
+// Returns found=false if DPI is unknown or no via is detected nearby.
+func (tp *TracesPanel) findViaAtPoint(srcImg image.Image, x, y float64) (center geometry.Point2D, radius float64, found bool) {
+	if srcImg == nil {
+		return geometry.Point2D{}, 0, false
+	}
+	dpi := tp.state.DPI
+	if dpi == 0 {
+		return geometry.Point2D{}, 0, false
+	}
+	defaultR := 0.018 * dpi
+
+	// Search region must be large enough so the via center (at most defaultR
+	// from click) clears the MaxRadiusPixels margin inside DetectViasFromImage.
+	// 5× defaultR gives comfortable headroom over the 3.33× MaxDiamInches ratio.
+	searchR := defaultR * 5
+
+	bounds := srcImg.Bounds()
+	x1 := int(x - searchR)
+	y1 := int(y - searchR)
+	x2 := int(x+searchR) + 1
+	y2 := int(y+searchR) + 1
+	if x1 < bounds.Min.X {
+		x1 = bounds.Min.X
+	}
+	if y1 < bounds.Min.Y {
+		y1 = bounds.Min.Y
+	}
+	if x2 > bounds.Max.X {
+		x2 = bounds.Max.X
+	}
+	if y2 > bounds.Max.Y {
+		y2 = bounds.Max.Y
+	}
+	if x2 <= x1 || y2 <= y1 {
+		return geometry.Point2D{}, 0, false
+	}
+
+	// Extract sub-image. imageToMat maps mat-local col/row to original image
+	// coords by adding bounds.Min, so detected via centers (0-based in the mat)
+	// convert to original coords as: orig = (x1+cx, y1+cy) in both cases below.
+	type subImager interface {
+		SubImage(r image.Rectangle) image.Image
+	}
+	var sub image.Image
+	if si, ok := srcImg.(subImager); ok {
+		sub = si.SubImage(image.Rect(x1, y1, x2, y2))
+	} else {
+		rgba := image.NewRGBA(image.Rect(0, 0, x2-x1, y2-y1))
+		for sy := y1; sy < y2; sy++ {
+			for sx := x1; sx < x2; sx++ {
+				rgba.Set(sx-x1, sy-y1, srcImg.At(sx, sy))
+			}
+		}
+		sub = rgba
+	}
+
+	side := tp.selectedSide()
+	params := via.DefaultParams().WithDPI(dpi)
+	result, err := via.DetectViasFromImage(sub, side, params)
+	if err != nil || result == nil || len(result.Vias) == 0 {
+		return geometry.Point2D{}, 0, false
+	}
+
+	// Pick the candidate closest to the click point.
+	var bestVia *via.Via
+	bestDist := math.MaxFloat64
+	for i := range result.Vias {
+		v := &result.Vias[i]
+		absX := float64(x1) + v.Center.X
+		absY := float64(y1) + v.Center.Y
+		d := math.Sqrt((absX-x)*(absX-x) + (absY-y)*(absY-y))
+		if d < bestDist {
+			bestDist = d
+			bestVia = v
+		}
+	}
+	if bestVia == nil || bestDist > searchR {
+		return geometry.Point2D{}, 0, false
+	}
+
+	return geometry.Point2D{
+		X: float64(x1) + bestVia.Center.X,
+		Y: float64(y1) + bestVia.Center.Y,
+	}, bestVia.Radius, true
+}
+
+// addConfirmedViaAt places a confirmed via near the click point.
+// Unless Shift is held, it attempts to snap to the nearest detected via centre
+// in the image; Shift (or detection failure) falls back to the exact click point.
 func (tp *TracesPanel) addConfirmedViaAt(x, y float64) {
 	radius := 12.0
 	if tp.state.DPI > 0 {
@@ -1661,7 +1776,25 @@ func (tp *TracesPanel) addConfirmedViaAt(x, y float64) {
 	}
 
 	center := geometry.Point2D{X: x, Y: y}
-	boundary := geometry.GenerateCirclePoints(x, y, radius, 32)
+
+	// Smart placement: detect the via in the image unless Shift is held.
+	shiftHeld := tp.canvas.LastModifiers()&uint(gdk.SHIFT_MASK) != 0
+	if !shiftHeld {
+		var imgLayer *pcbimage.Layer
+		if tp.selectedLayer() == "Front" {
+			imgLayer = tp.state.FrontImage
+		} else {
+			imgLayer = tp.state.BackImage
+		}
+		if imgLayer != nil && imgLayer.Image != nil {
+			if c, r, ok := tp.findViaAtPoint(imgLayer.Image, x, y); ok {
+				center = c
+				radius = r
+				fmt.Printf("Smart via placement: snapped to (%.1f, %.1f) r=%.1f\n", c.X, c.Y, r)
+			}
+		}
+	}
+	boundary := geometry.GenerateCirclePoints(center.X, center.Y, radius, 32)
 
 	viaNum := tp.state.FeaturesLayer.NextViaNumber()
 	frontVia := via.Via{
@@ -1687,7 +1820,7 @@ func (tp *TracesPanel) addConfirmedViaAt(x, y float64) {
 	cv := via.NewConfirmedVia(cvID, &frontVia, &backVia)
 	tp.state.FeaturesLayer.AddConfirmedVia(cv)
 
-	fmt.Printf("Added confirmed via %s at (%.0f, %.0f) r=%.0f\n", cvID, x, y, radius)
+	fmt.Printf("Added confirmed via %s at (%.0f, %.0f) r=%.0f\n", cvID, center.X, center.Y, radius)
 
 	// Remove any detected (unmatched) front/back vias that overlap with the new via
 	for _, side := range []pcbimage.Side{pcbimage.SideFront, pcbimage.SideBack} {
@@ -1695,8 +1828,8 @@ func (tp *TracesPanel) addConfirmedViaAt(x, y float64) {
 			if v.BothSidesConfirmed {
 				continue // skip vias already part of a confirmed pair
 			}
-			dx := v.Center.X - x
-			dy := v.Center.Y - y
+			dx := v.Center.X - center.X
+			dy := v.Center.Y - center.Y
 			dist := math.Sqrt(dx*dx + dy*dy)
 			if dist < v.Radius+radius {
 				fmt.Printf("  Removing overlapping %s via %s\n", side, v.ID)

@@ -612,7 +612,7 @@ func (tp *TracesPanel) OnKeyPressed(ev *gdk.EventKey) bool {
 			if ref := tp.state.FeaturesLayer.HitTest(tp.hoverX, tp.hoverY); ref != nil {
 				if _, ok := ref.Feature.(features.ViaFeature); ok {
 					tp.state.FeaturesLayer.RemoveVia(ref.Feature.FeatureID())
-					tp.rebuildFeaturesOverlay()
+					tp.rebuildFeaturesOverlayFast()
 					tp.updateViaCounts()
 					tp.canvas.Refresh()
 					tp.viaStatusLabel.SetText(fmt.Sprintf("Deleted %s", ref.Feature.FeatureID()))
@@ -774,8 +774,20 @@ func (tp *TracesPanel) onDetectVias() {
 
 // Front/back overlays track their respective image layers for visibility;
 // the vias overlay is always visible (vias penetrate both sides).
+// rebuildFeaturesOverlayFast rebuilds the overlay without net reconciliation.
+// Use when deleting unconfirmed vias that have no net connections.
+func (tp *TracesPanel) rebuildFeaturesOverlayFast() {
+	tp.rebuildFeaturesOverlayImpl(false)
+}
+
 func (tp *TracesPanel) rebuildFeaturesOverlay() {
-	tp.state.FeaturesLayer.ReconcileNets(5.0)
+	tp.rebuildFeaturesOverlayImpl(true)
+}
+
+func (tp *TracesPanel) rebuildFeaturesOverlayImpl(reconcileNets bool) {
+	if reconcileNets {
+		tp.state.FeaturesLayer.ReconcileNets(5.0)
+	}
 
 	// Clear import panel diagnostic overlays so they don't cover features
 	tp.canvas.ClearOverlay("front_contacts")
@@ -1677,11 +1689,10 @@ func (tp *TracesPanel) deleteTraceSegment(hit *traceHit) {
 	tp.canvas.Refresh()
 }
 
-// findViaAtPoint tries to detect a via near (x, y) in the given image.
-// It crops a region around the click point, runs via detection, and returns
-// the detected center and radius of the closest candidate.
-// Returns found=false if DPI is unknown or no via is detected nearby.
-func (tp *TracesPanel) findViaAtPoint(srcImg image.Image, x, y float64) (center geometry.Point2D, radius float64, found bool) {
+// findViaAtPoint detects a via pad around the click point by walking outward
+// to find the pad boundary, then fitting a circle.  Returns found=false if
+// the click isn't on a bright pad or DPI is unknown.
+func (tp *TracesPanel) findViaAtPoint(srcImg image.Image, x, y float64) (geometry.Point2D, float64, bool) {
 	if srcImg == nil {
 		return geometry.Point2D{}, 0, false
 	}
@@ -1689,81 +1700,7 @@ func (tp *TracesPanel) findViaAtPoint(srcImg image.Image, x, y float64) (center 
 	if dpi == 0 {
 		return geometry.Point2D{}, 0, false
 	}
-	defaultR := 0.018 * dpi
-
-	// Search region must be large enough so the via center (at most defaultR
-	// from click) clears the MaxRadiusPixels margin inside DetectViasFromImage.
-	// 5× defaultR gives comfortable headroom over the 3.33× MaxDiamInches ratio.
-	searchR := defaultR * 5
-
-	bounds := srcImg.Bounds()
-	x1 := int(x - searchR)
-	y1 := int(y - searchR)
-	x2 := int(x+searchR) + 1
-	y2 := int(y+searchR) + 1
-	if x1 < bounds.Min.X {
-		x1 = bounds.Min.X
-	}
-	if y1 < bounds.Min.Y {
-		y1 = bounds.Min.Y
-	}
-	if x2 > bounds.Max.X {
-		x2 = bounds.Max.X
-	}
-	if y2 > bounds.Max.Y {
-		y2 = bounds.Max.Y
-	}
-	if x2 <= x1 || y2 <= y1 {
-		return geometry.Point2D{}, 0, false
-	}
-
-	// Extract sub-image. imageToMat maps mat-local col/row to original image
-	// coords by adding bounds.Min, so detected via centers (0-based in the mat)
-	// convert to original coords as: orig = (x1+cx, y1+cy) in both cases below.
-	type subImager interface {
-		SubImage(r image.Rectangle) image.Image
-	}
-	var sub image.Image
-	if si, ok := srcImg.(subImager); ok {
-		sub = si.SubImage(image.Rect(x1, y1, x2, y2))
-	} else {
-		rgba := image.NewRGBA(image.Rect(0, 0, x2-x1, y2-y1))
-		for sy := y1; sy < y2; sy++ {
-			for sx := x1; sx < x2; sx++ {
-				rgba.Set(sx-x1, sy-y1, srcImg.At(sx, sy))
-			}
-		}
-		sub = rgba
-	}
-
-	side := tp.selectedSide()
-	params := via.DefaultParams().WithDPI(dpi)
-	result, err := via.DetectViasFromImage(sub, side, params)
-	if err != nil || result == nil || len(result.Vias) == 0 {
-		return geometry.Point2D{}, 0, false
-	}
-
-	// Pick the candidate closest to the click point.
-	var bestVia *via.Via
-	bestDist := math.MaxFloat64
-	for i := range result.Vias {
-		v := &result.Vias[i]
-		absX := float64(x1) + v.Center.X
-		absY := float64(y1) + v.Center.Y
-		d := math.Sqrt((absX-x)*(absX-x) + (absY-y)*(absY-y))
-		if d < bestDist {
-			bestDist = d
-			bestVia = v
-		}
-	}
-	if bestVia == nil || bestDist > searchR {
-		return geometry.Point2D{}, 0, false
-	}
-
-	return geometry.Point2D{
-		X: float64(x1) + bestVia.Center.X,
-		Y: float64(y1) + bestVia.Center.Y,
-	}, bestVia.Radius, true
+	return via.DetectViaAtPoint(srcImg, x, y, dpi)
 }
 
 // addConfirmedViaAt places a confirmed via near the click point.
@@ -1820,7 +1757,10 @@ func (tp *TracesPanel) addConfirmedViaAt(x, y float64) {
 	cv := via.NewConfirmedVia(cvID, &frontVia, &backVia)
 	tp.state.FeaturesLayer.AddConfirmedVia(cv)
 
-	fmt.Printf("Added confirmed via %s at (%.0f, %.0f) r=%.0f\n", cvID, center.X, center.Y, radius)
+	clickDX := center.X - x
+	clickDY := center.Y - y
+	clickOffset := math.Sqrt(clickDX*clickDX + clickDY*clickDY)
+	fmt.Printf("Added confirmed via %s at (%.0f, %.0f) r=%.0f offset=%.1f\n", cvID, center.X, center.Y, radius, clickOffset)
 
 	// Remove any detected (unmatched) front/back vias that overlap with the new via
 	for _, side := range []pcbimage.Side{pcbimage.SideFront, pcbimage.SideBack} {
@@ -1844,6 +1784,13 @@ func (tp *TracesPanel) addConfirmedViaAt(x, y float64) {
 	tp.rebuildFeaturesOverlay()
 	tp.updateViaCounts()
 	tp.selectVia(cv)
+
+	// Overwrite selectVia's generic message with placement details.
+	if clickOffset > 0.5 {
+		tp.viaStatusLabel.SetText(fmt.Sprintf("Added %s r=%.0f — moved %.1fpx from click", cvID, radius, clickOffset))
+	} else {
+		tp.viaStatusLabel.SetText(fmt.Sprintf("Added %s r=%.0f — exact placement", cvID, radius))
+	}
 
 	tp.state.Emit(app.EventFeaturesChanged, nil)
 	tp.state.Emit(app.EventConfirmedViasChanged, nil)

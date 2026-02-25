@@ -716,6 +716,102 @@ func BatchDetectVias(images []image.Image, sides []img.Side, params DetectionPar
 	return results
 }
 
+// DetectViaAtPoint finds a via pad around the click point (x, y) using the
+// same iterative vector-shift technique as pin detection (refineCenterFromGreen).
+// Walk outward at multiple angles, measure distance to the pad boundary, then
+// shift the center by the first Fourier harmonic of the distance function.
+// Repeat 3 times to converge on the true center.  Radius uses the 25th
+// percentile of walk distances (robust to trace connections).
+func DetectViaAtPoint(srcImg image.Image, x, y, dpi float64) (center geometry.Point2D, radius float64, found bool) {
+	bounds := srcImg.Bounds()
+	ix, iy := int(x+0.5), int(y+0.5)
+	if ix < bounds.Min.X || ix >= bounds.Max.X || iy < bounds.Min.Y || iy >= bounds.Max.Y {
+		return geometry.Point2D{}, 0, false
+	}
+
+	const threshold uint8 = 140
+	if grayAt(srcImg, ix, iy) < threshold {
+		return geometry.Point2D{}, 0, false
+	}
+
+	maxWalk := 0.120 * dpi
+	if maxWalk < 40 {
+		maxWalk = 40
+	}
+
+	const numAngles = 32
+	const iterations = 3
+
+	// Precompute angle unit vectors.
+	cosA := make([]float64, numAngles)
+	sinA := make([]float64, numAngles)
+	for i := 0; i < numAngles; i++ {
+		a := float64(i) * 2.0 * math.Pi / float64(numAngles)
+		cosA[i] = math.Cos(a)
+		sinA[i] = math.Sin(a)
+	}
+
+	cx, cy := x, y
+	var distances []float64
+
+	for iter := 0; iter < iterations; iter++ {
+		distances = make([]float64, numAngles)
+		for i := 0; i < numAngles; i++ {
+			transR := maxWalk
+			for step := 1.0; step <= maxWalk; step += 1.0 {
+				px := int(cx + cosA[i]*step + 0.5)
+				py := int(cy + sinA[i]*step + 0.5)
+				if px < bounds.Min.X || px >= bounds.Max.X ||
+					py < bounds.Min.Y || py >= bounds.Max.Y {
+					transR = step
+					break
+				}
+				if grayAt(srcImg, px, py) < threshold {
+					transR = step
+					break
+				}
+			}
+			distances[i] = transR
+		}
+
+		// Vector shift toward geometric center — first Fourier harmonic
+		// of the boundary distance function.  Same formula as
+		// refineCenterFromGreen in pin detection.
+		nf := float64(numAngles)
+		var sumDCos, sumDSin float64
+		for i := 0; i < numAngles; i++ {
+			sumDCos += distances[i] * cosA[i]
+			sumDSin += distances[i] * sinA[i]
+		}
+		cx += 2.0 / nf * sumDCos
+		cy += 2.0 / nf * sumDSin
+	}
+
+	// Radius: 25th percentile of final walk distances (robust to traces).
+	sorted := make([]float64, numAngles)
+	copy(sorted, distances)
+	sort.Float64s(sorted)
+	fitRadius := sorted[numAngles/4]
+
+	// Lenient range check for manual placement — the user clicked here
+	// intentionally, so accept smaller pads than the batch detector would.
+	if dpi > 0 {
+		minR := 0.008 * dpi // ~5px at 600 DPI
+		maxR := 0.065 * dpi
+		if fitRadius < minR || fitRadius > maxR {
+			return geometry.Point2D{}, 0, false
+		}
+	}
+
+	return geometry.Point2D{X: cx, Y: cy}, fitRadius, true
+}
+
+// grayAt returns the grayscale brightness (0-255) of the pixel at (x, y).
+func grayAt(img image.Image, x, y int) uint8 {
+	r, g, b, _ := img.At(x, y).RGBA()
+	return uint8((19595*r + 38470*g + 7471*b + 1<<15) >> 24)
+}
+
 // CreateManualVia creates a manually-placed via at the specified position.
 func CreateManualVia(center geometry.Point2D, radius float64, side img.Side) Via {
 	return Via{

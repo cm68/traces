@@ -113,6 +113,11 @@ type State struct {
 	// Via training set for machine learning
 	ViaTrainingSet *via.TrainingSet
 
+	// Via-based alignment results
+	FrontViaResult *via.ViaDetectionResult
+	BackViaResult  *via.ViaDetectionResult
+	ViaAlignResult *alignment.ViaAlignmentResult
+
 	// Global component detection training (shared across all projects)
 	GlobalComponentTraining *component.TrainingSet
 
@@ -832,7 +837,7 @@ func (s *State) LoadFrontImage(path string) error {
 
 	// Apply saved crop bounds (if any)
 	if cropBounds.Width > 0 && cropBounds.Height > 0 {
-		layer.Image = cropImage(layer.Image, cropBounds)
+		layer.Image = CropImage(layer.Image, cropBounds)
 		layer.CropX = cropBounds.X
 		layer.CropY = cropBounds.Y
 		layer.CropWidth = cropBounds.Width
@@ -923,7 +928,7 @@ func (s *State) LoadBackImage(path string) error {
 
 	// Apply saved crop bounds (if any)
 	if cropBounds.Width > 0 && cropBounds.Height > 0 {
-		layer.Image = cropImage(layer.Image, cropBounds)
+		layer.Image = CropImage(layer.Image, cropBounds)
 		layer.CropX = cropBounds.X
 		layer.CropY = cropBounds.Y
 		layer.CropWidth = cropBounds.Width
@@ -1280,7 +1285,7 @@ func autoRotateAndCrop(img goimage.Image) (goimage.Image, geometry.RectInt, floa
 	}
 
 	// Crop to detected bounds
-	cropped := cropImage(rotated, result.Bounds)
+	cropped := CropImage(rotated, result.Bounds)
 
 	return cropped, result.Bounds, result.Angle
 }
@@ -1504,7 +1509,7 @@ func min(a, b int) int {
 }
 
 // cropImage crops an image to the specified bounds.
-func cropImage(img goimage.Image, bounds geometry.RectInt) goimage.Image {
+func CropImage(img goimage.Image, bounds geometry.RectInt) goimage.Image {
 	// Clamp bounds to image dimensions
 	imgBounds := img.Bounds()
 	x := bounds.X

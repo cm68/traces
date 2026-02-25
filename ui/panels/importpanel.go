@@ -994,7 +994,7 @@ func (ip *ImportPanel) onAutoAlign() {
 		return
 	}
 
-	ip.alignStatus.SetText("Auto-aligning: detecting contacts...")
+	ip.alignStatus.SetText("Auto-aligning: processing images...")
 	ip.autoAlignButton.SetSensitive(false)
 	ip.alignButton.SetSensitive(false)
 
@@ -1004,8 +1004,103 @@ func (ip *ImportPanel) onAutoAlign() {
 			dpi = ip.state.FrontImage.DPI
 		}
 
-		frontResult, err := alignment.DetectContactsOnTopEdge(ip.state.FrontImage.Image, ip.state.BoardSpec, dpi, nil)
-		if err != nil || frontResult == nil || len(frontResult.Contacts) < 10 {
+		// Step 1: Process front image (detect board, rotate, crop)
+		glib.IdleAdd(func() {
+			ip.alignStatus.SetText("Processing front image...")
+		})
+		frontProcessed, err := alignment.ProcessRawImage(
+			ip.state.FrontImage.Image, ip.state.BoardSpec, pcbimage.SideFront, dpi)
+		if err != nil {
+			glib.IdleAdd(func() {
+				ip.alignStatus.SetText(fmt.Sprintf("Front processing failed: %v", err))
+				ip.autoAlignButton.SetSensitive(true)
+				ip.alignButton.SetSensitive(true)
+			})
+			return
+		}
+
+		// Step 2: Process back image (detect board, rotate, flip, crop)
+		glib.IdleAdd(func() {
+			ip.alignStatus.SetText("Processing back image...")
+		})
+		backProcessed, err := alignment.ProcessRawImage(
+			ip.state.BackImage.Image, ip.state.BoardSpec, pcbimage.SideBack, dpi)
+		if err != nil {
+			glib.IdleAdd(func() {
+				ip.alignStatus.SetText(fmt.Sprintf("Back processing failed: %v", err))
+				ip.autoAlignButton.SetSensitive(true)
+				ip.alignButton.SetSensitive(true)
+			})
+			return
+		}
+
+		// Step 3: Store processed images
+		ip.state.FrontImage.Image = frontProcessed.Image
+		ip.state.FrontImportRotation = frontProcessed.RotationApplied
+		ip.state.FrontCropBounds = frontProcessed.BoardBounds
+		ip.state.BackImage.Image = backProcessed.Image
+		ip.state.BackImportRotation = backProcessed.RotationApplied
+		ip.state.BackCropBounds = backProcessed.BoardBounds
+
+		// Step 4: Try via-based alignment
+		glib.IdleAdd(func() {
+			ip.alignStatus.SetText("Detecting vias for alignment...")
+		})
+		viaResult, viaErr := alignment.AlignWithVias(frontProcessed.Image, backProcessed.Image, dpi)
+
+		if viaErr == nil && viaResult != nil && viaResult.MatchedVias >= 3 {
+			// Via alignment succeeded — apply affine transform to back image
+			glib.IdleAdd(func() {
+				ip.alignStatus.SetText("Applying via-based alignment...")
+			})
+
+			frontBounds := frontProcessed.Image.Bounds()
+			warpedBack, warpErr := alignment.WarpAffineGoImage(
+				backProcessed.Image, viaResult.Transform,
+				frontBounds.Dx(), frontBounds.Dy())
+			if warpErr == nil {
+				ip.state.BackImage.Image = warpedBack
+			}
+
+			// Store via results in state
+			ip.state.ViaAlignResult = viaResult
+			ip.state.AlignmentError = viaResult.AvgError
+
+			// Reset manual alignment params (alignment is baked into pixels)
+			ip.resetAlignmentParams()
+
+			ip.state.Aligned = true
+			ip.state.SetModified(true)
+			ip.state.Emit(app.EventAlignmentComplete, nil)
+
+			matchInfo := fmt.Sprintf("Via-aligned: %d matched (%d front, %d back), err=%.1f px",
+				viaResult.MatchedVias, viaResult.TotalFrontVias, viaResult.TotalBackVias, viaResult.AvgError)
+
+			glib.IdleAdd(func() {
+				ip.clearAlignmentOverlays()
+				ip.alignStatus.SetText(matchInfo)
+				ip.autoAlignButton.SetSensitive(true)
+				ip.alignButton.SetSensitive(true)
+				ip.RefreshLabels()
+				ip.canvas.Refresh()
+			})
+			return
+		}
+
+		// Step 5: Fallback to contact-based alignment
+		fmt.Printf("Via alignment unavailable (%v), falling back to contact-based\n", viaErr)
+		glib.IdleAdd(func() {
+			ip.alignStatus.SetText("Via alignment failed, trying contacts...")
+		})
+
+		// Store partial via results if available
+		if viaResult != nil {
+			ip.state.ViaAlignResult = viaResult
+		}
+
+		frontContactResult, err := alignment.DetectContactsOnTopEdge(
+			frontProcessed.Image, ip.state.BoardSpec, dpi, nil)
+		if err != nil || frontContactResult == nil || len(frontContactResult.Contacts) < 10 {
 			glib.IdleAdd(func() {
 				ip.alignStatus.SetText("Auto-align failed: not enough front contacts")
 				ip.autoAlignButton.SetSensitive(true)
@@ -1013,10 +1108,11 @@ func (ip *ImportPanel) onAutoAlign() {
 			})
 			return
 		}
-		ip.state.FrontDetectionResult = frontResult
+		ip.state.FrontDetectionResult = frontContactResult
 
-		backResult, err := alignment.DetectContactsOnTopEdge(ip.state.BackImage.Image, ip.state.BoardSpec, dpi, nil)
-		if err != nil || backResult == nil || len(backResult.Contacts) < 10 {
+		backContactResult, err := alignment.DetectContactsOnTopEdge(
+			backProcessed.Image, ip.state.BoardSpec, dpi, nil)
+		if err != nil || backContactResult == nil || len(backContactResult.Contacts) < 10 {
 			glib.IdleAdd(func() {
 				ip.alignStatus.SetText("Auto-align failed: not enough back contacts")
 				ip.autoAlignButton.SetSensitive(true)
@@ -1024,10 +1120,11 @@ func (ip *ImportPanel) onAutoAlign() {
 			})
 			return
 		}
-		ip.state.BackDetectionResult = backResult
+		ip.state.BackDetectionResult = backContactResult
 
-		frontContacts := frontResult.Contacts
-		backContacts := backResult.Contacts
+		// Compute offset and rotation from contact positions
+		frontContacts := frontContactResult.Contacts
+		backContacts := backContactResult.Contacts
 
 		var frontSumX, frontSumY, backSumX, backSumY float64
 		minC := minInt(len(frontContacts), len(backContacts))
@@ -1046,8 +1143,8 @@ func (ip *ImportPanel) onAutoAlign() {
 		offsetX := int(frontAvgX - backAvgX)
 		offsetY := int(frontAvgY - backAvgY)
 
-		frontAngle := frontResult.ContactAngle
-		backAngle := backResult.ContactAngle
+		frontAngle := frontContactResult.ContactAngle
+		backAngle := backContactResult.ContactAngle
 
 		ip.state.FrontManualRotation = -frontAngle
 		ip.state.FrontRotationCenter = geometry.Point2D{X: frontAvgX, Y: frontAvgY}
@@ -1067,38 +1164,15 @@ func (ip *ImportPanel) onAutoAlign() {
 		ip.state.BackImage.ManualOffsetY = offsetY
 
 		// Reset shear
-		for _, v := range []*float64{
-			&ip.state.FrontShearTopX, &ip.state.FrontShearBottomX,
-			&ip.state.FrontShearLeftY, &ip.state.FrontShearRightY,
-			&ip.state.BackShearTopX, &ip.state.BackShearBottomX,
-			&ip.state.BackShearLeftY, &ip.state.BackShearRightY,
-		} {
-			*v = 1.0
-		}
-		ip.state.FrontImage.ShearTopX = 1.0
-		ip.state.FrontImage.ShearBottomX = 1.0
-		ip.state.FrontImage.ShearLeftY = 1.0
-		ip.state.FrontImage.ShearRightY = 1.0
-		ip.state.BackImage.ShearTopX = 1.0
-		ip.state.BackImage.ShearBottomX = 1.0
-		ip.state.BackImage.ShearLeftY = 1.0
-		ip.state.BackImage.ShearRightY = 1.0
+		ip.resetShearDefaults()
 
 		ip.state.Aligned = true
 		ip.state.SetModified(true)
 		ip.state.Emit(app.EventAlignmentComplete, nil)
 
 		glib.IdleAdd(func() {
-			ip.canvas.ClearOverlay("front_contacts")
-			ip.canvas.ClearOverlay("back_contacts")
-			ip.canvas.ClearOverlay("front_expected")
-			ip.canvas.ClearOverlay("back_expected")
-			ip.canvas.ClearOverlay("front_search_area")
-			ip.canvas.ClearOverlay("back_search_area")
-			ip.canvas.ClearOverlay("front_ejectors")
-			ip.canvas.ClearOverlay("back_ejectors")
-
-			ip.alignStatus.SetText(fmt.Sprintf("Aligned: front rot=%.3f°, back rot=%.3f°, offset=(%d,%d)",
+			ip.clearAlignmentOverlays()
+			ip.alignStatus.SetText(fmt.Sprintf("Contact-aligned: front rot=%.3f°, back rot=%.3f°, offset=(%d,%d)",
 				-frontAngle, -backAngle, offsetX, offsetY))
 			ip.autoAlignButton.SetSensitive(true)
 			ip.alignButton.SetSensitive(true)
@@ -1106,6 +1180,60 @@ func (ip *ImportPanel) onAutoAlign() {
 			ip.canvas.Refresh()
 		})
 	}()
+}
+
+// resetAlignmentParams resets all manual alignment parameters to defaults.
+// Used when alignment is baked directly into image pixels (via-based alignment).
+func (ip *ImportPanel) resetAlignmentParams() {
+	ip.state.FrontManualRotation = 0
+	ip.state.FrontRotationCenter = geometry.Point2D{}
+	ip.state.FrontImage.ManualRotation = 0
+	ip.state.FrontImage.RotationCenterX = 0
+	ip.state.FrontImage.RotationCenterY = 0
+	ip.state.BackManualRotation = 0
+	ip.state.BackRotationCenter = geometry.Point2D{}
+	ip.state.BackImage.ManualRotation = 0
+	ip.state.BackImage.RotationCenterX = 0
+	ip.state.BackImage.RotationCenterY = 0
+	ip.state.BackManualOffset = geometry.PointInt{}
+	ip.state.BackImage.ManualOffsetX = 0
+	ip.state.BackImage.ManualOffsetY = 0
+	ip.state.FrontManualOffset = geometry.PointInt{}
+	ip.state.FrontImage.ManualOffsetX = 0
+	ip.state.FrontImage.ManualOffsetY = 0
+	ip.resetShearDefaults()
+}
+
+// resetShearDefaults resets all shear factors to 1.0 (no shear).
+func (ip *ImportPanel) resetShearDefaults() {
+	for _, v := range []*float64{
+		&ip.state.FrontShearTopX, &ip.state.FrontShearBottomX,
+		&ip.state.FrontShearLeftY, &ip.state.FrontShearRightY,
+		&ip.state.BackShearTopX, &ip.state.BackShearBottomX,
+		&ip.state.BackShearLeftY, &ip.state.BackShearRightY,
+	} {
+		*v = 1.0
+	}
+	ip.state.FrontImage.ShearTopX = 1.0
+	ip.state.FrontImage.ShearBottomX = 1.0
+	ip.state.FrontImage.ShearLeftY = 1.0
+	ip.state.FrontImage.ShearRightY = 1.0
+	ip.state.BackImage.ShearTopX = 1.0
+	ip.state.BackImage.ShearBottomX = 1.0
+	ip.state.BackImage.ShearLeftY = 1.0
+	ip.state.BackImage.ShearRightY = 1.0
+}
+
+// clearAlignmentOverlays removes all contact detection overlays from the canvas.
+func (ip *ImportPanel) clearAlignmentOverlays() {
+	ip.canvas.ClearOverlay("front_contacts")
+	ip.canvas.ClearOverlay("back_contacts")
+	ip.canvas.ClearOverlay("front_expected")
+	ip.canvas.ClearOverlay("back_expected")
+	ip.canvas.ClearOverlay("front_search_area")
+	ip.canvas.ClearOverlay("back_search_area")
+	ip.canvas.ClearOverlay("front_ejectors")
+	ip.canvas.ClearOverlay("back_ejectors")
 }
 
 func (ip *ImportPanel) onAlignImages() {

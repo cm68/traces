@@ -216,11 +216,11 @@ func (ic *ImageCanvas) drawSelectionRect(output *image.RGBA, rect *OverlayRect) 
 	// Use yellow for selection
 	col := color.RGBA{R: 255, G: 255, B: 0, A: 255}
 
-	// rect is already in canvas coordinates
-	x1 := rect.X
-	y1 := rect.Y
-	x2 := rect.X + rect.Width
-	y2 := rect.Y + rect.Height
+	// rect is in image coordinates — scale to canvas (zoom) coordinates
+	x1 := int(float64(rect.X) * ic.zoom)
+	y1 := int(float64(rect.Y) * ic.zoom)
+	x2 := int(float64(rect.X+rect.Width) * ic.zoom)
+	y2 := int(float64(rect.Y+rect.Height) * ic.zoom)
 
 	bounds := output.Bounds()
 

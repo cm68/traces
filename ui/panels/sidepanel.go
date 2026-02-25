@@ -152,6 +152,7 @@ func (sp *SidePanel) ShowPanel(name string) {
 		sp.canvas.OnMiddleClick(func(x, y float64) { sp.tracesPanel.onMiddleClick(x, y) })
 		sp.canvas.OnLeftClick(func(x, y float64) { sp.tracesPanel.onLeftClick(x, y) })
 		sp.canvas.OnRightClick(func(x, y float64) { sp.tracesPanel.onRightClickVia(x, y) })
+		sp.canvas.OnRightSelect(func(x1, y1, x2, y2 float64) { sp.tracesPanel.onRightSelect(x1, y1, x2, y2) })
 		sp.canvas.OnHover(func(x, y float64) { sp.tracesPanel.onHover(x, y) })
 	case PanelLogos:
 		sp.canvas.OnHover(nil)

@@ -99,13 +99,19 @@ type ImageCanvas struct {
 	solidBlackBackground bool
 
 	// Callbacks
-	onZoomChange  func(zoom float64)
-	onSelect      func(x1, y1, x2, y2 float64) // Called with image coordinates
-	onLeftClick   func(x, y float64)            // Left click at image coordinates
-	onRightClick  func(x, y float64)            // Right click at image coordinates
-	onMiddleClick func(x, y float64)            // Middle click at image coordinates
-	onMouseMove   func(x, y float64)            // Mouse move at image coordinates
-	onHover       func(x, y float64)            // Always-active hover callback
+	onZoomChange   func(zoom float64)
+	onSelect       func(x1, y1, x2, y2 float64) // Called with image coordinates
+	onRightSelect  func(x1, y1, x2, y2 float64) // Called on shift+right-drag selection
+	onLeftClick    func(x, y float64)            // Left click at image coordinates
+	onRightClick   func(x, y float64)            // Right click at image coordinates
+	onMiddleClick  func(x, y float64)            // Middle click at image coordinates
+	onMouseMove    func(x, y float64)            // Mouse move at image coordinates
+	onHover        func(x, y float64)            // Always-active hover callback
+
+	// Right-button drag selection (shift+right-click)
+	rightDragging    bool
+	rightSelectStart geometry.Point2D
+	rightSelectEnd   geometry.Point2D
 
 	// Rubber band line (image coordinates)
 	rubberBandFrom geometry.Point2D
@@ -197,6 +203,13 @@ func NewImageCanvas() *ImageCanvas {
 				ic.onMiddleClick(imgX, imgY)
 			}
 		case 3: // Right click
+			if btn.State()&uint(gdk.SHIFT_MASK) != 0 && ic.onRightSelect != nil {
+				ic.rightDragging = true
+				ic.selecting = true
+				ic.rightSelectStart = geometry.Point2D{X: imgX, Y: imgY}
+				ic.rightSelectEnd = ic.rightSelectStart
+				return true
+			}
 			if ic.onRightClick != nil {
 				ic.onRightClick(imgX, imgY)
 			}
@@ -225,6 +238,20 @@ func NewImageCanvas() *ImageCanvas {
 			}
 		case 2: // Middle release
 			ic.middleDragging = false
+		case 3: // Right release
+			if ic.rightDragging {
+				ic.rightDragging = false
+				ic.selecting = false
+				if ic.onRightSelect != nil && ic.selectionRect != nil {
+					rect := ic.selectionRect
+					ic.onRightSelect(
+						float64(rect.X), float64(rect.Y),
+						float64(rect.X+rect.Width), float64(rect.Y+rect.Height),
+					)
+				}
+				ic.selectionRect = nil
+				ic.drawArea.QueueDraw()
+			}
 		}
 		return true
 	})
@@ -249,11 +276,19 @@ func NewImageCanvas() *ImageCanvas {
 			return true
 		}
 
-		// Left-button drag for selection
-		if ic.leftDragging && ic.selecting {
-			ic.selectEnd = geometry.Point2D{X: imgX, Y: imgY}
-			x1, y1 := ic.selectStart.X, ic.selectStart.Y
-			x2, y2 := ic.selectEnd.X, ic.selectEnd.Y
+		// Left-button or right-button drag for selection
+		if (ic.leftDragging || ic.rightDragging) && ic.selecting {
+			var start geometry.Point2D
+			if ic.leftDragging {
+				ic.selectEnd = geometry.Point2D{X: imgX, Y: imgY}
+				start = ic.selectStart
+			} else {
+				ic.rightSelectEnd = geometry.Point2D{X: imgX, Y: imgY}
+				start = ic.rightSelectStart
+			}
+			end := geometry.Point2D{X: imgX, Y: imgY}
+			x1, y1 := start.X, start.Y
+			x2, y2 := end.X, end.Y
 			if x1 > x2 {
 				x1, x2 = x2, x1
 			}
@@ -623,6 +658,11 @@ func (ic *ImageCanvas) OnZoomChange(callback func(zoom float64)) {
 // OnSelect sets a callback for selection completion.
 func (ic *ImageCanvas) OnSelect(callback func(x1, y1, x2, y2 float64)) {
 	ic.onSelect = callback
+}
+
+// OnRightSelect sets a callback for shift+right-drag rectangle selection.
+func (ic *ImageCanvas) OnRightSelect(callback func(x1, y1, x2, y2 float64)) {
+	ic.onRightSelect = callback
 }
 
 // OnLeftClick sets a callback for left-click events.

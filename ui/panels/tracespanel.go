@@ -91,8 +91,12 @@ type TracesPanel struct {
 	// Default via radius for manual addition
 	defaultViaRadius float64
 
-	// Hover state for net info display
+	// Hover state for net info display and delete-on-hover
 	hoverNetID string
+	hoverX, hoverY float64
+
+	// Multi-selection of vias (shift+right-drag)
+	selectedVias []*via.ConfirmedVia
 
 	// Net list UI
 	netListBox       *gtk.ListBox
@@ -468,7 +472,7 @@ func (tp *TracesPanel) OnKeyPressed(ev *gdk.EventKey) bool {
 			tp.cancelTrace()
 			return true
 		}
-		if tp.selectedVia != nil {
+		if len(tp.selectedVias) > 0 || tp.selectedVia != nil {
 			tp.deselectVia()
 			return true
 		}
@@ -477,6 +481,40 @@ func (tp *TracesPanel) OnKeyPressed(ev *gdk.EventKey) bool {
 			return true
 		}
 		return false
+	}
+
+	// Arrow-key nudging for multi-selected vias
+	if len(tp.selectedVias) > 0 {
+		step := 1.0
+		if ev.State()&uint(gdk.SHIFT_MASK) != 0 {
+			step = 5.0
+		}
+
+		var dx, dy float64
+		switch keyval {
+		case gdk.KEY_Up:
+			dy = -step
+		case gdk.KEY_Down:
+			dy = step
+		case gdk.KEY_Left:
+			dx = -step
+		case gdk.KEY_Right:
+			dx = step
+		default:
+			return false
+		}
+
+		for _, cv := range tp.selectedVias {
+			cv.Center.X += dx
+			cv.Center.Y += dy
+			cv.IntersectionBoundary = geometry.GenerateCirclePoints(cv.Center.X, cv.Center.Y, cv.Radius, 32)
+		}
+		tp.rebuildFeaturesOverlay()
+		tp.updateSelectedViaOverlay()
+		tp.canvas.Refresh()
+		tp.viaStatusLabel.SetText(fmt.Sprintf("Nudged %d vias by (%.0f, %.0f)", len(tp.selectedVias), dx, dy))
+		tp.state.Emit(app.EventConfirmedViasChanged, nil)
+		return true
 	}
 
 	// Arrow-key nudging for selected via
@@ -540,6 +578,25 @@ func (tp *TracesPanel) OnKeyPressed(ev *gdk.EventKey) bool {
 		tp.viaStatusLabel.SetText(fmt.Sprintf("%s center: (%.0f, %.0f)", conn.ID, conn.Center.X, conn.Center.Y))
 		tp.state.Emit(app.EventConnectorsChanged, nil)
 		return true
+	}
+
+	// Delete key: delete multi-selected vias, or single via under hover cursor
+	if keyval == gdk.KEY_Delete {
+		if len(tp.selectedVias) > 0 {
+			vias := make([]*via.ConfirmedVia, len(tp.selectedVias))
+			copy(vias, tp.selectedVias)
+			tp.deselectVia()
+			for _, cv := range vias {
+				tp.deleteConfirmedVia(cv)
+			}
+			return true
+		}
+		if tp.state.FeaturesLayer != nil {
+			if cv := tp.state.FeaturesLayer.HitTestConfirmedVia(tp.hoverX, tp.hoverY); cv != nil {
+				tp.deleteConfirmedVia(cv)
+				return true
+			}
+		}
 	}
 
 	return false
@@ -649,6 +706,32 @@ func (tp *TracesPanel) onDetectVias() {
 		wg.Wait()
 		elapsed := time.Since(startTime)
 		fmt.Printf("Post-processing complete (%d workers, %.1fms)\n", numWorkers, float64(elapsed.Microseconds())/1000)
+
+		// Filter out vias that overlap with existing detected pins
+		pinVias := tp.state.FeaturesLayer.GetConfirmedVias()
+		var filtered []via.Via
+		for _, v := range result.Vias {
+			overlaps := false
+			for _, cv := range pinVias {
+				if cv.ComponentID == "" {
+					continue
+				}
+				dx := v.Center.X - cv.Center.X
+				dy := v.Center.Y - cv.Center.Y
+				dist := math.Sqrt(dx*dx + dy*dy)
+				if dist < cv.Radius+v.Radius {
+					overlaps = true
+					break
+				}
+			}
+			if !overlaps {
+				filtered = append(filtered, v)
+			}
+		}
+		if removed := len(result.Vias) - len(filtered); removed > 0 {
+			fmt.Printf("Filtered %d vias overlapping with detected pins\n", removed)
+		}
+		result.Vias = filtered
 
 		tp.state.FeaturesLayer.AddVias(result.Vias)
 
@@ -1110,30 +1193,103 @@ func (tp *TracesPanel) selectVia(cv *via.ConfirmedVia) {
 	tp.updateSelectedViaOverlay()
 }
 
-// deselectVia clears the selected via.
+// deselectVia clears the selected via and multi-selection.
 func (tp *TracesPanel) deselectVia() {
-	if tp.selectedVia == nil {
-		return
-	}
 	tp.selectedVia = nil
+	tp.selectedVias = nil
 	tp.canvas.ClearOverlay("selected_via")
 	tp.viaStatusLabel.SetText("")
 	tp.canvas.Refresh()
 }
 
-// updateSelectedViaOverlay draws a highlight ring around the selected via.
+// updateSelectedViaOverlay draws highlight rings around the selected via(s).
 func (tp *TracesPanel) updateSelectedViaOverlay() {
-	if tp.selectedVia == nil {
+	if tp.selectedVia == nil && len(tp.selectedVias) == 0 {
 		tp.canvas.ClearOverlay("selected_via")
 		return
 	}
-	cv := tp.selectedVia
+	var circles []canvas.OverlayCircle
+	if tp.selectedVia != nil {
+		cv := tp.selectedVia
+		circles = append(circles, canvas.OverlayCircle{X: cv.Center.X, Y: cv.Center.Y, Radius: cv.Radius + 3, Filled: false})
+	}
+	for _, cv := range tp.selectedVias {
+		circles = append(circles, canvas.OverlayCircle{X: cv.Center.X, Y: cv.Center.Y, Radius: cv.Radius + 3, Filled: false})
+	}
 	tp.canvas.SetOverlay("selected_via", &canvas.Overlay{
-		Circles: []canvas.OverlayCircle{
-			{X: cv.Center.X, Y: cv.Center.Y, Radius: cv.Radius + 3, Filled: false},
-		},
-		Color: color.RGBA{R: 255, G: 255, B: 255, A: 255},
+		Circles: circles,
+		Color:   color.RGBA{R: 255, G: 255, B: 255, A: 255},
 	})
+}
+
+// onRightSelect handles shift+right-drag rectangle selection of vias.
+func (tp *TracesPanel) onRightSelect(x1, y1, x2, y2 float64) {
+	if tp.state.FeaturesLayer == nil {
+		return
+	}
+	tp.selectedVia = nil
+	tp.selectedVias = nil
+	tp.deselectConnector()
+
+	rect := geometry.Rect{X: x1, Y: y1, Width: x2 - x1, Height: y2 - y1}
+	for _, cv := range tp.state.FeaturesLayer.GetConfirmedVias() {
+		if rect.Contains(cv.Center) {
+			tp.selectedVias = append(tp.selectedVias, cv)
+		}
+	}
+
+	if len(tp.selectedVias) > 0 {
+		tp.viaStatusLabel.SetText(fmt.Sprintf("Selected %d vias — arrow keys to nudge, Del to delete", len(tp.selectedVias)))
+		tp.updateSelectedViaOverlay()
+		tp.canvas.Refresh()
+	} else {
+		tp.deselectVia()
+	}
+}
+
+// showMultiViaMenu shows the context menu for multiple selected vias.
+func (tp *TracesPanel) showMultiViaMenu() {
+	radiusStep := 2.0
+	if tp.state.DPI > 0 {
+		radiusStep = 0.005 * tp.state.DPI
+	}
+
+	menu, _ := gtk.MenuNew()
+	addItem := func(label string, cb func()) {
+		item, _ := gtk.MenuItemNewWithLabel(label)
+		item.Connect("activate", cb)
+		menu.Append(item)
+	}
+
+	count := len(tp.selectedVias)
+	addItem(fmt.Sprintf("Delete %d vias", count), func() {
+		vias := make([]*via.ConfirmedVia, len(tp.selectedVias))
+		copy(vias, tp.selectedVias)
+		tp.deselectVia()
+		for _, cv := range vias {
+			tp.deleteConfirmedVia(cv)
+		}
+	})
+	adjustAll := func(delta float64) {
+		for _, cv := range tp.selectedVias {
+			newRadius := cv.Radius + delta
+			if newRadius < 2 {
+				newRadius = 2
+			}
+			cv.Radius = newRadius
+			cv.IntersectionBoundary = geometry.GenerateCirclePoints(cv.Center.X, cv.Center.Y, newRadius, 32)
+		}
+		tp.rebuildFeaturesOverlay()
+		tp.updateSelectedViaOverlay()
+		tp.canvas.Refresh()
+		tp.viaStatusLabel.SetText(fmt.Sprintf("Adjusted radius of %d vias", count))
+		tp.state.Emit(app.EventConfirmedViasChanged, nil)
+	}
+	addItem("Decrease Radius", func() { adjustAll(-radiusStep) })
+	addItem("Increase Radius", func() { adjustAll(radiusStep) })
+
+	menu.ShowAll()
+	menu.PopupAtPointer(nil)
 }
 
 // selectConnector makes a connector the selected connector for nudging.
@@ -1189,6 +1345,21 @@ func (tp *TracesPanel) onRightClickVia(x, y float64) {
 	if tp.traceMode {
 		tp.cancelTrace()
 		return
+	}
+	// If we have a multi-selection, right-click on a selected via shows group menu;
+	// right-click elsewhere deselects the group and falls through to normal handling.
+	if len(tp.selectedVias) > 0 {
+		hitCV := tp.state.FeaturesLayer.HitTestConfirmedVia(x, y)
+		if hitCV != nil {
+			for _, sv := range tp.selectedVias {
+				if sv.ID == hitCV.ID {
+					tp.showMultiViaMenu()
+					return
+				}
+			}
+		}
+		// Clicked outside the group — deselect
+		tp.deselectVia()
 	}
 
 	cv := tp.state.FeaturesLayer.HitTestConfirmedVia(x, y)
@@ -1517,6 +1688,22 @@ func (tp *TracesPanel) addConfirmedViaAt(x, y float64) {
 	tp.state.FeaturesLayer.AddConfirmedVia(cv)
 
 	fmt.Printf("Added confirmed via %s at (%.0f, %.0f) r=%.0f\n", cvID, x, y, radius)
+
+	// Remove any detected (unmatched) front/back vias that overlap with the new via
+	for _, side := range []pcbimage.Side{pcbimage.SideFront, pcbimage.SideBack} {
+		for _, v := range tp.state.FeaturesLayer.GetViasBySide(side) {
+			if v.BothSidesConfirmed {
+				continue // skip vias already part of a confirmed pair
+			}
+			dx := v.Center.X - x
+			dy := v.Center.Y - y
+			dist := math.Sqrt(dx*dx + dy*dy)
+			if dist < v.Radius+radius {
+				fmt.Printf("  Removing overlapping %s via %s\n", side, v.ID)
+				tp.state.FeaturesLayer.RemoveVia(v.ID)
+			}
+		}
+	}
 
 	// Auto-assign component pin if via falls inside a component's bounds
 	tp.autoAssignPin(cv)
@@ -3213,7 +3400,18 @@ func (tp *TracesPanel) tryMatchVias() {
 	}
 
 	tp.viaStatusLabel.SetText("Matching vias...")
+
+	// Preserve pin vias (those with a ComponentID) — only clear matched vias
+	var pinVias []*via.ConfirmedVia
+	for _, cv := range tp.state.FeaturesLayer.GetConfirmedVias() {
+		if cv.ComponentID != "" {
+			pinVias = append(pinVias, cv)
+		}
+	}
 	tp.state.FeaturesLayer.ClearConfirmedVias()
+	for _, cv := range pinVias {
+		tp.state.FeaturesLayer.AddConfirmedVia(cv)
+	}
 
 	tolerance := via.SuggestMatchTolerance(tp.state.DPI)
 	fmt.Printf("tryMatchVias: %d front, %d back, tolerance=%.1f px\n", len(frontVias), len(backVias), tolerance)
@@ -3751,6 +3949,9 @@ func (tp *TracesPanel) autoTraceToAdjacentVia(cv *via.ConfirmedVia, direction in
 
 // onHover handles mouse hover to display netlist membership when over a trace, via, or connector.
 func (tp *TracesPanel) onHover(x, y float64) {
+	tp.hoverX = x
+	tp.hoverY = y
+
 	// Don't update hover info during active operations
 	if tp.traceMode || tp.draggingVertex {
 		return

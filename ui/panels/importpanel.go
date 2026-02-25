@@ -11,6 +11,7 @@ import (
 	"pcb-tracer/internal/app"
 	"pcb-tracer/internal/board"
 	pcbimage "pcb-tracer/internal/image"
+	"pcb-tracer/internal/via"
 	"pcb-tracer/pkg/colorutil"
 	"pcb-tracer/pkg/geometry"
 	"pcb-tracer/ui/canvas"
@@ -53,7 +54,9 @@ type ImportPanel struct {
 	cropLabel     *gtk.Label
 
 	// Auto align
-	autoAlignButton *gtk.Button
+	autoAlignButton    *gtk.Button
+	coarseAlignButton  *gtk.Button
+	fineAlignButton    *gtk.Button
 
 	// Save / Re-align
 	saveAlignedBtn *gtk.Button
@@ -136,6 +139,12 @@ func NewImportPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, 
 
 	ip.autoAlignButton, _ = gtk.ButtonNewWithLabel("Auto Align")
 	ip.autoAlignButton.Connect("clicked", func() { ip.onAutoAlign() })
+
+	ip.coarseAlignButton, _ = gtk.ButtonNewWithLabel("Align Coarse (Contacts)")
+	ip.coarseAlignButton.Connect("clicked", func() { ip.onCoarseAlign() })
+
+	ip.fineAlignButton, _ = gtk.ButtonNewWithLabel("Align Fine (Vias)")
+	ip.fineAlignButton.Connect("clicked", func() { ip.onFineAlign() })
 
 	ip.saveAlignedBtn, _ = gtk.ButtonNewWithLabel("Save Aligned")
 	ip.saveAlignedBtn.Connect("clicked", func() { ip.onSaveAligned() })
@@ -257,6 +266,8 @@ func NewImportPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, 
 	ip.alignControls.SetMarginEnd(4)
 
 	addToBox(ip.alignControls, ip.autoAlignButton)
+	addToBox(ip.alignControls, ip.coarseAlignButton)
+	addToBox(ip.alignControls, ip.fineAlignButton)
 	addToBox(ip.alignControls, ip.alignButton)
 	addToBox(ip.alignControls, ip.alignStatus)
 	addSep(ip.alignControls)
@@ -343,6 +354,10 @@ func NewImportPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Window, 
 		ip.canvas.ClearOverlay("back_expected")
 		ip.canvas.ClearOverlay("front_search_area")
 		ip.canvas.ClearOverlay("back_search_area")
+
+		// Clear stale board bounds overlays
+		ip.canvas.ClearOverlay("board_bounds_front")
+		ip.canvas.ClearOverlay("board_bounds_back")
 	})
 
 	ip.updateBoardSpecInfo()
@@ -994,7 +1009,7 @@ func (ip *ImportPanel) onAutoAlign() {
 		return
 	}
 
-	ip.alignStatus.SetText("Auto-aligning: processing images...")
+	ip.alignStatus.SetText("Auto-aligning...")
 	ip.autoAlignButton.SetSensitive(false)
 	ip.alignButton.SetSensitive(false)
 
@@ -1004,178 +1019,331 @@ func (ip *ImportPanel) onAutoAlign() {
 			dpi = ip.state.FrontImage.DPI
 		}
 
-		// Step 1: Process front image (detect board, rotate, crop)
-		glib.IdleAdd(func() {
-			ip.alignStatus.SetText("Processing front image...")
-		})
-		frontProcessed, err := alignment.ProcessRawImage(
-			ip.state.FrontImage.Image, ip.state.BoardSpec, pcbimage.SideFront, dpi)
-		if err != nil {
+		setStatus := func(msg string) {
+			glib.IdleAdd(func() { ip.alignStatus.SetText(msg) })
+		}
+		finishError := func(msg string) {
 			glib.IdleAdd(func() {
-				ip.alignStatus.SetText(fmt.Sprintf("Front processing failed: %v", err))
+				ip.alignStatus.SetText(msg)
 				ip.autoAlignButton.SetSensitive(true)
 				ip.alignButton.SetSensitive(true)
 			})
-			return
 		}
 
-		// Step 2: Process back image (detect board, rotate, flip, crop)
-		glib.IdleAdd(func() {
-			ip.alignStatus.SetText("Processing back image...")
-		})
-		backProcessed, err := alignment.ProcessRawImage(
-			ip.state.BackImage.Image, ip.state.BoardSpec, pcbimage.SideBack, dpi)
-		if err != nil {
-			glib.IdleAdd(func() {
-				ip.alignStatus.SetText(fmt.Sprintf("Back processing failed: %v", err))
-				ip.autoAlignButton.SetSensitive(true)
-				ip.alignButton.SetSensitive(true)
-			})
-			return
-		}
+		// Images are already cropped and rotated from import.
+		frontImg := ip.state.FrontImage.Image
+		backImg := ip.state.BackImage.Image
+		frontBounds := frontImg.Bounds()
+		frontW, frontH := frontBounds.Dx(), frontBounds.Dy()
 
-		// Step 3: Store processed images
-		ip.state.FrontImage.Image = frontProcessed.Image
-		ip.state.FrontImportRotation = frontProcessed.RotationApplied
-		ip.state.FrontCropBounds = frontProcessed.BoardBounds
-		ip.state.BackImage.Image = backProcessed.Image
-		ip.state.BackImportRotation = backProcessed.RotationApplied
-		ip.state.BackCropBounds = backProcessed.BoardBounds
-
-		// Step 4: Try via-based alignment
-		glib.IdleAdd(func() {
-			ip.alignStatus.SetText("Detecting vias for alignment...")
-		})
-		viaResult, viaErr := alignment.AlignWithVias(frontProcessed.Image, backProcessed.Image, dpi)
-
-		if viaErr == nil && viaResult != nil && viaResult.MatchedVias >= 3 {
-			// Via alignment succeeded — apply affine transform to back image
-			glib.IdleAdd(func() {
-				ip.alignStatus.SetText("Applying via-based alignment...")
-			})
-
-			frontBounds := frontProcessed.Image.Bounds()
-			warpedBack, warpErr := alignment.WarpAffineGoImage(
-				backProcessed.Image, viaResult.Transform,
-				frontBounds.Dx(), frontBounds.Dy())
-			if warpErr == nil {
-				ip.state.BackImage.Image = warpedBack
+		// Step 1: Detect contacts on both images for coarse alignment
+		// Use sampled color params if available (same as onDetectContacts)
+		setStatus("Detecting contacts for coarse alignment...")
+		var frontColorParams, backColorParams *alignment.DetectionParams
+		if fp := ip.state.FrontColorParams; fp != nil {
+			frontColorParams = &alignment.DetectionParams{
+				HueMin: fp.HueMin, HueMax: fp.HueMax,
+				SatMin: fp.SatMin, SatMax: fp.SatMax,
+				ValMin: fp.ValMin, ValMax: fp.ValMax,
 			}
+		}
+		if bp := ip.state.BackColorParams; bp != nil {
+			backColorParams = &alignment.DetectionParams{
+				HueMin: bp.HueMin, HueMax: bp.HueMax,
+				SatMin: bp.SatMin, SatMax: bp.SatMax,
+				ValMin: bp.ValMin, ValMax: bp.ValMax,
+			}
+		}
+		frontContactResult, frontContactErr := alignment.DetectContactsOnTopEdge(
+			frontImg, ip.state.BoardSpec, dpi, frontColorParams)
+		backContactResult, backContactErr := alignment.DetectContactsOnTopEdge(
+			backImg, ip.state.BoardSpec, dpi, backColorParams)
 
-			// Store via results in state
+		if frontContactResult != nil {
+			ip.state.FrontDetectionResult = frontContactResult
+		}
+
+		// Step 2: Compute coarse transform from contacts
+		hasCoarse := false
+		var coarseTransform geometry.AffineTransform
+		if frontContactErr == nil && backContactErr == nil &&
+			frontContactResult != nil && backContactResult != nil &&
+			len(frontContactResult.Contacts) >= 10 && len(backContactResult.Contacts) >= 10 {
+
+			var err error
+			coarseTransform, err = alignment.CoarseAlignFromContacts(frontContactResult, backContactResult)
+			if err == nil {
+				hasCoarse = true
+				fmt.Printf("onAutoAlign: coarse alignment from contacts succeeded\n")
+			} else {
+				fmt.Printf("onAutoAlign: coarse alignment failed: %v\n", err)
+			}
+		} else {
+			fmt.Printf("onAutoAlign: skipping coarse alignment (front contacts: %v, back contacts: %v)\n",
+				frontContactErr, backContactErr)
+		}
+
+		if !hasCoarse {
+			finishError(fmt.Sprintf("Coarse alignment failed: front=%v, back=%v", frontContactErr, backContactErr))
+			return
+		}
+
+		// Step 3: Apply coarse transform to get coarsely-aligned back for via matching
+		setStatus("Applying coarse alignment...")
+		coarseBack, err := alignment.WarpAffineGoImage(backImg, coarseTransform, frontW, frontH)
+		if err != nil {
+			finishError(fmt.Sprintf("Coarse warp failed: %v", err))
+			return
+		}
+
+		// Step 4: Fine alignment via iterative via matching on the coarsely-aligned images
+		setStatus("Fine alignment: detecting and matching vias...")
+		viaResult, viaErr := alignment.FineAlignViaTranslation(frontImg, coarseBack, dpi)
+
+		if viaErr == nil && viaResult != nil && viaResult.MatchedVias >= 1 {
+			// Compose: fine (maps coarse-back → front) with coarse (maps original-back → coarse-back)
+			finalTransform := viaResult.Transform.Compose(coarseTransform)
+
+			setStatus("Applying final alignment...")
+			warpedBack, warpErr := alignment.WarpAffineGoImage(
+				backImg, finalTransform, frontW, frontH)
+			if warpErr != nil {
+				finishError(fmt.Sprintf("Final warp failed: %v", warpErr))
+				return
+			}
+			ip.state.BackImage.Image = warpedBack
+			ip.state.BackDetectionResult = nil
+
 			ip.state.ViaAlignResult = viaResult
 			ip.state.AlignmentError = viaResult.AvgError
-
-			// Reset manual alignment params (alignment is baked into pixels)
 			ip.resetAlignmentParams()
 
 			ip.state.Aligned = true
 			ip.state.SetModified(true)
 			ip.state.Emit(app.EventAlignmentComplete, nil)
 
-			matchInfo := fmt.Sprintf("Via-aligned: %d matched (%d front, %d back), err=%.1f px",
-				viaResult.MatchedVias, viaResult.TotalFrontVias, viaResult.TotalBackVias, viaResult.AvgError)
+			ft := viaResult.Transform
+			matchInfo := fmt.Sprintf("Aligned: %d vias, err=%.1f px (Yscale=%.4f shear=%.4f)",
+				viaResult.MatchedVias, viaResult.AvgError, ft.D, ft.B)
+
+			frontViaOverlay := ip.buildViaOverlay(viaResult.FrontVias, viaResult.UsedFrontPts)
+			frontViaOverlay.Layer = canvas.LayerFront
+			backViaOverlay := ip.buildViaOverlay(viaResult.BackVias, viaResult.UsedBackPts)
+			backViaOverlay.Layer = canvas.LayerBack
 
 			glib.IdleAdd(func() {
 				ip.clearAlignmentOverlays()
+				ip.canvas.SetOverlay("align_vias_front", frontViaOverlay)
+				ip.canvas.SetOverlay("align_vias_back", backViaOverlay)
 				ip.alignStatus.SetText(matchInfo)
 				ip.autoAlignButton.SetSensitive(true)
 				ip.alignButton.SetSensitive(true)
+				if ip.sidePanel != nil {
+					ip.sidePanel.SyncLayers()
+				}
 				ip.RefreshLabels()
 				ip.canvas.Refresh()
 			})
 			return
 		}
 
-		// Step 5: Fallback to contact-based alignment
-		fmt.Printf("Via alignment unavailable (%v), falling back to contact-based\n", viaErr)
-		glib.IdleAdd(func() {
-			ip.alignStatus.SetText("Via alignment failed, trying contacts...")
-		})
+		// Step 5: Via matching failed — fall back to coarse-only
+		fmt.Printf("onAutoAlign: via alignment failed (%v), falling back to coarse\n", viaErr)
 
-		// Store partial via results if available
+		ip.state.BackImage.Image = coarseBack
+		ip.state.BackDetectionResult = nil
 		if viaResult != nil {
 			ip.state.ViaAlignResult = viaResult
 		}
 
-		frontContactResult, err := alignment.DetectContactsOnTopEdge(
-			frontProcessed.Image, ip.state.BoardSpec, dpi, nil)
-		if err != nil || frontContactResult == nil || len(frontContactResult.Contacts) < 10 {
+		ip.resetAlignmentParams()
+		ip.state.Aligned = true
+		ip.state.SetModified(true)
+		ip.state.Emit(app.EventAlignmentComplete, nil)
+
+		angleDiff := frontContactResult.ContactAngle - backContactResult.ContactAngle
+		glib.IdleAdd(func() {
+			ip.clearAlignmentOverlays()
+			ip.alignStatus.SetText(fmt.Sprintf("Contact-only: rot=%.2f°, vias failed: %v",
+				angleDiff, viaErr))
+			ip.autoAlignButton.SetSensitive(true)
+			ip.alignButton.SetSensitive(true)
+			if ip.sidePanel != nil {
+				ip.sidePanel.SyncLayers()
+			}
+			ip.RefreshLabels()
+			ip.canvas.Refresh()
+		})
+	}()
+}
+
+// onCoarseAlign performs coarse alignment using gold edge-card contacts.
+// Images are already cropped and rotated from import — this just detects contacts,
+// computes the coarse affine transform, and warps the back to match the front.
+func (ip *ImportPanel) onCoarseAlign() {
+	if ip.state.FrontImage == nil || ip.state.BackImage == nil {
+		ip.alignStatus.SetText("Need both front and back images")
+		return
+	}
+
+	ip.alignStatus.SetText("Coarse align: detecting contacts...")
+	ip.coarseAlignButton.SetSensitive(false)
+
+	go func() {
+		dpi := ip.state.DPI
+		if dpi == 0 && ip.state.FrontImage.DPI > 0 {
+			dpi = ip.state.FrontImage.DPI
+		}
+
+		setStatus := func(msg string) {
+			glib.IdleAdd(func() { ip.alignStatus.SetText(msg) })
+		}
+		finishError := func(msg string) {
 			glib.IdleAdd(func() {
-				ip.alignStatus.SetText("Auto-align failed: not enough front contacts")
-				ip.autoAlignButton.SetSensitive(true)
-				ip.alignButton.SetSensitive(true)
+				ip.alignStatus.SetText(msg)
+				ip.coarseAlignButton.SetSensitive(true)
 			})
+		}
+
+		frontImg := ip.state.FrontImage.Image
+		backImg := ip.state.BackImage.Image
+		frontBounds := frontImg.Bounds()
+		frontW, frontH := frontBounds.Dx(), frontBounds.Dy()
+
+		// Step 1: Detect contacts on current images
+		setStatus("Detecting front contacts...")
+		frontContactResult, err := alignment.DetectContactsOnTopEdge(
+			frontImg, ip.state.BoardSpec, dpi, nil)
+		if err != nil || frontContactResult == nil || len(frontContactResult.Contacts) < 10 {
+			finishError(fmt.Sprintf("Not enough front contacts: %v", err))
 			return
 		}
 		ip.state.FrontDetectionResult = frontContactResult
 
+		setStatus("Detecting back contacts...")
 		backContactResult, err := alignment.DetectContactsOnTopEdge(
-			backProcessed.Image, ip.state.BoardSpec, dpi, nil)
+			backImg, ip.state.BoardSpec, dpi, nil)
 		if err != nil || backContactResult == nil || len(backContactResult.Contacts) < 10 {
-			glib.IdleAdd(func() {
-				ip.alignStatus.SetText("Auto-align failed: not enough back contacts")
-				ip.autoAlignButton.SetSensitive(true)
-				ip.alignButton.SetSensitive(true)
-			})
+			finishError(fmt.Sprintf("Not enough back contacts: %v", err))
 			return
 		}
 		ip.state.BackDetectionResult = backContactResult
 
-		// Compute offset and rotation from contact positions
-		frontContacts := frontContactResult.Contacts
-		backContacts := backContactResult.Contacts
-
-		var frontSumX, frontSumY, backSumX, backSumY float64
-		minC := minInt(len(frontContacts), len(backContacts))
-		for i := 0; i < minC; i++ {
-			frontSumX += frontContacts[i].Center.X
-			frontSumY += frontContacts[i].Center.Y
-			backSumX += backContacts[i].Center.X
-			backSumY += backContacts[i].Center.Y
+		// Step 2: Compute coarse transform
+		setStatus("Computing coarse alignment...")
+		coarseTransform, err := alignment.CoarseAlignFromContacts(frontContactResult, backContactResult)
+		if err != nil {
+			finishError(fmt.Sprintf("Coarse alignment failed: %v", err))
+			return
 		}
 
-		frontAvgX := frontSumX / float64(minC)
-		frontAvgY := frontSumY / float64(minC)
-		backAvgX := backSumX / float64(minC)
-		backAvgY := backSumY / float64(minC)
+		// Step 3: Warp back image
+		warpedBack, err := alignment.WarpAffineGoImage(backImg, coarseTransform, frontW, frontH)
+		if err != nil {
+			finishError(fmt.Sprintf("Warp failed: %v", err))
+			return
+		}
+		ip.state.BackImage.Image = warpedBack
+		// Clear stale back detection result — positions are now invalid
+		ip.state.BackDetectionResult = nil
 
-		offsetX := int(frontAvgX - backAvgX)
-		offsetY := int(frontAvgY - backAvgY)
+		ip.resetAlignmentParams()
+		ip.state.Aligned = true
+		ip.state.SetModified(true)
+		ip.state.Emit(app.EventAlignmentComplete, nil)
 
-		frontAngle := frontContactResult.ContactAngle
-		backAngle := backContactResult.ContactAngle
+		angleDiff := frontContactResult.ContactAngle - backContactResult.ContactAngle
+		glib.IdleAdd(func() {
+			ip.clearAlignmentOverlays()
+			ip.alignStatus.SetText(fmt.Sprintf("Contact-aligned: rot=%.2f° (front=%.2f° back=%.2f°)",
+				angleDiff, frontContactResult.ContactAngle, backContactResult.ContactAngle))
+			ip.coarseAlignButton.SetSensitive(true)
+			if ip.sidePanel != nil {
+				ip.sidePanel.SyncLayers()
+			}
+			ip.RefreshLabels()
+			ip.canvas.Refresh()
+		})
+	}()
+}
 
-		ip.state.FrontManualRotation = -frontAngle
-		ip.state.FrontRotationCenter = geometry.Point2D{X: frontAvgX, Y: frontAvgY}
-		ip.state.FrontImage.ManualRotation = -frontAngle
-		ip.state.FrontImage.RotationCenterX = frontAvgX
-		ip.state.FrontImage.RotationCenterY = frontAvgY
+// onFineAlign performs fine alignment using vias on the current images.
+// Detects vias on front and back as they currently are, matches, and applies affine.
+func (ip *ImportPanel) onFineAlign() {
+	if ip.state.FrontImage == nil || ip.state.BackImage == nil {
+		ip.alignStatus.SetText("Need both front and back images")
+		return
+	}
 
-		ip.state.BackManualRotation = -backAngle
-		ip.state.BackRotationCenter = geometry.Point2D{X: backAvgX, Y: backAvgY}
-		ip.state.BackImage.ManualRotation = -backAngle
-		ip.state.BackImage.RotationCenterX = backAvgX
-		ip.state.BackImage.RotationCenterY = backAvgY
+	ip.alignStatus.SetText("Fine align: detecting vias...")
+	ip.fineAlignButton.SetSensitive(false)
 
-		ip.state.BackManualOffset.X = offsetX
-		ip.state.BackManualOffset.Y = offsetY
-		ip.state.BackImage.ManualOffsetX = offsetX
-		ip.state.BackImage.ManualOffsetY = offsetY
+	go func() {
+		dpi := ip.state.DPI
+		if dpi == 0 && ip.state.FrontImage.DPI > 0 {
+			dpi = ip.state.FrontImage.DPI
+		}
 
-		// Reset shear
-		ip.resetShearDefaults()
+		finishError := func(msg string) {
+			glib.IdleAdd(func() {
+				ip.alignStatus.SetText(msg)
+				ip.fineAlignButton.SetSensitive(true)
+			})
+		}
+
+		// Save a copy of back image before warping (so we warp from the current state)
+		backImg := ip.state.BackImage.Image
+
+		viaResult, err := alignment.FineAlignViaTranslation(ip.state.FrontImage.Image, backImg, dpi)
+		if err != nil || viaResult == nil || viaResult.MatchedVias < 1 {
+			errMsg := "unknown error"
+			if err != nil {
+				errMsg = err.Error()
+			}
+			matched := 0
+			if viaResult != nil {
+				matched = viaResult.MatchedVias
+			}
+			finishError(fmt.Sprintf("Via alignment failed: %s (matched=%d)", errMsg, matched))
+			return
+		}
+
+		// Apply translation to current back image
+		frontBounds := ip.state.FrontImage.Image.Bounds()
+		warpedBack, warpErr := alignment.WarpAffineGoImage(
+			backImg, viaResult.Transform, frontBounds.Dx(), frontBounds.Dy())
+		if warpErr != nil {
+			finishError(fmt.Sprintf("Warp failed: %v", warpErr))
+			return
+		}
+		ip.state.BackImage.Image = warpedBack
+
+		ip.state.ViaAlignResult = viaResult
+		ip.state.AlignmentError = viaResult.AvgError
+		ip.resetAlignmentParams()
 
 		ip.state.Aligned = true
 		ip.state.SetModified(true)
 		ip.state.Emit(app.EventAlignmentComplete, nil)
 
+		t := viaResult.Transform
+		matchInfo := fmt.Sprintf("Via-fine: %d matched, err=%.1f px (Yscale=%.4f shear=%.4f)",
+			viaResult.MatchedVias, viaResult.AvgError, t.D, t.B)
+
+		frontViaOverlay := ip.buildViaOverlay(viaResult.FrontVias, viaResult.UsedFrontPts)
+		frontViaOverlay.Layer = canvas.LayerFront
+		backViaOverlay := ip.buildViaOverlay(viaResult.BackVias, viaResult.UsedBackPts)
+		backViaOverlay.Layer = canvas.LayerBack
+
 		glib.IdleAdd(func() {
 			ip.clearAlignmentOverlays()
-			ip.alignStatus.SetText(fmt.Sprintf("Contact-aligned: front rot=%.3f°, back rot=%.3f°, offset=(%d,%d)",
-				-frontAngle, -backAngle, offsetX, offsetY))
-			ip.autoAlignButton.SetSensitive(true)
-			ip.alignButton.SetSensitive(true)
+			ip.canvas.SetOverlay("align_vias_front", frontViaOverlay)
+			ip.canvas.SetOverlay("align_vias_back", backViaOverlay)
+			ip.alignStatus.SetText(matchInfo)
+			ip.fineAlignButton.SetSensitive(true)
+			if ip.sidePanel != nil {
+				ip.sidePanel.SyncLayers()
+			}
 			ip.RefreshLabels()
 			ip.canvas.Refresh()
 		})
@@ -1224,7 +1392,7 @@ func (ip *ImportPanel) resetShearDefaults() {
 	ip.state.BackImage.ShearRightY = 1.0
 }
 
-// clearAlignmentOverlays removes all contact detection overlays from the canvas.
+// clearAlignmentOverlays removes all alignment-related overlays from the canvas.
 func (ip *ImportPanel) clearAlignmentOverlays() {
 	ip.canvas.ClearOverlay("front_contacts")
 	ip.canvas.ClearOverlay("back_contacts")
@@ -1234,6 +1402,44 @@ func (ip *ImportPanel) clearAlignmentOverlays() {
 	ip.canvas.ClearOverlay("back_search_area")
 	ip.canvas.ClearOverlay("front_ejectors")
 	ip.canvas.ClearOverlay("back_ejectors")
+	ip.canvas.ClearOverlay("align_vias_front")
+	ip.canvas.ClearOverlay("align_vias_back")
+}
+
+// buildViaOverlay creates an overlay showing detected vias.
+// Vias used for the affine (inlier points) are green; matched but not used are yellow;
+// unmatched vias are dim red.
+func (ip *ImportPanel) buildViaOverlay(vias []via.Via, usedPts []geometry.Point2D) *canvas.Overlay {
+	// Build a set of used points for fast lookup
+	usedSet := make(map[[2]int]bool, len(usedPts))
+	for _, pt := range usedPts {
+		usedSet[[2]int{int(pt.X + 0.5), int(pt.Y + 0.5)}] = true
+	}
+
+	overlay := &canvas.Overlay{}
+	green := &color.RGBA{R: 0, G: 255, B: 0, A: 200}
+	yellow := &color.RGBA{R: 255, G: 255, B: 0, A: 160}
+	red := &color.RGBA{R: 255, G: 60, B: 60, A: 100}
+
+	for _, v := range vias {
+		key := [2]int{int(v.Center.X + 0.5), int(v.Center.Y + 0.5)}
+		var col *color.RGBA
+		if usedSet[key] {
+			col = green // Inlier: used for affine
+		} else if v.BothSidesConfirmed {
+			col = yellow // Matched but not inlier (RANSAC outlier)
+		} else {
+			col = red // Unmatched
+		}
+		overlay.Circles = append(overlay.Circles, canvas.OverlayCircle{
+			X:      v.Center.X,
+			Y:      v.Center.Y,
+			Radius: v.Radius,
+			Filled: false,
+			Color:  col,
+		})
+	}
+	return overlay
 }
 
 func (ip *ImportPanel) onAlignImages() {

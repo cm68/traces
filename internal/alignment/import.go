@@ -11,26 +11,28 @@ import (
 	"gocv.io/x/gocv"
 )
 
-// ProcessedImage holds the result of processing a raw scan image through the
-// import pipeline: board detection → rotation → flip → crop.
+// ProcessedImage holds the result of processing a scan image through the
+// import pipeline: board detection → crop → rotation.
+// Note: back-side horizontal flip is handled at image ingest time, not here.
 type ProcessedImage struct {
-	Image           image.Image      // Cropped, rotated, and (if back) flipped image
+	Image           image.Image      // Cropped and rotated image
 	BoardBounds     geometry.RectInt  // Board bounds in the final image
 	RotationApplied float64          // Total degrees rotated
 	GrossRotation   int              // 0/90/180/270 to put connector at top
 	SkewAngle       float64          // Fine skew correction angle (degrees)
-	Flipped         bool             // Whether horizontally flipped (back side)
 	DPI             float64          // Image DPI
 	ContactEdge     string           // Detected contact edge ("top"/"bottom"/"left"/"right" or "")
 }
 
-// ProcessRawImage runs the unified import pipeline on a single raw scan image:
+// ProcessRawImage runs the import pipeline on a scan image:
 //  1. Detect board bounds and rotation angle
 //  2. Determine connector edge orientation → gross rotation (0/90/180/270)
-//  3. Combine skew correction with gross rotation
-//  4. Rotate the image
-//  5. If back side, flip horizontally
-//  6. Crop to detected board bounds
+//  3. Crop to detected board bounds (removes scanner background)
+//  4. Rotate the cropped image (gross + skew correction)
+//
+// Back-side horizontal flip is handled at image ingest time (state.go), not here.
+// Cropping happens before rotation so that rotation-added black borders
+// don't confuse re-detection of board bounds.
 func ProcessRawImage(img image.Image, spec board.Spec, side pcbimage.Side, dpi float64) (*ProcessedImage, error) {
 	if img == nil {
 		return nil, fmt.Errorf("nil image")
@@ -76,44 +78,33 @@ func ProcessRawImage(img image.Image, spec board.Spec, side pcbimage.Side, dpi f
 		}
 	}
 
-	// Step 3: Combined rotation (gross + skew)
-	totalAngle := float64(grossRotation) + skewAngle
-
-	// Step 4: Rotate
+	// Step 3: Crop to board bounds (before rotation to avoid black border issues)
 	current := mat.Clone()
 	defer current.Close()
 
+	origBounds := boardResult.Bounds
+	imgW := current.Cols()
+	imgH := current.Rows()
+	if origBounds.Width < imgW*95/100 || origBounds.Height < imgH*95/100 {
+		fmt.Printf("ProcessRawImage: cropping %dx%d → %dx%d\n",
+			imgW, imgH, origBounds.Width, origBounds.Height)
+		roi := current.Region(image.Rect(origBounds.X, origBounds.Y,
+			origBounds.X+origBounds.Width, origBounds.Y+origBounds.Height))
+		cropped := roi.Clone()
+		roi.Close()
+		current.Close()
+		current = cropped
+	}
+
+	// Step 4: Rotate the cropped image (gross + skew)
+	totalAngle := float64(grossRotation) + skewAngle
 	if totalAngle != 0 {
 		rotated := rotateMatByAngle(current, totalAngle)
 		current.Close()
 		current = rotated
 	}
 
-	// Step 5: Flip for back side
-	flipped := false
-	if side == pcbimage.SideBack {
-		flippedMat := FlipHorizontal(current)
-		current.Close()
-		current = flippedMat
-		flipped = true
-	}
-
-	// Step 6: Re-detect board bounds on the rotated/flipped image and crop
-	newBounds := detectBoardBounds(current)
-
-	// Only crop if the bounds are smaller than the full image (i.e., there's meaningful border to remove)
-	imgW := current.Cols()
-	imgH := current.Rows()
-	if newBounds.Width < imgW*95/100 || newBounds.Height < imgH*95/100 {
-		roi := current.Region(image.Rect(newBounds.X, newBounds.Y,
-			newBounds.X+newBounds.Width, newBounds.Y+newBounds.Height))
-		cropped := roi.Clone()
-		roi.Close()
-		current.Close()
-		current = cropped
-		// Update bounds to be relative to the cropped image
-		newBounds = geometry.RectInt{X: 0, Y: 0, Width: current.Cols(), Height: current.Rows()}
-	}
+	finalBounds := geometry.RectInt{X: 0, Y: 0, Width: current.Cols(), Height: current.Rows()}
 
 	// Convert back to Go image
 	result, err := matToImage(current)
@@ -121,16 +112,15 @@ func ProcessRawImage(img image.Image, spec board.Spec, side pcbimage.Side, dpi f
 		return nil, fmt.Errorf("failed to convert result: %w", err)
 	}
 
-	fmt.Printf("ProcessRawImage: side=%s, grossRot=%d, skew=%.2f°, totalAngle=%.2f°, flipped=%v, size=%dx%d\n",
-		side, grossRotation, skewAngle, totalAngle, flipped, current.Cols(), current.Rows())
+	fmt.Printf("ProcessRawImage: side=%s, grossRot=%d, skew=%.2f°, totalAngle=%.2f°, size=%dx%d\n",
+		side, grossRotation, skewAngle, totalAngle, current.Cols(), current.Rows())
 
 	return &ProcessedImage{
 		Image:           result,
-		BoardBounds:     newBounds,
+		BoardBounds:     finalBounds,
 		RotationApplied: totalAngle,
 		GrossRotation:   grossRotation,
 		SkewAngle:       skewAngle,
-		Flipped:         flipped,
 		DPI:             dpi,
 		ContactEdge:     contactEdge,
 	}, nil

@@ -9,7 +9,6 @@ import (
 	"flag"
 	"fmt"
 	"image"
-	"image/color"
 	"os"
 	"path/filepath"
 	"sort"
@@ -505,11 +504,11 @@ func maskLogosInImage(img *image.RGBA, logoLib *logo.LogoLibrary, orientation st
 	}
 
 	// Calculate background color
-	bgColor := calculateBackgroundColor(img)
+	bgColor := ocr.CalculateBackgroundColor(img)
 
 	// Mask each logo region
 	for _, m := range matches {
-		maskRegion(result, m.Bounds, bgColor)
+		ocr.MaskRegion(result, m.Bounds, bgColor)
 	}
 
 	return result
@@ -528,77 +527,6 @@ func orientationToRotation(orientation string) int {
 	}
 }
 
-func calculateBackgroundColor(img *image.RGBA) color.RGBA {
-	bounds := img.Bounds()
-	var r, g, b uint64
-	count := 0
-
-	// Sample edges
-	for x := bounds.Min.X; x < bounds.Max.X; x++ {
-		c := img.RGBAAt(x, bounds.Min.Y)
-		r += uint64(c.R)
-		g += uint64(c.G)
-		b += uint64(c.B)
-		count++
-
-		c = img.RGBAAt(x, bounds.Max.Y-1)
-		r += uint64(c.R)
-		g += uint64(c.G)
-		b += uint64(c.B)
-		count++
-	}
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		c := img.RGBAAt(bounds.Min.X, y)
-		r += uint64(c.R)
-		g += uint64(c.G)
-		b += uint64(c.B)
-		count++
-
-		c = img.RGBAAt(bounds.Max.X-1, y)
-		r += uint64(c.R)
-		g += uint64(c.G)
-		b += uint64(c.B)
-		count++
-	}
-
-	if count == 0 {
-		return color.RGBA{0, 0, 0, 255}
-	}
-
-	return color.RGBA{
-		R: uint8(r / uint64(count)),
-		G: uint8(g / uint64(count)),
-		B: uint8(b / uint64(count)),
-		A: 255,
-	}
-}
-
-func maskRegion(img *image.RGBA, bounds geometry.RectInt, c color.RGBA) {
-	imgBounds := img.Bounds()
-	x0 := bounds.X
-	y0 := bounds.Y
-	x1 := bounds.X + bounds.Width
-	y1 := bounds.Y + bounds.Height
-
-	if x0 < imgBounds.Min.X {
-		x0 = imgBounds.Min.X
-	}
-	if y0 < imgBounds.Min.Y {
-		y0 = imgBounds.Min.Y
-	}
-	if x1 > imgBounds.Max.X {
-		x1 = imgBounds.Max.X
-	}
-	if y1 > imgBounds.Max.Y {
-		y1 = imgBounds.Max.Y
-	}
-
-	for y := y0; y < y1; y++ {
-		for x := x0; x < x1; x++ {
-			img.SetRGBA(x, y, c)
-		}
-	}
-}
 
 func imageToMat(img *image.RGBA) gocv.Mat {
 	bounds := img.Bounds()

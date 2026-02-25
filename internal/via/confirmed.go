@@ -191,9 +191,3 @@ func (cv *ConfirmedVia) String() string {
 		cv.ID, cv.FrontViaID, cv.BackViaID, cv.Center.X, cv.Center.Y, cv.Radius, cv.Confidence)
 }
 
-func min(a, b float64) float64 {
-	if a < b {
-		return a
-	}
-	return b
-}

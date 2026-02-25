@@ -235,9 +235,18 @@ func createBackgroundDiffMask(img gocv.Mat, bgColor color.RGBA, threshold int) g
 			r := int(img.GetUCharAt(y, x*3+2))
 
 			// Check if any channel differs by more than threshold
-			diffR := abs(r - int(bgColor.R))
-			diffG := abs(g - int(bgColor.G))
-			diffB := abs(b - int(bgColor.B))
+			diffR := r - int(bgColor.R)
+			if diffR < 0 {
+				diffR = -diffR
+			}
+			diffG := g - int(bgColor.G)
+			if diffG < 0 {
+				diffG = -diffG
+			}
+			diffB := b - int(bgColor.B)
+			if diffB < 0 {
+				diffB = -diffB
+			}
 
 			if diffR > threshold || diffG > threshold || diffB > threshold {
 				mask.SetUCharAt(y, x, 255)

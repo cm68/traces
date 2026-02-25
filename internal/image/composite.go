@@ -4,6 +4,7 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
+	"math"
 )
 
 // BlendMode specifies how layers are composited.
@@ -151,9 +152,9 @@ func (c *Composite) blend(dst, src color.Color, mode BlendMode, opacity float64)
 		}
 
 	case BlendDifference:
-		rf[0] = abs(sf[0] - df[0])
-		rf[1] = abs(sf[1] - df[1])
-		rf[2] = abs(sf[2] - df[2])
+		rf[0] = math.Abs(sf[0] - df[0])
+		rf[1] = math.Abs(sf[1] - df[1])
+		rf[2] = math.Abs(sf[2] - df[2])
 	}
 
 	// Apply opacity and alpha blending
@@ -169,13 +170,6 @@ func (c *Composite) blend(dst, src color.Color, mode BlendMode, opacity float64)
 		B: uint8(clamp(finalB, 0, 1) * 255),
 		A: uint8(clamp(finalA, 0, 1) * 255),
 	}
-}
-
-func abs(x float64) float64 {
-	if x < 0 {
-		return -x
-	}
-	return x
 }
 
 func clamp(x, min, max float64) float64 {

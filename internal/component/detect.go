@@ -2248,9 +2248,15 @@ func classifyPackage(widthPx, heightPx, mmToPixels float64) string {
 
 	// Find closest standard pin count
 	closestPins := standardPins[0]
-	minDiff := abs(totalPins - closestPins)
+	minDiff := totalPins - closestPins
+	if minDiff < 0 {
+		minDiff = -minDiff
+	}
 	for _, pins := range standardPins {
-		diff := abs(totalPins - pins)
+		diff := totalPins - pins
+		if diff < 0 {
+			diff = -diff
+		}
 		if diff < minDiff {
 			minDiff = diff
 			closestPins = pins
@@ -2258,13 +2264,6 @@ func classifyPackage(widthPx, heightPx, mmToPixels float64) string {
 	}
 
 	return fmt.Sprintf("DIP-%d", closestPins)
-}
-
-func abs(x int) int {
-	if x < 0 {
-		return -x
-	}
-	return x
 }
 
 // imageToMat converts a Go image.Image to an OpenCV Mat.

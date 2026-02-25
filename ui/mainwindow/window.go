@@ -866,11 +866,11 @@ func (mw *MainWindow) onAbout() {
 		gtk.DIALOG_MODAL,
 		gtk.MESSAGE_INFO,
 		gtk.BUTTONS_OK,
-		fmt.Sprintf("PCB Tracer v%s\n\n"+
+		"PCB Tracer v%s\n\n"+
 			"A cross-platform PCB reverse engineering tool.\n\n"+
 			"Supports S-100, ISA, Multibus, and custom boards.\n\n"+
 			"Built: %s\nCommit: %s",
-			version.Version, version.BuildTime, version.GitCommit),
+		version.Version, version.BuildTime, version.GitCommit,
 	)
 	dlg.SetTitle("About PCB Tracer")
 	dlg.Run()
@@ -909,7 +909,7 @@ func (mw *MainWindow) showError(message string) {
 		gtk.DIALOG_MODAL,
 		gtk.MESSAGE_ERROR,
 		gtk.BUTTONS_OK,
-		message,
+		"%s", message,
 	)
 	dlg.Run()
 	dlg.Destroy()

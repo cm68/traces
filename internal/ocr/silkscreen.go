@@ -421,8 +421,14 @@ func isDuplicateResult(r Result, existing []Result, threshold int) bool {
 	for _, e := range existing {
 		// Check if same text and overlapping bounds
 		if r.Text == e.Text {
-			dx := abs(r.Bounds.X - e.Bounds.X)
-			dy := abs(r.Bounds.Y - e.Bounds.Y)
+			dx := r.Bounds.X - e.Bounds.X
+			if dx < 0 {
+				dx = -dx
+			}
+			dy := r.Bounds.Y - e.Bounds.Y
+			if dy < 0 {
+				dy = -dy
+			}
 			if dx < threshold && dy < threshold {
 				return true
 			}
@@ -431,13 +437,6 @@ func isDuplicateResult(r Result, existing []Result, threshold int) bool {
 	return false
 }
 
-// abs returns absolute value of int.
-func abs(x int) int {
-	if x < 0 {
-		return -x
-	}
-	return x
-}
 
 // findCoordinateAxes looks for A,B,C,D... or 1,2,3,4... patterns along edges.
 func findCoordinateAxes(results []Result, imgW, imgH int) (*CoordinateAxis, *CoordinateAxis) {

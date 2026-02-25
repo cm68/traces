@@ -1489,20 +1489,6 @@ func transformBoundsAfterRotation(origBounds geometry.RectInt, origW, origH, new
 	}
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // cropImage crops an image to the specified bounds.
 func cropImage(img goimage.Image, bounds geometry.RectInt) goimage.Image {
 	// Clamp bounds to image dimensions

@@ -789,11 +789,6 @@ func generateSquarePoints(cx, cy, radius float64) []geometry.Point2D {
 	}
 }
 
-// sortFloat64s sorts a float64 slice in ascending order.
-func sortFloat64s(a []float64) {
-	sort.Float64s(a)
-}
-
 // ResolveSignalName looks up the pin's function name from the parts library and sets
 // cv.SignalName (e.g. "C3-GND"). Returns the pin direction so callers can decide
 // whether to rename nets (output pins drive net names).

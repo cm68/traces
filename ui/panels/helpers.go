@@ -87,25 +87,20 @@ func applyShearAlignment(img image.Image, backLeft, backRight, frontLeft, frontR
 	return result, fmt.Sprintf("yScale=%.4f, shear L=%.4f R=%.4f", yScale, shearLeft, shearRight)
 }
 
-func flipHorizontal(img image.Image) image.Image {
-	bounds := img.Bounds()
-	w, h := bounds.Dx(), bounds.Dy()
-	flipped := image.NewRGBA(image.Rect(0, 0, w, h))
-
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			flipped.Set(w-1-x, y, img.At(x+bounds.Min.X, y+bounds.Min.Y))
-		}
-	}
-	return flipped
-}
-
 func translateImage(img image.Image, dx, dy int) image.Image {
 	bounds := img.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
 
-	newW := w + absInt(dx)
-	newH := h + absInt(dy)
+	adx := dx
+	if adx < 0 {
+		adx = -adx
+	}
+	ady := dy
+	if ady < 0 {
+		ady = -ady
+	}
+	newW := w + adx
+	newH := h + ady
 	translated := image.NewRGBA(image.Rect(0, 0, newW, newH))
 
 	offsetX := 0
@@ -126,12 +121,6 @@ func translateImage(img image.Image, dx, dy int) image.Image {
 	return translated
 }
 
-func absInt(x int) int {
-	if x < 0 {
-		return -x
-	}
-	return x
-}
 
 func extractHSVStats(img image.Image, x1, y1, x2, y2 int) hsvStats {
 	var hues, sats, vals []float64
@@ -191,33 +180,6 @@ func stdDev(values []float64) float64 {
 	return math.Sqrt(sumSq / float64(len(values)))
 }
 
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func minFloat(a, b float64) float64 {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func maxFloat(a, b float64) float64 {
-	if a > b {
-		return a
-	}
-	return b
-}
 
 // naturalLess compares two strings using natural numeric ordering.
 // "A2" < "A10", "U1" < "U2" < "U10", etc.

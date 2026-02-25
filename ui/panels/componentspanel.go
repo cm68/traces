@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"math"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -835,7 +836,7 @@ func (cp *ComponentsPanel) runOCR() {
 		detectedLogos = cp.state.LogoLibrary.DetectLogos(masked, searchBounds, 0.75, logoRotation)
 		if len(detectedLogos) > 0 {
 			fmt.Printf("[OCR] Detected %d logos\n", len(detectedLogos))
-			bgColor := calculateBackgroundColor(masked)
+			bgColor := ocr.CalculateBackgroundColor(masked)
 			compArea := mw * mh
 			for _, m := range detectedLogos {
 				logoArea := m.Bounds.Width * m.Bounds.Height
@@ -851,7 +852,7 @@ func (cp *ComponentsPanel) runOCR() {
 					m.Bounds.X, m.Bounds.Y,
 					m.Bounds.X+m.Bounds.Width, m.Bounds.Y+m.Bounds.Height,
 					bgColor.R, bgColor.G, bgColor.B)
-				maskRegion(masked, m.Bounds, bgColor)
+				ocr.MaskRegion(masked, m.Bounds, bgColor)
 			}
 		}
 	}
@@ -1426,10 +1427,10 @@ func (cp *ComponentsPanel) OnLeftClick(x, y float64) {
 			continue
 		}
 
-		distLeft := abs64(x - left)
-		distRight := abs64(x - right)
-		distTop := abs64(y - top)
-		distBottom := abs64(y - bottom)
+		distLeft := math.Abs(x - left)
+		distRight := math.Abs(x - right)
+		distTop := math.Abs(y - top)
+		distBottom := math.Abs(y - bottom)
 
 		minEdgeDist := distLeft
 		edge := "left"
@@ -2443,58 +2444,6 @@ func rotateForOCR(img *image.RGBA, orientation string) *image.RGBA {
 	}
 }
 
-func calculateBackgroundColor(img *image.RGBA) color.RGBA {
-	bounds := img.Bounds()
-	var r, g, b, count uint64
-
-	for x := bounds.Min.X; x < bounds.Max.X; x++ {
-		c := img.RGBAAt(x, bounds.Min.Y)
-		r += uint64(c.R)
-		g += uint64(c.G)
-		b += uint64(c.B)
-		count++
-		c = img.RGBAAt(x, bounds.Max.Y-1)
-		r += uint64(c.R)
-		g += uint64(c.G)
-		b += uint64(c.B)
-		count++
-	}
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		c := img.RGBAAt(bounds.Min.X, y)
-		r += uint64(c.R)
-		g += uint64(c.G)
-		b += uint64(c.B)
-		count++
-		c = img.RGBAAt(bounds.Max.X-1, y)
-		r += uint64(c.R)
-		g += uint64(c.G)
-		b += uint64(c.B)
-		count++
-	}
-
-	if count == 0 {
-		return color.RGBA{A: 255}
-	}
-	return color.RGBA{
-		R: uint8(r / count),
-		G: uint8(g / count),
-		B: uint8(b / count),
-		A: 255,
-	}
-}
-
-func maskRegion(img *image.RGBA, bounds geometry.RectInt, c color.RGBA) {
-	imgBounds := img.Bounds()
-	x0 := max(bounds.X, imgBounds.Min.X)
-	y0 := max(bounds.Y, imgBounds.Min.Y)
-	x1 := min(bounds.X+bounds.Width, imgBounds.Max.X)
-	y1 := min(bounds.Y+bounds.Height, imgBounds.Max.Y)
-	for y := y0; y < y1; y++ {
-		for x := x0; x < x1; x++ {
-			img.SetRGBA(x, y, c)
-		}
-	}
-}
 
 func extractLogoNames(text string) []string {
 	re := regexp.MustCompile(`<([A-Za-z0-9]+)>`)
@@ -2845,9 +2794,3 @@ func fuzzyContains(haystack, needle string, maxErrors int) bool {
 	return false
 }
 
-func abs64(x float64) float64 {
-	if x < 0 {
-		return -x
-	}
-	return x
-}

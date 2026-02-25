@@ -952,10 +952,10 @@ func (ip *ImportPanel) onSampleSelected(x1, y1, x2, y2 float64) {
 		return
 	}
 
-	ix1 := maxInt(int(x1), bounds.Min.X)
-	iy1 := maxInt(int(y1), bounds.Min.Y)
-	ix2 := minInt(int(x2), bounds.Max.X-1)
-	iy2 := minInt(int(y2), bounds.Max.Y-1)
+	ix1 := max(int(x1), bounds.Min.X)
+	iy1 := max(int(y1), bounds.Min.Y)
+	ix2 := min(int(x2), bounds.Max.X-1)
+	iy2 := min(int(y2), bounds.Max.Y-1)
 
 	if ix2 <= ix1 || iy2 <= iy1 {
 		ip.alignStatus.SetText("Invalid selection")
@@ -965,12 +965,12 @@ func (ip *ImportPanel) onSampleSelected(x1, y1, x2, y2 float64) {
 	stats := extractHSVStats(canvasOutput, ix1, iy1, ix2, iy2)
 
 	colorParams := &app.ColorParams{
-		HueMin: maxFloat(0, stats.hueMean-2*stats.hueStd),
-		HueMax: minFloat(180, stats.hueMean+2*stats.hueStd),
-		SatMin: maxFloat(0, stats.satMean-2*stats.satStd),
-		SatMax: minFloat(255, stats.satMean+2*stats.satStd),
-		ValMin: maxFloat(0, stats.valMean-2*stats.valStd),
-		ValMax: minFloat(255, stats.valMean+2*stats.valStd),
+		HueMin: max(0, stats.hueMean-2*stats.hueStd),
+		HueMax: min(180, stats.hueMean+2*stats.hueStd),
+		SatMin: max(0, stats.satMean-2*stats.satStd),
+		SatMax: min(255, stats.satMean+2*stats.satStd),
+		ValMin: max(0, stats.valMean-2*stats.valStd),
+		ValMax: min(255, stats.valMean+2*stats.valStd),
 	}
 
 	if ip.selectedLayer() == "Front" {
@@ -1030,7 +1030,7 @@ func (ip *ImportPanel) onAutoAlign() {
 		backContacts := backResult.Contacts
 
 		var frontSumX, frontSumY, backSumX, backSumY float64
-		minC := minInt(len(frontContacts), len(backContacts))
+		minC := min(len(frontContacts), len(backContacts))
 		for i := 0; i < minC; i++ {
 			frontSumX += frontContacts[i].Center.X
 			frontSumY += frontContacts[i].Center.Y
@@ -1136,7 +1136,7 @@ func (ip *ImportPanel) onAlignImages() {
 		}
 
 		var frontSumX, frontSumY, backSumX, backSumY float64
-		minC := minInt(len(frontContacts), len(backContacts))
+		minC := min(len(frontContacts), len(backContacts))
 		for i := 0; i < minC; i++ {
 			frontSumX += frontContacts[i].Center.X
 			frontSumY += frontContacts[i].Center.Y
@@ -1459,7 +1459,7 @@ func (ip *ImportPanel) AutoDetectAndAlign() {
 
 func (ip *ImportPanel) performAlignment(frontContacts, backContacts []alignment.Contact, dpi float64) {
 	var frontSumX, frontSumY, backSumX, backSumY float64
-	minC := minInt(len(frontContacts), len(backContacts))
+	minC := min(len(frontContacts), len(backContacts))
 
 	for i := 0; i < minC; i++ {
 		frontSumX += frontContacts[i].Center.X

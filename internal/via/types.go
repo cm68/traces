@@ -93,28 +93,13 @@ func (v Via) Bounds() geometry.RectInt {
 // Uses point-in-polygon for PadBoundary if set; otherwise checks circular area.
 func (v Via) HitTest(x, y float64) bool {
 	if len(v.PadBoundary) > 2 {
-		return pointInPolygon(x, y, v.PadBoundary)
+		return geometry.PointInPolygon(geometry.Point2D{X: x, Y: y}, v.PadBoundary)
 	}
 	dx := x - v.Center.X
 	dy := y - v.Center.Y
 	return dx*dx+dy*dy <= v.Radius*v.Radius
 }
 
-// pointInPolygon uses ray casting algorithm to test if point is inside polygon.
-func pointInPolygon(x, y float64, polygon []geometry.Point2D) bool {
-	n := len(polygon)
-	inside := false
-	j := n - 1
-	for i := 0; i < n; i++ {
-		xi, yi := polygon[i].X, polygon[i].Y
-		xj, yj := polygon[j].X, polygon[j].Y
-		if ((yi > y) != (yj > y)) && (x < (xj-xi)*(y-yi)/(yj-yi)+xi) {
-			inside = !inside
-		}
-		j = i
-	}
-	return inside
-}
 
 // ViaLocation is a minimal representation of a detected via: center and radius.
 type ViaLocation struct {

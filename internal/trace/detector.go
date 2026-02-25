@@ -396,16 +396,3 @@ func StampCircle(mask gocv.Mat, cx, cy, radius int) {
 	}
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

@@ -220,8 +220,14 @@ func drawThickLine(img *image.RGBA, x1, y1, x2, y2 float64, thickness int, c col
 
 // drawLine draws a line using Bresenham's algorithm.
 func drawLine(img *image.RGBA, x1, y1, x2, y2 int, c color.RGBA, bounds image.Rectangle) {
-	dx := abs(x2 - x1)
-	dy := abs(y2 - y1)
+	dx := x2 - x1
+	if dx < 0 {
+		dx = -dx
+	}
+	dy := y2 - y1
+	if dy < 0 {
+		dy = -dy
+	}
 
 	var sx, sy int
 	if x1 < x2 {
@@ -297,9 +303,3 @@ func darken(c color.RGBA, factor float64) color.RGBA {
 	}
 }
 
-func abs(x int) int {
-	if x < 0 {
-		return -x
-	}
-	return x
-}

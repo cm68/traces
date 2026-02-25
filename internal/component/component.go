@@ -572,14 +572,6 @@ func clusterSizeTemplates(samples []TrainingSample) []SizeTemplate {
 	return templates
 }
 
-// abs64 returns the absolute value of a float64.
-func abs64(x float64) float64 {
-	if x < 0 {
-		return -x
-	}
-	return x
-}
-
 // LogoSample represents a user-selected logo region for training.
 type LogoSample struct {
 	Bounds geometry.Rect `json:"bounds"` // Bounding box in image coordinates

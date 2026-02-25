@@ -5,8 +5,6 @@ import (
 	"image"
 	"math"
 	"sort"
-	"sync"
-	"time"
 
 	img "pcb-tracer/internal/image"
 	"pcb-tracer/pkg/geometry"
@@ -517,7 +515,7 @@ func crossValidateWithHough(contourVias []Via, houghCandidates []houghCandidate,
 	var confirmed []Via
 	for _, v := range contourVias {
 		for _, h := range houghCandidates {
-			dist := distance(v.Center, h.center)
+			dist := v.Center.Distance(h.center)
 			if dist < v.Radius {
 				confirmed = append(confirmed, v)
 				break
@@ -544,7 +542,7 @@ func deduplicateVias(vias []Via, params DetectionParams) []Via {
 	for _, v := range vias {
 		isDup := false
 		for i := range result {
-			if distance(v.Center, result[i].Center) < threshold {
+			if v.Center.Distance(result[i].Center) < threshold {
 				isDup = true
 				break
 			}
@@ -555,13 +553,6 @@ func deduplicateVias(vias []Via, params DetectionParams) []Via {
 	}
 
 	return result
-}
-
-// distance calculates Euclidean distance between two points.
-func distance(a, b geometry.Point2D) float64 {
-	dx := a.X - b.X
-	dy := a.Y - b.Y
-	return math.Sqrt(dx*dx + dy*dy)
 }
 
 // imageToMat converts a Go image.Image to an OpenCV Mat.
@@ -584,137 +575,6 @@ func imageToMat(srcImg image.Image) (gocv.Mat, error) {
 	return mat, nil
 }
 
-// SampleViaColors samples HSV values from a region to calibrate detection.
-// Returns average H, S, V values for the region.
-func SampleViaColors(srcImg gocv.Mat, region geometry.RectInt) (avgH, avgS, avgV float64, err error) {
-	if srcImg.Empty() {
-		return 0, 0, 0, fmt.Errorf("empty image")
-	}
-
-	// Clamp region to image bounds
-	x1 := clamp(region.X, 0, srcImg.Cols()-1)
-	y1 := clamp(region.Y, 0, srcImg.Rows()-1)
-	x2 := clamp(region.X+region.Width, 1, srcImg.Cols())
-	y2 := clamp(region.Y+region.Height, 1, srcImg.Rows())
-
-	if x2 <= x1 || y2 <= y1 {
-		return 0, 0, 0, fmt.Errorf("invalid region")
-	}
-
-	// Extract region
-	roi := srcImg.Region(image.Rect(x1, y1, x2, y2))
-	defer roi.Close()
-
-	// Convert to HSV
-	hsv := gocv.NewMat()
-	defer hsv.Close()
-	gocv.CvtColor(roi, &hsv, gocv.ColorBGRToHSV)
-
-	// Sample pixels
-	var totalH, totalS, totalV float64
-	var count int
-
-	for y := 0; y < hsv.Rows(); y++ {
-		for x := 0; x < hsv.Cols(); x++ {
-			totalH += float64(hsv.GetUCharAt(y, x*3+0))
-			totalS += float64(hsv.GetUCharAt(y, x*3+1))
-			totalV += float64(hsv.GetUCharAt(y, x*3+2))
-			count++
-		}
-	}
-
-	if count == 0 {
-		return 0, 0, 0, fmt.Errorf("no pixels sampled")
-	}
-
-	return totalH / float64(count), totalS / float64(count), totalV / float64(count), nil
-}
-
-// ParamsFromSample creates detection params based on sampled HSV values.
-// Adds tolerance around the sampled values.
-func ParamsFromSample(avgH, avgS, avgV float64, tolerance float64) DetectionParams {
-	p := DefaultParams()
-
-	// Apply tolerance to create ranges
-	hTol := tolerance / 4 // Hue has smaller range in OpenCV (0-180)
-	sTol := tolerance
-	vTol := tolerance
-
-	p.HueMin = clampF(avgH-hTol, 0, 180)
-	p.HueMax = clampF(avgH+hTol, 0, 180)
-	p.SatMin = clampF(avgS-sTol, 0, 255)
-	p.SatMax = clampF(avgS+sTol, 0, 255)
-	p.ValMin = clampF(avgV-vTol, 0, 255)
-	p.ValMax = clampF(avgV+vTol, 0, 255)
-
-	return p
-}
-
-func clamp(v, minVal, maxVal int) int {
-	if v < minVal {
-		return minVal
-	}
-	if v > maxVal {
-		return maxVal
-	}
-	return v
-}
-
-func clampF(v, minVal, maxVal float64) float64 {
-	if v < minVal {
-		return minVal
-	}
-	if v > maxVal {
-		return maxVal
-	}
-	return v
-}
-
-// DetectViasAsync runs via detection in a goroutine and returns results via channel.
-func DetectViasAsync(srcImg image.Image, side img.Side, params DetectionParams) <-chan *ViaDetectionResult {
-	ch := make(chan *ViaDetectionResult, 1)
-
-	go func() {
-		defer close(ch)
-		result, err := DetectViasFromImage(srcImg, side, params)
-		if err != nil {
-			// Return empty result on error
-			ch <- &ViaDetectionResult{
-				Side:   side,
-				Params: params,
-			}
-			return
-		}
-		ch <- result
-	}()
-
-	return ch
-}
-
-// BatchDetectVias detects vias on multiple images concurrently.
-func BatchDetectVias(images []image.Image, sides []img.Side, params DetectionParams) []*ViaDetectionResult {
-	if len(images) != len(sides) {
-		return nil
-	}
-
-	results := make([]*ViaDetectionResult, len(images))
-	var wg sync.WaitGroup
-
-	for i := range images {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			result, _ := DetectViasFromImage(images[idx], sides[idx], params)
-			if result == nil {
-				result = &ViaDetectionResult{Side: sides[idx], Params: params}
-			}
-			results[idx] = result
-		}(i)
-	}
-
-	wg.Wait()
-	return results
-}
 
 // DetectViaAtPoint finds a via pad around the click point (x, y) using the
 // same iterative vector-shift technique as pin detection (refineCenterFromGreen).
@@ -812,15 +672,3 @@ func grayAt(img image.Image, x, y int) uint8 {
 	return uint8((19595*r + 38470*g + 7471*b + 1<<15) >> 24)
 }
 
-// CreateManualVia creates a manually-placed via at the specified position.
-func CreateManualVia(center geometry.Point2D, radius float64, side img.Side) Via {
-	return Via{
-		ID:          fmt.Sprintf("via-manual-%d", time.Now().UnixNano()),
-		Center:      center,
-		Radius:      radius,
-		Side:        side,
-		Circularity: 1.0,
-		Confidence:  1.0,
-		Method:      MethodManual,
-	}
-}

@@ -80,9 +80,3 @@ func (p DetectionParams) WithSizeRange(minDiamInches, maxDiamInches float64) Det
 	return p
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}

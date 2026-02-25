@@ -8,27 +8,6 @@ import (
 	"pcb-tracer/internal/board"
 )
 
-func abs(x int) int {
-	if x < 0 {
-		return -x
-	}
-	return x
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // calculateDPI calculates DPI from contact spacing.
 func calculateDPI(contacts []Contact, spec board.Spec) float64 {
 	if len(contacts) < 10 {

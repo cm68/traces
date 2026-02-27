@@ -712,6 +712,37 @@ func (cp *ComponentsPanel) saveEditingComponent() {
 
 	cp.editFrame.SetLabel(fmt.Sprintf("%s (%s - %s)", cp.editingComp.ID, cp.editingComp.Package, cp.editingComp.PartNumber))
 
+	// Remove matching yellow detection rectangle
+	if overlay := cp.canvas.GetOverlay("detect_grid"); overlay != nil {
+		b := cp.editingComp.Bounds
+		bx, by, bw, bh := int(b.X), int(b.Y), int(b.Width), int(b.Height)
+		filtered := overlay.Rectangles[:0]
+		for _, r := range overlay.Rectangles {
+			if r.X == bx && r.Y == by && r.Width == bw && r.Height == bh {
+				continue
+			}
+			filtered = append(filtered, r)
+		}
+		overlay.Rectangles = filtered
+		cp.canvas.Refresh()
+	}
+
+	// Add to global component library if not already present
+	if partText != "" && cp.state.ComponentLibrary != nil {
+		if cp.state.ComponentLibrary.FindByPartNumber(partText) == nil {
+			pinCount, _ := component.ParseDIPPinCount(pkgText)
+			newPart := &component.PartDefinition{
+				PartNumber: partText,
+				Package:    pkgText,
+				PinCount:   pinCount,
+			}
+			cp.state.ComponentLibrary.Add(newPart)
+			cp.state.SaveComponentLibrary()
+			fmt.Printf("[Save] Added %s / %s to component library (%d parts)\n",
+				partText, pkgText, len(cp.state.ComponentLibrary.Parts))
+		}
+	}
+
 	// Add to global component training set
 	if cp.state.FrontImage != nil && cp.state.FrontImage.Image != nil {
 		dpi := cp.state.DPI

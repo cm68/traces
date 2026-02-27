@@ -1,8 +1,85 @@
 {
   "parts": [
     {
+      "part_number": "54LS08",
+      "package": "",
+      "pin_count": 14,
+      "pins": [
+        {
+          "number": 1,
+          "name": "A1",
+          "direction": "Input"
+        },
+        {
+          "number": 2,
+          "name": "B1",
+          "direction": "Input"
+        },
+        {
+          "number": 3,
+          "name": "Y1",
+          "direction": "Output"
+        },
+        {
+          "number": 4,
+          "name": "A2",
+          "direction": "Input"
+        },
+        {
+          "number": 5,
+          "name": "B2",
+          "direction": "Input"
+        },
+        {
+          "number": 6,
+          "name": "Y2",
+          "direction": "Output"
+        },
+        {
+          "number": 7,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 8,
+          "name": "Y3",
+          "direction": "Output"
+        },
+        {
+          "number": 9,
+          "name": "A3",
+          "direction": "Input"
+        },
+        {
+          "number": 10,
+          "name": "B3",
+          "direction": "Input"
+        },
+        {
+          "number": 11,
+          "name": "Y4",
+          "direction": "Output"
+        },
+        {
+          "number": 12,
+          "name": "A4",
+          "direction": "Input"
+        },
+        {
+          "number": 13,
+          "name": "B4",
+          "direction": "Input"
+        },
+        {
+          "number": 14,
+          "name": "VCC",
+          "direction": "Power"
+        }
+      ]
+    },
+    {
       "part_number": "7414",
-      "package": "DIP-14",
+      "package": "",
       "pin_count": 14,
       "pins": [
         {
@@ -75,16 +152,11 @@
           "name": "VCC",
           "direction": "Power"
         }
-      ],
-      "aliases": [
-        "74LS14",
-        "74HC14",
-        "SN7414N"
       ]
     },
     {
       "part_number": "7438",
-      "package": "DIP-14",
+      "package": "",
       "pin_count": 14,
       "pins": [
         {
@@ -161,7 +233,7 @@
     },
     {
       "part_number": "74LS00",
-      "package": "DIP-14",
+      "package": "",
       "pin_count": 14,
       "pins": [
         {
@@ -238,7 +310,7 @@
     },
     {
       "part_number": "74LS02",
-      "package": "DIP-14",
+      "package": "",
       "pin_count": 14,
       "pins": [
         {
@@ -315,7 +387,7 @@
     },
     {
       "part_number": "74LS04",
-      "package": "DIP-14",
+      "package": "",
       "pin_count": 14,
       "pins": [
         {
@@ -392,7 +464,7 @@
     },
     {
       "part_number": "74LS123",
-      "package": "DIP-16",
+      "package": "",
       "pin_count": 16,
       "pins": [
         {
@@ -475,11 +547,6 @@
           "name": "VCC",
           "direction": "Power"
         }
-      ],
-      "aliases": [
-        "54LS123",
-        "74123",
-        "SN74LS123N"
       ]
     },
     {
@@ -571,7 +638,7 @@
     },
     {
       "part_number": "74LS139",
-      "package": "DIP-16",
+      "package": "",
       "pin_count": 16,
       "pins": [
         {
@@ -658,7 +725,7 @@
     },
     {
       "part_number": "74LS153",
-      "package": "DIP-16",
+      "package": "",
       "pin_count": 16,
       "pins": [
         {
@@ -745,7 +812,7 @@
     },
     {
       "part_number": "74LS195",
-      "package": "DIP-16",
+      "package": "",
       "pin_count": 16,
       "pins": [
         {
@@ -832,7 +899,7 @@
     },
     {
       "part_number": "74LS197",
-      "package": "DIP-14",
+      "package": "",
       "pin_count": 14,
       "pins": [
         {
@@ -909,7 +976,7 @@
     },
     {
       "part_number": "74LS240",
-      "package": "DIP-20",
+      "package": "",
       "pin_count": 20,
       "pins": [
         {
@@ -1016,7 +1083,7 @@
     },
     {
       "part_number": "74LS244",
-      "package": "DIP-20",
+      "package": "",
       "pin_count": 20,
       "pins": [
         {
@@ -1123,7 +1190,7 @@
     },
     {
       "part_number": "74LS245",
-      "package": "DIP-20",
+      "package": "",
       "pin_count": 20,
       "pins": [
         {
@@ -1230,7 +1297,7 @@
     },
     {
       "part_number": "74LS273",
-      "package": "DIP-20",
+      "package": "",
       "pin_count": 20,
       "pins": [
         {
@@ -1337,7 +1404,7 @@
     },
     {
       "part_number": "74LS373",
-      "package": "DIP-20",
+      "package": "",
       "pin_count": 20,
       "pins": [
         {
@@ -1440,15 +1507,11 @@
           "name": "VCC",
           "direction": "Power"
         }
-      ],
-      "aliases": [
-        "74LS373N",
-        "SN74LS373N"
       ]
     },
     {
       "part_number": "74LS74",
-      "package": "DIP-14",
+      "package": "",
       "pin_count": 14,
       "pins": [
         {
@@ -1518,6 +1581,220 @@
         },
         {
           "number": 14,
+          "name": "VCC",
+          "direction": "Power"
+        }
+      ]
+    },
+    {
+      "part_number": "AM25LS2521",
+      "package": "",
+      "pin_count": 20,
+      "pins": [
+        {
+          "number": 1,
+          "name": "Ein",
+          "direction": "Input"
+        },
+        {
+          "number": 2,
+          "name": "A0",
+          "direction": "Input"
+        },
+        {
+          "number": 3,
+          "name": "B0",
+          "direction": "Input"
+        },
+        {
+          "number": 4,
+          "name": "A1",
+          "direction": "Input"
+        },
+        {
+          "number": 5,
+          "name": "B1",
+          "direction": "Input"
+        },
+        {
+          "number": 6,
+          "name": "A2",
+          "direction": "Input"
+        },
+        {
+          "number": 7,
+          "name": "B2",
+          "direction": "Input"
+        },
+        {
+          "number": 8,
+          "name": "A3",
+          "direction": "Input"
+        },
+        {
+          "number": 9,
+          "name": "B3",
+          "direction": "Input"
+        },
+        {
+          "number": 10,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 11,
+          "name": "A4",
+          "direction": "Input"
+        },
+        {
+          "number": 12,
+          "name": "B4",
+          "direction": "Input"
+        },
+        {
+          "number": 13,
+          "name": "A5",
+          "direction": "Input"
+        },
+        {
+          "number": 14,
+          "name": "B5",
+          "direction": "Input"
+        },
+        {
+          "number": 15,
+          "name": "A6",
+          "direction": "Input"
+        },
+        {
+          "number": 16,
+          "name": "B6",
+          "direction": "Input"
+        },
+        {
+          "number": 17,
+          "name": "A7",
+          "direction": "Input"
+        },
+        {
+          "number": 18,
+          "name": "B7",
+          "direction": "Input"
+        },
+        {
+          "number": 19,
+          "name": "Eout",
+          "direction": "Output"
+        },
+        {
+          "number": 20,
+          "name": "VCC",
+          "direction": "Power"
+        }
+      ]
+    },
+    {
+      "part_number": "DP8303",
+      "package": "",
+      "pin_count": 20,
+      "pins": [
+        {
+          "number": 1,
+          "name": "A0",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 2,
+          "name": "A1",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 3,
+          "name": "A2",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 4,
+          "name": "A3",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 5,
+          "name": "A4",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 6,
+          "name": "A5",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 7,
+          "name": "A6",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 8,
+          "name": "A7",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 9,
+          "name": "CD",
+          "direction": "Input"
+        },
+        {
+          "number": 10,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 11,
+          "name": "DIR",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 12,
+          "name": "B7",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 13,
+          "name": "B6",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 14,
+          "name": "B5",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 15,
+          "name": "B4",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 16,
+          "name": "B3",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 17,
+          "name": "B2",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 18,
+          "name": "B1",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 19,
+          "name": "B0",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 20,
           "name": "VCC",
           "direction": "Power"
         }

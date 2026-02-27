@@ -164,6 +164,7 @@ func (sp *SidePanel) ShowPanel(name string) {
 		sp.canvas.OnMiddleClick(nil)
 		sp.canvas.OnLeftClick(nil)
 		sp.canvas.OnRightClick(nil)
+		sp.libraryPanel.RefreshPartList()
 	default:
 		sp.canvas.OnHover(nil)
 		sp.canvas.OnMiddleClick(nil)

@@ -411,6 +411,11 @@ func (ic *ImageCanvas) SetOverlay(name string, overlay *Overlay) {
 	ic.Refresh()
 }
 
+// GetOverlay returns an overlay by name, or nil if not found.
+func (ic *ImageCanvas) GetOverlay(name string) *Overlay {
+	return ic.overlays[name]
+}
+
 // ClearOverlay removes an overlay by name.
 func (ic *ImageCanvas) ClearOverlay(name string) {
 	delete(ic.overlays, name)

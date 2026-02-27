@@ -87,13 +87,15 @@ func NewLibraryPanel(state *app.State) *LibraryPanel {
 	listScroll.SetSizeRequest(-1, 120)
 
 	lp.partListBox, _ = gtk.ListBoxNew()
-	lp.partListBox.Connect("row-activated", func(lb *gtk.ListBox, row *gtk.ListBoxRow) {
-		idx := row.GetIndex()
-		lp.selectPart(idx)
+	lp.partListBox.Connect("row-selected", func(lb *gtk.ListBox, row *gtk.ListBoxRow) {
+		if row == nil {
+			return
+		}
+		lp.selectPart(row.GetIndex())
 	})
 	listScroll.Add(lp.partListBox)
 	listFrame.Add(listScroll)
-	lp.box.PackStart(listFrame, false, false, 0)
+	lp.box.PackStart(listFrame, true, true, 0)
 
 	// --- Part Detail ---
 	detailFrame, _ := gtk.FrameNew("Part Detail")
@@ -184,7 +186,7 @@ func NewLibraryPanel(state *app.State) *LibraryPanel {
 	detailFrame.Add(detailBox)
 	lp.box.PackStart(detailFrame, true, true, 0)
 
-	lp.refreshPartList()
+	lp.RefreshPartList()
 	return lp
 }
 
@@ -295,8 +297,8 @@ func (lp *LibraryPanel) onPinDirectionEdited(pathStr, newText string) {
 	}
 }
 
-// refreshPartList rebuilds the part list from the library.
-func (lp *LibraryPanel) refreshPartList() {
+// RefreshPartList rebuilds the part list from the library.
+func (lp *LibraryPanel) RefreshPartList() {
 	// Remove all children
 	children := lp.partListBox.GetChildren()
 	children.Foreach(func(item interface{}) {
@@ -427,7 +429,7 @@ func (lp *LibraryPanel) onNewPart() {
 		lp.state.ComponentLibrary = lib
 	}
 	lib.Add(part)
-	lp.refreshPartList()
+	lp.RefreshPartList()
 }
 
 // onDeletePart removes the selected part from the library.
@@ -451,7 +453,7 @@ func (lp *LibraryPanel) onDeletePart() {
 	lp.pinCountEntry.SetText("")
 	lp.pinStore.Clear()
 
-	lp.refreshPartList()
+	lp.RefreshPartList()
 }
 
 // onSaveLibrary saves the component library to disk.
@@ -470,5 +472,5 @@ func (lp *LibraryPanel) onSaveLibrary() {
 	} else {
 		fmt.Println("Component library saved")
 	}
-	lp.refreshPartList()
+	lp.RefreshPartList()
 }

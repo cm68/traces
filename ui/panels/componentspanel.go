@@ -101,10 +101,6 @@ func NewComponentsPanel(state *app.State, cvs *canvas.ImageCanvas, win *gtk.Wind
 	ocrSilkscreenBtn.Connect("clicked", func() { cp.onOCRSilkscreen() })
 	btnRow.PackStart(ocrSilkscreenBtn, true, true, 0)
 
-	trainBtn, _ := gtk.ButtonNewWithLabel("Train Components")
-	trainBtn.Connect("clicked", func() { cp.onTrainComponents() })
-	btnRow.PackStart(trainBtn, true, true, 0)
-
 	detectBtn, _ := gtk.ButtonNewWithLabel("Detect Components")
 	detectBtn.Connect("clicked", func() { cp.onDetectComponents() })
 	btnRow.PackStart(detectBtn, true, true, 0)
@@ -715,6 +711,23 @@ func (cp *ComponentsPanel) saveEditingComponent() {
 	cp.updateComponentOverlay()
 
 	cp.editFrame.SetLabel(fmt.Sprintf("%s (%s - %s)", cp.editingComp.ID, cp.editingComp.Package, cp.editingComp.PartNumber))
+
+	// Add to global component training set
+	if cp.state.FrontImage != nil && cp.state.FrontImage.Image != nil {
+		dpi := cp.state.DPI
+		if dpi <= 0 {
+			dpi = 1200
+		}
+		if cp.state.GlobalComponentTraining == nil {
+			cp.state.GlobalComponentTraining = component.NewTrainingSet()
+		}
+		sample := component.ExtractSampleFeatures(cp.state.FrontImage.Image, cp.editingComp.Bounds, dpi)
+		sample.Reference = cp.editingComp.ID
+		cp.state.GlobalComponentTraining.Add(sample)
+		cp.state.SaveGlobalComponentTraining()
+		fmt.Printf("[Save] Added component training sample for %s (global total: %d)\n",
+			cp.editingComp.ID, len(cp.state.GlobalComponentTraining.Samples))
+	}
 
 	// Persist to disk
 	if cp.state.ProjectPath != "" {
@@ -1331,6 +1344,9 @@ func (cp *ComponentsPanel) OnKeyPressed(ev *gdk.EventKey) bool {
 		dpi = 1200
 	}
 	step := dpi * 0.00394 // 0.1mm in pixels
+	if ev.State()&uint(gdk.SHIFT_MASK) != 0 {
+		step *= 5 // 0.5mm with Shift held
+	}
 
 	comp := cp.state.Components[cp.editingIndex]
 	keyval := ev.KeyVal()
@@ -1755,40 +1771,6 @@ func (cp *ComponentsPanel) updateComponentOverlay() {
 	}
 	cp.canvas.SetOverlay("components", overlay)
 	cp.canvas.Refresh()
-}
-
-// onTrainComponents adds existing components to the global training set without detecting.
-func (cp *ComponentsPanel) onTrainComponents() {
-	if len(cp.state.Components) == 0 {
-		fmt.Println("[Train] No components to train from")
-		return
-	}
-	if cp.state.FrontImage == nil || cp.state.FrontImage.Image == nil {
-		fmt.Println("[Train] No front image loaded")
-		return
-	}
-
-	frontImg := cp.state.FrontImage.Image
-	dpi := cp.state.DPI
-	if dpi <= 0 {
-		dpi = 1200
-	}
-
-	if cp.state.GlobalComponentTraining == nil {
-		cp.state.GlobalComponentTraining = component.NewTrainingSet()
-	}
-
-	added := 0
-	for _, comp := range cp.state.Components {
-		sample := component.ExtractSampleFeatures(frontImg, comp.Bounds, dpi)
-		sample.Reference = comp.ID
-		cp.state.GlobalComponentTraining.Add(sample)
-		added++
-	}
-
-	cp.state.SaveGlobalComponentTraining()
-	fmt.Printf("Trained %d component samples (global total: %d)\n",
-		added, len(cp.state.GlobalComponentTraining.Samples))
 }
 
 // onDetectComponents detects components using global training data plus any on this board.

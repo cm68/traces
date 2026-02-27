@@ -1218,10 +1218,11 @@ func (s *State) NormalizeFrontImage(projectDir string) error {
 	s.FrontImage.ShearRightY = s.FrontShearRightY
 
 	normalized, _ := s.FrontImage.Normalize()
+	relName := normalizedFilename(s.ProjectPath, "front")
 	s.mu.Unlock()
 
 	// Save PNG
-	normPath := filepath.Join(projectDir, "front_normalized.png")
+	normPath := filepath.Join(projectDir, relName)
 	if err := saveNormalizedPNG(normalized, normPath); err != nil {
 		return fmt.Errorf("failed to save normalized front image: %w", err)
 	}
@@ -1248,7 +1249,7 @@ func (s *State) NormalizeFrontImage(projectDir string) error {
 	s.FrontImage.ShearRightY = 1.0
 
 	// Store relative path for project file
-	s.FrontNormalizedPath = "front_normalized.png"
+	s.FrontNormalizedPath = relName
 
 	// Component bounds are NOT remapped. All component coordinates exist
 	// exclusively in normalized image space. Components created before
@@ -1280,10 +1281,11 @@ func (s *State) NormalizeBackImage(projectDir string) error {
 	s.BackImage.ShearRightY = s.BackShearRightY
 
 	normalized, _ := s.BackImage.Normalize()
+	relName := normalizedFilename(s.ProjectPath, "back")
 	s.mu.Unlock()
 
 	// Save PNG
-	normPath := filepath.Join(projectDir, "back_normalized.png")
+	normPath := filepath.Join(projectDir, relName)
 	if err := saveNormalizedPNG(normalized, normPath); err != nil {
 		return fmt.Errorf("failed to save normalized back image: %w", err)
 	}
@@ -1309,7 +1311,7 @@ func (s *State) NormalizeBackImage(projectDir string) error {
 	s.BackImage.ShearLeftY = 1.0
 	s.BackImage.ShearRightY = 1.0
 
-	s.BackNormalizedPath = "back_normalized.png"
+	s.BackNormalizedPath = relName
 
 	// Component bounds are NOT remapped (same as front).
 	s.mu.Unlock()
@@ -1317,6 +1319,19 @@ func (s *State) NormalizeBackImage(projectDir string) error {
 	s.SetModified(true)
 	fmt.Printf("Back image normalized and saved to %s\n", normPath)
 	return nil
+}
+
+// normalizedFilename returns a project-specific normalized image filename.
+// For project "dtc-scsi.pcbproj" and side "front", returns "dtc-scsi_front_normalized.png".
+// Falls back to generic names if no project path is set.
+func normalizedFilename(projectPath, side string) string {
+	if projectPath == "" {
+		return side + "_normalized.png"
+	}
+	base := filepath.Base(projectPath)
+	ext := filepath.Ext(base)
+	name := base[:len(base)-len(ext)]
+	return name + "_" + side + "_normalized.png"
 }
 
 // saveNormalizedPNG writes an image to a PNG file with best compression.

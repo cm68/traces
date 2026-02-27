@@ -258,7 +258,7 @@ func findContactEdge(img gocv.Mat, spec board.Spec, params DetectionParams, debu
 	var expectedPositions []geometry.RectInt
 	if len(bestContacts) >= 2 && bestLineParams != nil {
 		isHorizontal := (bestEdge == "top" || bestEdge == "bottom")
-		expectedPositions, bestContacts = GridBasedRescue(img, bestContacts, bestLineParams, expectedCount, isHorizontal)
+		expectedPositions, bestContacts = GridBasedRescue(img, bestContacts, bestLineParams, expectedCount, isHorizontal, params.DPI, spec)
 	}
 
 	return bestEdge, bestContacts, boardBounds, bestSearchBounds, expectedPositions, bestSeedAngle
@@ -327,7 +327,7 @@ func detectContactsOnTopEdgeOnly(img gocv.Mat, spec board.Spec, dpi float64, col
 	var expectedPositions []geometry.RectInt
 	var contacts []Contact
 	if lineParams != nil {
-		expectedPositions, contacts = GridBasedRescue(img, seedContacts, lineParams, expectedCount, true)
+		expectedPositions, contacts = GridBasedRescue(img, seedContacts, lineParams, expectedCount, true, dpi, spec)
 	} else {
 		contacts = seedContacts
 	}

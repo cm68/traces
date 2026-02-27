@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"math"
 	"path/filepath"
 	"strings"
 
@@ -1098,7 +1099,8 @@ func (ip *ImportPanel) onAutoAlign() {
 
 		// Step 4: Fine alignment via iterative via matching on the coarsely-aligned images
 		setStatus("Fine alignment: detecting and matching vias...")
-		viaResult, viaErr := alignment.FineAlignViaTranslation(frontImg, coarseBack, dpi)
+		viaResult, viaErr := alignment.FineAlignViaTranslation(frontImg, coarseBack, dpi,
+			frontContactResult, backContactResult, coarseTransform)
 
 		if viaErr == nil && viaResult != nil && viaResult.MatchedVias >= 1 {
 			// Compose: fine (maps coarse-back → front) with coarse (maps original-back → coarse-back)
@@ -1115,7 +1117,7 @@ func (ip *ImportPanel) onAutoAlign() {
 			ip.state.BackDetectionResult = nil
 
 			ip.state.ViaAlignResult = viaResult
-			ip.state.AlignmentError = viaResult.AvgError
+			ip.state.AlignmentError = viaResult.MaxError
 			ip.resetAlignmentParams()
 
 			ip.state.Aligned = true
@@ -1123,13 +1125,17 @@ func (ip *ImportPanel) onAutoAlign() {
 			ip.state.Emit(app.EventAlignmentComplete, nil)
 
 			ft := viaResult.Transform
-			matchInfo := fmt.Sprintf("Aligned: %d vias, err=%.1f px (Yscale=%.4f shear=%.4f)",
-				viaResult.MatchedVias, viaResult.AvgError, ft.D, ft.B)
+			fAngle := math.Atan2(ft.C, ft.A) * 180 / math.Pi
+			fScale := math.Sqrt(ft.A*ft.A + ft.C*ft.C)
+			matchInfo := fmt.Sprintf("Aligned: %d vias, avg=%.1f max=%.1f px (rot=%.3f° scale=%.4f)",
+				viaResult.MatchedVias, viaResult.AvgError, viaResult.MaxError, fAngle, fScale)
 
-			frontViaOverlay := ip.buildViaOverlay(viaResult.FrontVias, viaResult.UsedFrontPts)
+			frontViaOverlay := ip.buildViaOverlay(viaResult.FrontVias, viaResult.BandFracs, true)
 			frontViaOverlay.Layer = canvas.LayerFront
-			backViaOverlay := ip.buildViaOverlay(viaResult.BackVias, viaResult.UsedBackPts)
-			backViaOverlay.Layer = canvas.LayerBack
+			// Back vias on front layer too — they're in coarse-aligned coords,
+			// close enough to front coords for diagnostic overlay.
+			backViaOverlay := ip.buildViaOverlay(viaResult.BackVias, viaResult.BandFracs, false)
+			backViaOverlay.Layer = canvas.LayerFront
 
 			glib.IdleAdd(func() {
 				ip.clearAlignmentOverlays()
@@ -1294,7 +1300,8 @@ func (ip *ImportPanel) onFineAlign() {
 		// Save a copy of back image before warping (so we warp from the current state)
 		backImg := ip.state.BackImage.Image
 
-		viaResult, err := alignment.FineAlignViaTranslation(ip.state.FrontImage.Image, backImg, dpi)
+		viaResult, err := alignment.FineAlignViaTranslation(ip.state.FrontImage.Image, backImg, dpi,
+			nil, nil, geometry.Identity())
 		if err != nil || viaResult == nil || viaResult.MatchedVias < 1 {
 			errMsg := "unknown error"
 			if err != nil {
@@ -1319,7 +1326,7 @@ func (ip *ImportPanel) onFineAlign() {
 		ip.state.BackImage.Image = warpedBack
 
 		ip.state.ViaAlignResult = viaResult
-		ip.state.AlignmentError = viaResult.AvgError
+		ip.state.AlignmentError = viaResult.MaxError
 		ip.resetAlignmentParams()
 
 		ip.state.Aligned = true
@@ -1327,13 +1334,15 @@ func (ip *ImportPanel) onFineAlign() {
 		ip.state.Emit(app.EventAlignmentComplete, nil)
 
 		t := viaResult.Transform
-		matchInfo := fmt.Sprintf("Via-fine: %d matched, err=%.1f px (Yscale=%.4f shear=%.4f)",
-			viaResult.MatchedVias, viaResult.AvgError, t.D, t.B)
+		tAngle := math.Atan2(t.C, t.A) * 180 / math.Pi
+		tScale := math.Sqrt(t.A*t.A + t.C*t.C)
+		matchInfo := fmt.Sprintf("Via-fine: %d matched, avg=%.1f max=%.1f px (rot=%.3f° scale=%.4f)",
+			viaResult.MatchedVias, viaResult.AvgError, viaResult.MaxError, tAngle, tScale)
 
-		frontViaOverlay := ip.buildViaOverlay(viaResult.FrontVias, viaResult.UsedFrontPts)
+		frontViaOverlay := ip.buildViaOverlay(viaResult.FrontVias, viaResult.BandFracs, true)
 		frontViaOverlay.Layer = canvas.LayerFront
-		backViaOverlay := ip.buildViaOverlay(viaResult.BackVias, viaResult.UsedBackPts)
-		backViaOverlay.Layer = canvas.LayerBack
+		backViaOverlay := ip.buildViaOverlay(viaResult.BackVias, viaResult.BandFracs, false)
+		backViaOverlay.Layer = canvas.LayerFront
 
 		glib.IdleAdd(func() {
 			ip.clearAlignmentOverlays()
@@ -1409,27 +1418,57 @@ func (ip *ImportPanel) clearAlignmentOverlays() {
 // buildViaOverlay creates an overlay showing detected vias.
 // Vias used for the affine (inlier points) are green; matched but not used are yellow;
 // unmatched vias are dim red.
-func (ip *ImportPanel) buildViaOverlay(vias []via.Via, usedPts []geometry.Point2D) *canvas.Overlay {
-	// Build a set of used points for fast lookup
-	usedSet := make(map[[2]int]bool, len(usedPts))
-	for _, pt := range usedPts {
-		usedSet[[2]int{int(pt.X + 0.5), int(pt.Y + 0.5)}] = true
+func (ip *ImportPanel) buildViaOverlay(vias []via.Via, bandFracs []float64, isFront bool) *canvas.Overlay {
+	// Front: blue shades (4 corners: TL, TR, BL, BR).
+	// Back: red shades (4 corners).
+	frontColors := []*color.RGBA{
+		{R: 0, G: 40, B: 255, A: 200},  // TL
+		{R: 0, G: 120, B: 210, A: 200}, // TR
+		{R: 0, G: 200, B: 100, A: 200}, // BL
+		{R: 0, G: 255, B: 20, A: 200},  // BR
+	}
+	backColors := []*color.RGBA{
+		{R: 255, G: 0, B: 0, A: 200},   // TL
+		{R: 255, G: 80, B: 0, A: 200},  // TR
+		{R: 255, G: 160, B: 0, A: 200}, // BL
+		{R: 255, G: 230, B: 0, A: 200}, // BR
+	}
+	colors := backColors
+	if isFront {
+		colors = frontColors
 	}
 
-	overlay := &canvas.Overlay{}
-	green := &color.RGBA{R: 0, G: 255, B: 0, A: 200}
-	yellow := &color.RGBA{R: 255, G: 255, B: 0, A: 160}
-	red := &color.RGBA{R: 255, G: 60, B: 60, A: 100}
+	// Compute Y range from vias
+	var yMin, yMax float64
+	if len(vias) > 0 {
+		yMin = vias[0].Center.Y
+		yMax = yMin
+		for _, v := range vias[1:] {
+			if v.Center.Y < yMin {
+				yMin = v.Center.Y
+			}
+			if v.Center.Y > yMax {
+				yMax = v.Center.Y
+			}
+		}
+	}
+	yRange := yMax - yMin
 
-	for _, v := range vias {
-		key := [2]int{int(v.Center.X + 0.5), int(v.Center.Y + 0.5)}
-		var col *color.RGBA
-		if usedSet[key] {
-			col = green // Inlier: used for affine
-		} else if v.BothSidesConfirmed {
-			col = yellow // Matched but not inlier (RANSAC outlier)
-		} else {
-			col = red // Unmatched
+	overlay := &canvas.Overlay{}
+	for i, v := range vias {
+		band := len(bandFracs) - 1
+		if yRange > 0 {
+			yFrac := (v.Center.Y - yMin) / yRange
+			for bi, bf := range bandFracs {
+				if yFrac <= bf {
+					band = bi
+					break
+				}
+			}
+		}
+		col := colors[0]
+		if band >= 0 && band < len(colors) {
+			col = colors[band]
 		}
 		overlay.Circles = append(overlay.Circles, canvas.OverlayCircle{
 			X:      v.Center.X,
@@ -1437,6 +1476,7 @@ func (ip *ImportPanel) buildViaOverlay(vias []via.Via, usedPts []geometry.Point2
 			Radius: v.Radius,
 			Filled: false,
 			Color:  col,
+			Label:  fmt.Sprintf("%d", i+1),
 		})
 	}
 	return overlay

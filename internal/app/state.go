@@ -238,6 +238,13 @@ func NewState() *State {
 	}
 }
 
+// SetBoardSpecByName sets the board spec from the registry by name.
+func (s *State) SetBoardSpecByName(name string) {
+	if spec := board.GetSpec(name); spec != nil {
+		s.BoardSpec = spec
+	}
+}
+
 // SaveLogoLibrary saves the logo library to shared preferences.
 func (s *State) SaveLogoLibrary() error {
 	s.mu.RLock()
@@ -1451,6 +1458,10 @@ func fineRotateAndCrop(img goimage.Image, spec board.Spec, dpi float64, label st
 
 	if math.Abs(angle) < 0.05 {
 		fmt.Printf("fineRotateAndCrop[%s]: angle too small, skipping\n", label)
+		return img
+	}
+	if math.Abs(angle) > 1.5 {
+		fmt.Printf("fineRotateAndCrop[%s]: angle %.2f° too large (likely bad detection), skipping\n", label, angle)
 		return img
 	}
 

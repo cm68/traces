@@ -99,9 +99,23 @@ func detectContactsOnEdge(img gocv.Mat, goldMask gocv.Mat, boardBounds geometry.
 	contours := gocv.FindContours(region, gocv.RetrievalExternal, gocv.ChainApproxSimple)
 	defer contours.Close()
 
+	// Calculate expected contact dimensions from DPI if available
+	var expectW, expectH float64
+	if params.DPI > 0 && spec != nil && spec.ContactSpec() != nil {
+		cs := spec.ContactSpec()
+		expectW = cs.WidthInches * params.DPI
+		expectH = cs.HeightInches * params.DPI
+	}
+
 	// First pass: collect ALL gold regions that could be contacts (loose filtering)
 	var candidates []Contact
-	for i := 0; i < contours.Size(); i++ {
+	totalContours := contours.Size()
+	rejectedTooSmall := 0
+	rejectedAspect := 0
+	rejectedSize := 0
+	var rejectedAspectSamples []string // first few rejected by aspect
+	var rejectedSizeSamples []string   // first few rejected by size
+	for i := 0; i < totalContours; i++ {
 		rect := gocv.BoundingRect(contours.At(i))
 		w, h := rect.Dx(), rect.Dy()
 		area := w * h
@@ -115,16 +129,152 @@ func detectContactsOnEdge(img gocv.Mat, goldMask gocv.Mat, boardBounds geometry.
 			}
 
 			// Loose aspect ratio check (at least 2:1)
-			if aspect >= 2.0 && aspect <= 15.0 {
-				candidates = append(candidates, Contact{
-					Bounds: geometry.RectInt{
-						X:      searchX1 + rect.Min.X,
-						Y:      searchY1 + rect.Min.Y,
-						Width:  w,
-						Height: h,
-					},
-				})
+			if aspect < 2.0 || aspect > 15.0 {
+				rejectedAspect++
+				if len(rejectedAspectSamples) < 10 {
+					rejectedAspectSamples = append(rejectedAspectSamples,
+						fmt.Sprintf("%dx%d@(%d,%d) asp=%.2f", w, h,
+							searchX1+rect.Min.X, searchY1+rect.Min.Y, aspect))
+				}
+				continue
 			}
+
+			// When DPI is known, reject contours far from expected size
+			// Allow 3x range: 0.33x to 3x expected dimensions
+			if expectW > 0 && expectH > 0 {
+				cw, ch := float64(w), float64(h)
+				if isHorizontal {
+					if cw > expectW*3 || cw < expectW*0.33 || ch > expectH*3 || ch < expectH*0.33 {
+						rejectedSize++
+						if len(rejectedSizeSamples) < 10 {
+							rejectedSizeSamples = append(rejectedSizeSamples,
+								fmt.Sprintf("%dx%d@(%d,%d)", w, h,
+									searchX1+rect.Min.X, searchY1+rect.Min.Y))
+						}
+						continue
+					}
+				} else {
+					if ch > expectW*3 || ch < expectW*0.33 || cw > expectH*3 || cw < expectH*0.33 {
+						rejectedSize++
+						if len(rejectedSizeSamples) < 10 {
+							rejectedSizeSamples = append(rejectedSizeSamples,
+								fmt.Sprintf("%dx%d@(%d,%d)", w, h,
+									searchX1+rect.Min.X, searchY1+rect.Min.Y))
+						}
+						continue
+					}
+				}
+			}
+
+			candidates = append(candidates, Contact{
+				Bounds: geometry.RectInt{
+					X:      searchX1 + rect.Min.X,
+					Y:      searchY1 + rect.Min.Y,
+					Width:  w,
+					Height: h,
+				},
+			})
+		} else if w > 0 && h > 0 {
+			rejectedTooSmall++
+		}
+	}
+	fmt.Printf("  Contours: %d total, %d passed, %d rejected(aspect), %d rejected(size), %d rejected(area<%d)\n",
+		totalContours, len(candidates), rejectedAspect, rejectedSize, rejectedTooSmall, params.MinArea/10)
+	if len(rejectedAspectSamples) > 0 {
+		fmt.Printf("  Rejected by aspect (first %d): %v\n", len(rejectedAspectSamples), rejectedAspectSamples)
+	}
+	if len(rejectedSizeSamples) > 0 {
+		fmt.Printf("  Rejected by size (first %d): %v\n", len(rejectedSizeSamples), rejectedSizeSamples)
+	}
+
+	// Also log gold mask coverage in search region
+	goldPixels := gocv.CountNonZero(region)
+	totalPixels := region.Rows() * region.Cols()
+	fmt.Printf("  Gold mask: %d/%d pixels (%.1f%%)\n", goldPixels, totalPixels,
+		100*float64(goldPixels)/float64(totalPixels))
+
+	if len(candidates) > 0 {
+		// Log size distribution of accepted candidates
+		var minW, maxW, minH, maxH int
+		minW, minH = candidates[0].Bounds.Width, candidates[0].Bounds.Height
+		maxW, maxH = minW, minH
+		for _, c := range candidates {
+			if c.Bounds.Width < minW {
+				minW = c.Bounds.Width
+			}
+			if c.Bounds.Width > maxW {
+				maxW = c.Bounds.Width
+			}
+			if c.Bounds.Height < minH {
+				minH = c.Bounds.Height
+			}
+			if c.Bounds.Height > maxH {
+				maxH = c.Bounds.Height
+			}
+		}
+		fmt.Printf("  Accepted sizes: W=%d-%d H=%d-%d\n", minW, maxW, minH, maxH)
+	}
+
+	// Filter by line-position clustering: contacts should be at roughly the same
+	// Y (for horizontal edge) or X (for vertical edge). Reject scattered outliers.
+	if len(candidates) >= 5 {
+		// Get line positions (Y for horizontal, X for vertical)
+		linePositions := make([]float64, len(candidates))
+		for i, c := range candidates {
+			if isHorizontal {
+				linePositions[i] = float64(c.Bounds.Y) + float64(c.Bounds.Height)/2
+			} else {
+				linePositions[i] = float64(c.Bounds.X) + float64(c.Bounds.Width)/2
+			}
+		}
+
+		// Find the densest cluster using a sliding window
+		// Window size = expected contact height (contacts span this much vertically)
+		windowSize := float64(180) // default
+		if expectH > 0 {
+			windowSize = expectH
+		}
+
+		sorted := make([]float64, len(linePositions))
+		copy(sorted, linePositions)
+		sort.Float64s(sorted)
+
+		bestCount := 0
+		bestCenter := 0.0
+		for i := range sorted {
+			// Count how many positions fall within window centered on sorted[i]
+			lo := sorted[i] - windowSize/2
+			hi := sorted[i] + windowSize/2
+			count := 0
+			for _, p := range sorted {
+				if p >= lo && p <= hi {
+					count++
+				}
+			}
+			if count > bestCount {
+				bestCount = count
+				bestCenter = (lo + hi) / 2
+			}
+		}
+
+		// Keep only candidates within the densest cluster (±windowSize from center)
+		var clustered []Contact
+		for _, c := range candidates {
+			var lp float64
+			if isHorizontal {
+				lp = float64(c.Bounds.Y) + float64(c.Bounds.Height)/2
+			} else {
+				lp = float64(c.Bounds.X) + float64(c.Bounds.Width)/2
+			}
+			if lp >= bestCenter-windowSize && lp <= bestCenter+windowSize {
+				clustered = append(clustered, c)
+			}
+		}
+
+		if len(clustered) < len(candidates) {
+			fmt.Printf("  Line clustering: %d -> %d candidates (center=%.0f ±%.0f)\n",
+				len(candidates), len(clustered), bestCenter, windowSize)
+			candidates = clustered
 		}
 	}
 

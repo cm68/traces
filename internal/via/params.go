@@ -15,7 +15,7 @@ func DefaultParams() DetectionParams {
 
 		// Typical via sizes
 		MinDiamInches: 0.039, // ~1mm diameter
-		MaxDiamInches: 0.120, // ~3mm diameter
+		MaxDiamInches: 0.079, // ~2mm diameter
 
 		// Radial symmetry: combined inlier-fraction × uniformity from 32 angles.
 		// A perfect circle scores 1.0. A via with 2-3 trace connections ~0.8.

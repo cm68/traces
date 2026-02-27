@@ -191,6 +191,13 @@ func (ic *ImageCanvas) drawOverlay(output *image.RGBA, overlay *Overlay) {
 			circleCol = *circle.Color
 		}
 		ic.drawCircle(output, circle, circleCol, offsetX, offsetY)
+		if circle.Label != "" {
+			lx := int((circle.X + offsetX + circle.Radius + 2) * ic.zoom)
+			ly := int((circle.Y + offsetY) * ic.zoom)
+			ic.pendingLabels = append(ic.pendingLabels, pendingLabel{
+				text: circle.Label, x: lx, y: ly, col: circleCol,
+			})
+		}
 	}
 
 	// Draw lines

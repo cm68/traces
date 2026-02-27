@@ -216,7 +216,7 @@ func bruteForceSearchMat(img gocv.Mat, template *ContactTemplate, params Detecti
 
 	// Grid-based rescue: calculate expected positions and score each by color
 	if len(filtered) >= 2 && len(filtered) < expectedCount && lineParams != nil {
-		_, filtered = GridBasedRescue(img, filtered, lineParams, expectedCount, true)
+		_, filtered = GridBasedRescue(img, filtered, lineParams, expectedCount, true, params.DPI, spec)
 	}
 
 	// Remove outliers (up to 10% of candidates that are far from the others)

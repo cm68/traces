@@ -253,13 +253,39 @@ func removeOutliers(contacts []Contact, maxFraction float64) []Contact {
 		return contacts
 	}
 
-	// Calculate median Y position
-	yPositions := make([]float64, len(contacts))
-	for i, c := range contacts {
-		yPositions[i] = c.Center.Y
+	// Fit a line through contact centers (Y = slope*X + intercept)
+	// so position outliers are measured from the line, not a flat median
+	var sumX, sumY, sumXY, sumX2 float64
+	nn := float64(len(contacts))
+	for _, c := range contacts {
+		sumX += c.Center.X
+		sumY += c.Center.Y
+		sumXY += c.Center.X * c.Center.Y
+		sumX2 += c.Center.X * c.Center.X
 	}
-	sort.Float64s(yPositions)
-	medianY := yPositions[len(yPositions)/2]
+	denom := nn*sumX2 - sumX*sumX
+	var lineSlope, lineIntercept float64
+	if math.Abs(denom) > 0.001 {
+		lineSlope = (nn*sumXY - sumX*sumY) / denom
+		lineIntercept = (sumY - lineSlope*sumX) / nn
+	} else {
+		yPositions := make([]float64, len(contacts))
+		for i, c := range contacts {
+			yPositions[i] = c.Center.Y
+		}
+		sort.Float64s(yPositions)
+		lineIntercept = yPositions[len(yPositions)/2]
+	}
+
+	// Calculate residuals from the fitted line
+	residuals := make([]float64, len(contacts))
+	for i, c := range contacts {
+		expectedY := lineSlope*c.Center.X + lineIntercept
+		residuals[i] = math.Abs(c.Center.Y - expectedY)
+	}
+	sort.Float64s(residuals)
+	medianResidual := residuals[len(residuals)/2]
+	_ = medianResidual // used below in posScore
 
 	// Calculate median width (more important than area for detecting bleeding)
 	widths := make([]float64, len(contacts))
@@ -277,11 +303,14 @@ func removeOutliers(contacts []Contact, maxFraction float64) []Contact {
 	sort.Float64s(heights)
 	medianHeight := heights[len(heights)/2]
 
-	// Calculate IQR for Y position
-	q1Idx := len(yPositions) / 4
-	q3Idx := len(yPositions) * 3 / 4
-	iqrY := yPositions[q3Idx] - yPositions[q1Idx]
-	thresholdY := iqrY * 2.0
+	// Threshold for position outliers: use IQR of residuals from the line
+	q1Idx := len(residuals) / 4
+	q3Idx := len(residuals) * 3 / 4
+	iqrResidual := residuals[q3Idx] - residuals[q1Idx]
+	thresholdY := iqrResidual * 3.0
+	if thresholdY < 5.0 {
+		thresholdY = 5.0 // minimum 5px threshold to avoid removing contacts on a clean line
+	}
 
 	// Keep at least (1 - maxFraction) of contacts
 	minKeep := int(float64(len(contacts)) * (1.0 - maxFraction))
@@ -297,7 +326,8 @@ func removeOutliers(contacts []Contact, maxFraction float64) []Contact {
 	}
 	scored := make([]scoredContact, len(contacts))
 	for i, c := range contacts {
-		yDist := math.Abs(c.Center.Y - medianY)
+		expectedY := lineSlope*c.Center.X + lineIntercept
+		yDist := math.Abs(c.Center.Y - expectedY)
 
 		// Width score: how close to median width (0 = same, higher = worse)
 		widthRatio := float64(c.Bounds.Width) / medianWidth

@@ -7,6 +7,7 @@ import (
 	"sort"
 	"sync"
 
+	"pcb-tracer/internal/board"
 	"pcb-tracer/pkg/geometry"
 
 	"gocv.io/x/gocv"
@@ -17,7 +18,7 @@ import (
 // The pitch is derived such that all pairwise seed offsets are integer multiples of it.
 // Grid extends from image margin to margin.
 // Scores each candidate by gold pixel coverage and selects the top expectedCount.
-func GridBasedRescue(img gocv.Mat, seeds []Contact, lineParams *ContactLineParams, expectedCount int, isHorizontal bool) ([]geometry.RectInt, []Contact) {
+func GridBasedRescue(img gocv.Mat, seeds []Contact, lineParams *ContactLineParams, expectedCount int, isHorizontal bool, dpi float64, spec board.Spec) ([]geometry.RectInt, []Contact) {
 	if len(seeds) < 2 {
 		return nil, seeds
 	}
@@ -32,80 +33,132 @@ func GridBasedRescue(img gocv.Mat, seeds []Contact, lineParams *ContactLineParam
 		return sorted[i].Bounds.Y < sorted[j].Bounds.Y
 	})
 
-	// Use the median width and height from seeds (these define candidate dimensions)
-	widths := make([]int, len(sorted))
-	heights := make([]int, len(sorted))
-	for i, c := range sorted {
-		widths[i] = c.Bounds.Width
-		heights[i] = c.Bounds.Height
+	// Determine candidate dimensions: use spec when available, fall back to seed median
+	var medianWidth, medianHeight int
+	if dpi > 0 && spec != nil && spec.ContactSpec() != nil && spec.ContactSpec().WidthInches > 0 {
+		medianWidth = int(math.Round(spec.ContactSpec().WidthInches * dpi))
+		medianHeight = int(math.Round(spec.ContactSpec().HeightInches * dpi))
+	} else {
+		widths := make([]int, len(sorted))
+		heights := make([]int, len(sorted))
+		for i, c := range sorted {
+			widths[i] = c.Bounds.Width
+			heights[i] = c.Bounds.Height
+		}
+		sort.Ints(widths)
+		sort.Ints(heights)
+		medianWidth = widths[len(widths)/2]
+		medianHeight = heights[len(heights)/2]
 	}
-	sort.Ints(widths)
-	sort.Ints(heights)
-	medianWidth := widths[len(widths)/2]
-	medianHeight := heights[len(heights)/2]
 
-	// Collect left edges (Bounds.X for horizontal)
-	leftEdges := make([]float64, len(sorted))
+	// Collect seed centers along the contact line direction
+	centers := make([]float64, len(sorted))
 	for i, c := range sorted {
 		if isHorizontal {
-			leftEdges[i] = float64(c.Bounds.X)
+			centers[i] = c.Center.X
 		} else {
-			leftEdges[i] = float64(c.Bounds.Y)
+			centers[i] = c.Center.Y
 		}
 	}
 
-	// Find the pitch: the value N where every pairwise difference is k*N for integer k
-	// Minimum pitch must be > width (contacts can't overlap)
-	minPitch := float64(medianWidth) * 1.5
-	pitch := findBestFitPitch(leftEdges, minPitch)
-
-	// Use median Y (top edge) for the horizontal line
-	topEdges := make([]int, len(sorted))
-	for i, c := range sorted {
-		if isHorizontal {
-			topEdges[i] = c.Bounds.Y
-		} else {
-			topEdges[i] = c.Bounds.X
-		}
+	// Determine pitch: use spec pitch when available, fall back to histogram
+	var pitch float64
+	if dpi > 0 && spec != nil && spec.ContactSpec() != nil && spec.ContactSpec().PitchInches > 0 {
+		pitch = spec.ContactSpec().PitchInches * dpi
+		fmt.Printf("  Pitch from spec: %.2f px (%.4f\" * %.0f DPI)\n", pitch, spec.ContactSpec().PitchInches, dpi)
+	} else {
+		minPitch := float64(medianWidth) * 1.5
+		pitch = findBestFitPitch(centers, minPitch)
+		fmt.Printf("  Pitch from histogram: %.2f px (no spec/DPI available)\n", pitch)
 	}
-	sort.Ints(topEdges)
-	medianY := topEdges[len(topEdges)/2]
 
-	// Find best anchor seed - the one whose position best fits the grid
-	anchorIdx := findBestAnchorIndex(leftEdges, pitch)
-	anchorX := leftEdges[anchorIdx]
+	// Fit the contact line from seed centers using linear regression.
+	// For horizontal edges: Y = slope * X + intercept
+	// This captures the actual rotation of the contact row.
+	var sumX, sumY, sumXY, sumX2 float64
+	n := float64(len(sorted))
+	for _, c := range sorted {
+		var px, py float64
+		if isHorizontal {
+			px, py = c.Center.X, c.Center.Y
+		} else {
+			px, py = c.Center.Y, c.Center.X
+		}
+		sumX += px
+		sumY += py
+		sumXY += px * py
+		sumX2 += px * px
+	}
+	denom := n*sumX2 - sumX*sumX
+	var lineSlope, lineIntercept float64
+	if math.Abs(denom) > 0.001 {
+		lineSlope = (n*sumXY - sumX*sumY) / denom
+		lineIntercept = (sumY - lineSlope*sumX) / n
+	} else {
+		// Fallback: use median cross position, zero slope
+		crossPositions := make([]float64, len(sorted))
+		for i, c := range sorted {
+			if isHorizontal {
+				crossPositions[i] = c.Center.Y
+			} else {
+				crossPositions[i] = c.Center.X
+			}
+		}
+		sort.Float64s(crossPositions)
+		lineIntercept = crossPositions[len(crossPositions)/2]
+	}
 
-	fmt.Printf("Grid rescue: pitch=%.2f, width=%d, height=%d, medianY=%d\n",
-		pitch, medianWidth, medianHeight, medianY)
-	fmt.Printf("  Anchor: seed %d at X=%.1f\n", anchorIdx, anchorX)
+	// crossCenterAt returns the Y (or X for vertical) center for a given position along the edge
+	crossCenterAt := func(pos float64) float64 {
+		return lineSlope*pos + lineIntercept
+	}
 
-	// Project grid from anchor to both image margins
+	// Find best anchor seed - the one whose center best fits the grid
+	anchorIdx := findBestAnchorIndex(centers, pitch)
+	anchorCenter := centers[anchorIdx]
+
+	halfW := float64(medianWidth) / 2
+
+	// medianY for logging (at anchor position)
+	medianCrossCenter := crossCenterAt(anchorCenter)
+	medianY := int(math.Round(medianCrossCenter - float64(medianHeight)/2))
+	lineAngleDeg := math.Atan(lineSlope) * 180 / math.Pi
+
+	fmt.Printf("Grid rescue: pitch=%.2f, width=%d, height=%d, medianY=%d, lineAngle=%.2f°\n",
+		pitch, medianWidth, medianHeight, medianY, lineAngleDeg)
+	fmt.Printf("  Anchor: seed %d at center=%.1f\n", anchorIdx, anchorCenter)
+
+	// Project grid from anchor center to both image margins
 	imgExtent := float64(img.Cols())
 	if !isHorizontal {
 		imgExtent = float64(img.Rows())
 	}
 
-	// Calculate grid positions: anchorX + k*pitch for all integer k that stay in image
+	// Calculate grid positions from centers: anchorCenter + k*pitch, then offset to top-left
 	var expectedPositions []geometry.RectInt
 
 	// Go backwards from anchor to left margin
 	for k := 0; ; k++ {
-		x := anchorX - float64(k)*pitch
-		if x < -float64(medianWidth) {
+		center := anchorCenter - float64(k)*pitch
+		left := center - halfW
+		if left < -float64(medianWidth) {
 			break
 		}
+		// Y position follows the fitted line
+		crossCenter := crossCenterAt(center)
+		crossY := int(math.Round(crossCenter - float64(medianHeight)/2))
 		var rect geometry.RectInt
 		if isHorizontal {
 			rect = geometry.RectInt{
-				X:      int(math.Round(x)),
-				Y:      medianY,
+				X:      int(math.Round(left)),
+				Y:      crossY,
 				Width:  medianWidth,
 				Height: medianHeight,
 			}
 		} else {
 			rect = geometry.RectInt{
-				X:      medianY,
-				Y:      int(math.Round(x)),
+				X:      crossY,
+				Y:      int(math.Round(left)),
 				Width:  medianWidth,
 				Height: medianHeight,
 			}
@@ -120,22 +173,25 @@ func GridBasedRescue(img gocv.Mat, seeds []Contact, lineParams *ContactLineParam
 
 	// Go forwards from anchor to right margin (skip k=0, already added)
 	for k := 1; ; k++ {
-		x := anchorX + float64(k)*pitch
-		if x > imgExtent {
+		center := anchorCenter + float64(k)*pitch
+		left := center - halfW
+		if left > imgExtent {
 			break
 		}
+		crossCenter := crossCenterAt(center)
+		crossY := int(math.Round(crossCenter - float64(medianHeight)/2))
 		var rect geometry.RectInt
 		if isHorizontal {
 			rect = geometry.RectInt{
-				X:      int(math.Round(x)),
-				Y:      medianY,
+				X:      int(math.Round(left)),
+				Y:      crossY,
 				Width:  medianWidth,
 				Height: medianHeight,
 			}
 		} else {
 			rect = geometry.RectInt{
-				X:      medianY,
-				Y:      int(math.Round(x)),
+				X:      crossY,
+				Y:      int(math.Round(left)),
 				Width:  medianWidth,
 				Height: medianHeight,
 			}

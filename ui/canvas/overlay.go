@@ -32,6 +32,7 @@ type OverlayCircle struct {
 	Radius float64 // Radius in pixels (image coordinates)
 	Filled bool    // If true, fill the circle; otherwise just outline
 	Color  *color.RGBA // Per-circle color override (nil = use overlay Color)
+	Label  string      // Optional label drawn to the right of the circle
 }
 
 // FillPattern indicates how to fill a rectangle.

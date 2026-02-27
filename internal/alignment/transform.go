@@ -104,6 +104,131 @@ func ComputeAffineRANSAC(srcPoints, dstPoints []geometry.Point2D, iterations int
 	return finalTransform, bestInliers, nil
 }
 
+// ComputeRigidRANSAC computes a rigid transform (rotation + translation, no scale)
+// using RANSAC. This is used as a fallback when the affine is poorly constrained
+// (e.g., most points are collinear).
+func ComputeRigidRANSAC(srcPoints, dstPoints []geometry.Point2D, iterations int, threshold float64) (geometry.AffineTransform, []int, error) {
+	if len(srcPoints) != len(dstPoints) || len(srcPoints) < 2 {
+		return geometry.AffineTransform{}, nil, fmt.Errorf("invalid point sets")
+	}
+
+	n := len(srcPoints)
+	bestInliers := []int{}
+
+	for iter := 0; iter < iterations; iter++ {
+		// Randomly sample 2 points (minimum for rigid)
+		indices := rand.Perm(n)[:2]
+		i0, i1 := indices[0], indices[1]
+
+		// Compute rigid from 2 pairs
+		transform, err := computeRigidFrom2(srcPoints[i0], srcPoints[i1], dstPoints[i0], dstPoints[i1])
+		if err != nil {
+			continue
+		}
+
+		// Count inliers
+		var inliers []int
+		for i := range srcPoints {
+			transformed := transform.Apply(srcPoints[i])
+			dist := transformed.Distance(dstPoints[i])
+			if dist < threshold {
+				inliers = append(inliers, i)
+			}
+		}
+
+		if len(inliers) > len(bestInliers) {
+			bestInliers = inliers
+		}
+	}
+
+	if len(bestInliers) < 2 {
+		return geometry.AffineTransform{}, nil, fmt.Errorf("rigid RANSAC failed to find enough inliers")
+	}
+
+	// Recompute rigid using all inliers (least squares)
+	inlierSrc := make([]geometry.Point2D, len(bestInliers))
+	inlierDst := make([]geometry.Point2D, len(bestInliers))
+	for i, idx := range bestInliers {
+		inlierSrc[i] = srcPoints[idx]
+		inlierDst[i] = dstPoints[idx]
+	}
+
+	finalTransform := computeRigidLeastSquares(inlierSrc, inlierDst)
+	return finalTransform, bestInliers, nil
+}
+
+// computeRigidFrom2 computes a rigid transform (rotation + translation) from 2 point pairs.
+func computeRigidFrom2(s0, s1, d0, d1 geometry.Point2D) (geometry.AffineTransform, error) {
+	// Vector in source
+	sx, sy := s1.X-s0.X, s1.Y-s0.Y
+	// Vector in destination
+	dx, dy := d1.X-d0.X, d1.Y-d0.Y
+
+	srcLen := math.Sqrt(sx*sx + sy*sy)
+	dstLen := math.Sqrt(dx*dx + dy*dy)
+	if srcLen < 0.001 || dstLen < 0.001 {
+		return geometry.AffineTransform{}, fmt.Errorf("degenerate points")
+	}
+
+	// Rotation angle = angle(dst) - angle(src)
+	srcAngle := math.Atan2(sy, sx)
+	dstAngle := math.Atan2(dy, dx)
+	theta := dstAngle - srcAngle
+
+	cosT := math.Cos(theta)
+	sinT := math.Sin(theta)
+
+	// Translation: d0 = R * s0 + t  =>  t = d0 - R * s0
+	tx := d0.X - (cosT*s0.X - sinT*s0.Y)
+	ty := d0.Y - (sinT*s0.X + cosT*s0.Y)
+
+	return geometry.AffineTransform{
+		A: cosT, B: -sinT, TX: tx,
+		C: sinT, D: cosT, TY: ty,
+	}, nil
+}
+
+// computeRigidLeastSquares computes the best rigid transform (rotation + translation)
+// from N point pairs using SVD-based method.
+func computeRigidLeastSquares(src, dst []geometry.Point2D) geometry.AffineTransform {
+	n := float64(len(src))
+
+	// Compute centroids
+	var srcCx, srcCy, dstCx, dstCy float64
+	for i := range src {
+		srcCx += src[i].X
+		srcCy += src[i].Y
+		dstCx += dst[i].X
+		dstCy += dst[i].Y
+	}
+	srcCx /= n
+	srcCy /= n
+	dstCx /= n
+	dstCy /= n
+
+	// Compute rotation using the cross/dot product method
+	var dotSum, crossSum float64
+	for i := range src {
+		sx, sy := src[i].X-srcCx, src[i].Y-srcCy
+		dx, dy := dst[i].X-dstCx, dst[i].Y-dstCy
+		dotSum += sx*dx + sy*dy
+		crossSum += sx*dy - sy*dx
+	}
+
+	theta := math.Atan2(crossSum, dotSum)
+	cosT := math.Cos(theta)
+	sinT := math.Sin(theta)
+
+	// Translation
+	tx := dstCx - (cosT*srcCx - sinT*srcCy)
+	ty := dstCy - (sinT*srcCx + cosT*srcCy)
+
+	return geometry.AffineTransform{
+		A: cosT, B: -sinT, TX: tx,
+		C: sinT, D: cosT, TY: ty,
+	}
+}
+
 // computeAffineFromPoints computes an affine transform from exactly 3 point pairs.
 func computeAffineFromPoints(src, dst []geometry.Point2D) (geometry.AffineTransform, error) {
 	if len(src) != 3 || len(dst) != 3 {

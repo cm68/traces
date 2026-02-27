@@ -321,12 +321,12 @@ func quickHoughMatchCount(frontResult, backResult *via.ViaDetectionResult,
 // detectAndFilterVias runs parallel via detection (standard + bright-core) on
 // both images, merges results, and filters dense clusters. Returns the filtered
 // via lists for each side.
-func detectAndFilterVias(frontImg, backImg image.Image, dpi float64, params via.DetectionParams, label string) (
+func detectAndFilterVias(frontImg, backImg image.Image, dpi float64, params via.DetectionParams, label string, maxDenseNeighbors int) (
 	*via.ViaDetectionResult, *via.ViaDetectionResult, error) {
 
-	fmt.Printf("detectAndFilterVias[%s]: DPI=%.0f, minR=%d, maxR=%d, circ=%.2f, fill=%.2f, contrast=%.1f, val=%v\n",
+	fmt.Printf("detectAndFilterVias[%s]: DPI=%.0f, minR=%d, maxR=%d, circ=%.2f, fill=%.2f, contrast=%.1f, val=%v, denseMax=%d\n",
 		label, dpi, params.MinRadiusPixels, params.MaxRadiusPixels,
-		params.CircularityMin, params.FillRatioMin, params.ContrastMin, params.ValMin)
+		params.CircularityMin, params.FillRatioMin, params.ContrastMin, params.ValMin, maxDenseNeighbors)
 
 	type detectResult struct {
 		result *via.ViaDetectionResult
@@ -380,8 +380,8 @@ func detectAndFilterVias(frontImg, backImg image.Image, dpi float64, params via.
 	}
 	fmt.Printf("  [%s] after bright-core merge front=%d back=%d\n", label, len(frontResult.Vias), len(backResult.Vias))
 
-	frontResult.Vias = filterDenseVias(frontResult.Vias, dpi)
-	backResult.Vias = filterDenseVias(backResult.Vias, dpi)
+	frontResult.Vias = filterDenseVias(frontResult.Vias, dpi, maxDenseNeighbors)
+	backResult.Vias = filterDenseVias(backResult.Vias, dpi, maxDenseNeighbors)
 	fmt.Printf("  [%s] after dense filter front=%d back=%d\n", label, len(frontResult.Vias), len(backResult.Vias))
 
 	return frontResult, backResult, nil
@@ -394,20 +394,26 @@ func FineAlignViaTranslation(frontImg, backImg image.Image, dpi float64,
 	}
 
 	// Detection parameter levels: start strict, relax if too few matches.
-	// Each level makes it progressively easier to detect vias.
+	// Each level relaxes detection thresholds AND the dense cluster filter,
+	// allowing more vias through on boards with moderate-density clusters.
 	type paramLevel struct {
-		label          string
-		circularityMin float64
-		fillRatioMin   float64
-		contrastMin    float64
-		valMin         float64
-		satMax         float64
-		maxDiamInches  float64
+		label            string
+		circularityMin   float64
+		fillRatioMin     float64
+		contrastMin      float64
+		valMin           float64
+		satMax           float64
+		maxDiamInches    float64
+		maxDenseNeighbors int // dense filter threshold: vias with > this many neighbors are removed
 	}
 	levels := []paramLevel{
-		{"standard", 0.40, 0.65, 1.1, 120, 120, 0.059},
-		{"relaxed", 0.30, 0.50, 1.05, 100, 140, 0.059},
-		{"aggressive", 0.20, 0.35, 1.02, 80, 160, 0.079},
+		// Standard: loose detection, strict dense filter — works for most boards
+		{"standard", 0.40, 0.65, 1.1, 120, 120, 0.059, 2},
+		// Retry levels: tighter detection (fewer false positives) but looser
+		// dense filter (keeps vias in moderate-density clusters). This handles
+		// boards where real vias are in clusters of 3-5 neighbors.
+		{"relaxed", 0.55, 0.80, 1.2, 150, 120, 0.059, 5},
+		{"aggressive", 0.40, 0.65, 1.1, 120, 140, 0.059, 8},
 	}
 
 	const minViaMatches = 6 // need at least this many via matches to skip retry
@@ -427,7 +433,7 @@ func FineAlignViaTranslation(frontImg, backImg image.Image, dpi float64,
 		}
 
 		var err error
-		frontResult, backResult, err = detectAndFilterVias(frontImg, backImg, dpi, params, lv.label)
+		frontResult, backResult, err = detectAndFilterVias(frontImg, backImg, dpi, params, lv.label, lv.maxDenseNeighbors)
 		if err != nil {
 			return nil, err
 		}
@@ -878,10 +884,9 @@ func FineAlignViaTranslation(frontImg, backImg image.Image, dpi float64,
 // pin holes). Isolated PCB vias typically have 0-2 neighbors within a small
 // radius, while header pins on 0.1" pitch have 3+. Removing dense clusters
 // prevents systematic mismatch when row ordering flips between front and back.
-func filterDenseVias(vias []via.Via, dpi float64) []via.Via {
+func filterDenseVias(vias []via.Via, dpi float64, maxNeighbors int) []via.Via {
 	radius := 0.15 * dpi // ~90px at 600 DPI — 1.5× typical 0.1" header pitch
 	r2 := radius * radius
-	const maxNeighbors = 2
 
 	var kept []via.Via
 	for i, v := range vias {

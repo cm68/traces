@@ -12,7 +12,6 @@ import (
 	"pcb-tracer/internal/app"
 	"pcb-tracer/internal/board"
 	pcbimage "pcb-tracer/internal/image"
-	"pcb-tracer/internal/via"
 	"pcb-tracer/pkg/colorutil"
 	"pcb-tracer/pkg/geometry"
 	"pcb-tracer/ui/canvas"
@@ -1130,17 +1129,8 @@ func (ip *ImportPanel) onAutoAlign() {
 			matchInfo := fmt.Sprintf("Aligned: %d vias, avg=%.1f max=%.1f px (rot=%.3f° scale=%.4f)",
 				viaResult.MatchedVias, viaResult.AvgError, viaResult.MaxError, fAngle, fScale)
 
-			frontViaOverlay := ip.buildViaOverlay(viaResult.FrontVias, viaResult.BandFracs, true)
-			frontViaOverlay.Layer = canvas.LayerFront
-			// Back vias on front layer too — they're in coarse-aligned coords,
-			// close enough to front coords for diagnostic overlay.
-			backViaOverlay := ip.buildViaOverlay(viaResult.BackVias, viaResult.BandFracs, false)
-			backViaOverlay.Layer = canvas.LayerFront
-
 			glib.IdleAdd(func() {
 				ip.clearAlignmentOverlays()
-				ip.canvas.SetOverlay("align_vias_front", frontViaOverlay)
-				ip.canvas.SetOverlay("align_vias_back", backViaOverlay)
 				ip.alignStatus.SetText(matchInfo)
 				ip.autoAlignButton.SetSensitive(true)
 				ip.alignButton.SetSensitive(true)
@@ -1339,15 +1329,8 @@ func (ip *ImportPanel) onFineAlign() {
 		matchInfo := fmt.Sprintf("Via-fine: %d matched, avg=%.1f max=%.1f px (rot=%.3f° scale=%.4f)",
 			viaResult.MatchedVias, viaResult.AvgError, viaResult.MaxError, tAngle, tScale)
 
-		frontViaOverlay := ip.buildViaOverlay(viaResult.FrontVias, viaResult.BandFracs, true)
-		frontViaOverlay.Layer = canvas.LayerFront
-		backViaOverlay := ip.buildViaOverlay(viaResult.BackVias, viaResult.BandFracs, false)
-		backViaOverlay.Layer = canvas.LayerFront
-
 		glib.IdleAdd(func() {
 			ip.clearAlignmentOverlays()
-			ip.canvas.SetOverlay("align_vias_front", frontViaOverlay)
-			ip.canvas.SetOverlay("align_vias_back", backViaOverlay)
 			ip.alignStatus.SetText(matchInfo)
 			ip.fineAlignButton.SetSensitive(true)
 			if ip.sidePanel != nil {
@@ -1415,72 +1398,6 @@ func (ip *ImportPanel) clearAlignmentOverlays() {
 	ip.canvas.ClearOverlay("align_vias_back")
 }
 
-// buildViaOverlay creates an overlay showing detected vias.
-// Vias used for the affine (inlier points) are green; matched but not used are yellow;
-// unmatched vias are dim red.
-func (ip *ImportPanel) buildViaOverlay(vias []via.Via, bandFracs []float64, isFront bool) *canvas.Overlay {
-	// Front: blue shades (4 corners: TL, TR, BL, BR).
-	// Back: red shades (4 corners).
-	frontColors := []*color.RGBA{
-		{R: 0, G: 40, B: 255, A: 200},  // TL
-		{R: 0, G: 120, B: 210, A: 200}, // TR
-		{R: 0, G: 200, B: 100, A: 200}, // BL
-		{R: 0, G: 255, B: 20, A: 200},  // BR
-	}
-	backColors := []*color.RGBA{
-		{R: 255, G: 0, B: 0, A: 200},   // TL
-		{R: 255, G: 80, B: 0, A: 200},  // TR
-		{R: 255, G: 160, B: 0, A: 200}, // BL
-		{R: 255, G: 230, B: 0, A: 200}, // BR
-	}
-	colors := backColors
-	if isFront {
-		colors = frontColors
-	}
-
-	// Compute Y range from vias
-	var yMin, yMax float64
-	if len(vias) > 0 {
-		yMin = vias[0].Center.Y
-		yMax = yMin
-		for _, v := range vias[1:] {
-			if v.Center.Y < yMin {
-				yMin = v.Center.Y
-			}
-			if v.Center.Y > yMax {
-				yMax = v.Center.Y
-			}
-		}
-	}
-	yRange := yMax - yMin
-
-	overlay := &canvas.Overlay{}
-	for i, v := range vias {
-		band := len(bandFracs) - 1
-		if yRange > 0 {
-			yFrac := (v.Center.Y - yMin) / yRange
-			for bi, bf := range bandFracs {
-				if yFrac <= bf {
-					band = bi
-					break
-				}
-			}
-		}
-		col := colors[0]
-		if band >= 0 && band < len(colors) {
-			col = colors[band]
-		}
-		overlay.Circles = append(overlay.Circles, canvas.OverlayCircle{
-			X:      v.Center.X,
-			Y:      v.Center.Y,
-			Radius: v.Radius,
-			Filled: false,
-			Color:  col,
-			Label:  fmt.Sprintf("%d", i+1),
-		})
-	}
-	return overlay
-}
 
 func (ip *ImportPanel) onAlignImages() {
 	if ip.state.FrontImage == nil || ip.state.BackImage == nil {

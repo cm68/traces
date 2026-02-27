@@ -1,6 +1,27 @@
 {
   "parts": [
     {
+      "part_number": "4114R-003",
+      "package": "DIP-14",
+      "pin_count": 14,
+      "pins": [
+        { "number": 1,  "name": "R1.1", "direction": "Bidirectional" },
+        { "number": 2,  "name": "R1.2", "direction": "Bidirectional" },
+        { "number": 3,  "name": "R2.1", "direction": "Bidirectional" },
+        { "number": 4,  "name": "R2.2", "direction": "Bidirectional" },
+        { "number": 5,  "name": "R3.1", "direction": "Bidirectional" },
+        { "number": 6,  "name": "R3.2", "direction": "Bidirectional" },
+        { "number": 7,  "name": "R4.1", "direction": "Bidirectional" },
+        { "number": 8,  "name": "R4.2", "direction": "Bidirectional" },
+        { "number": 9,  "name": "R5.1", "direction": "Bidirectional" },
+        { "number": 10, "name": "R5.2", "direction": "Bidirectional" },
+        { "number": 11, "name": "R6.1", "direction": "Bidirectional" },
+        { "number": 12, "name": "R6.2", "direction": "Bidirectional" },
+        { "number": 13, "name": "R7.1", "direction": "Bidirectional" },
+        { "number": 14, "name": "R7.2", "direction": "Bidirectional" }
+      ]
+    },
+    {
       "part_number": "54LS08",
       "package": "DIP-14",
       "pin_count": 14,
@@ -465,6 +486,104 @@
           "name": "VCC",
           "direction": "Power"
         }
+      ]
+    },
+    {
+      "part_number": "74LS08",
+      "package": "DIP-14",
+      "pin_count": 14,
+      "pins": [
+        {
+          "number": 1,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 2,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 3,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 4,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 5,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 6,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 7,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 8,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 9,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 10,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 11,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 12,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 13,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 14,
+          "name": "",
+          "direction": "Bidirectional"
+        }
+      ]
+    },
+    {
+      "part_number": "74LS10",
+      "package": "DIP-14",
+      "pin_count": 14,
+      "pins": [
+        { "number": 1,  "name": "A1",  "direction": "Input"  },
+        { "number": 2,  "name": "B1",  "direction": "Input"  },
+        { "number": 3,  "name": "A2",  "direction": "Input"  },
+        { "number": 4,  "name": "B2",  "direction": "Input"  },
+        { "number": 5,  "name": "C2",  "direction": "Input"  },
+        { "number": 6,  "name": "Y2",  "direction": "Output" },
+        { "number": 7,  "name": "GND", "direction": "Ground" },
+        { "number": 8,  "name": "Y3",  "direction": "Output" },
+        { "number": 9,  "name": "A3",  "direction": "Input"  },
+        { "number": 10, "name": "B3",  "direction": "Input"  },
+        { "number": 11, "name": "C3",  "direction": "Input"  },
+        { "number": 12, "name": "Y1",  "direction": "Output" },
+        { "number": 13, "name": "C1",  "direction": "Input"  },
+        { "number": 14, "name": "VCC", "direction": "Power"  }
       ]
     },
     {
@@ -1407,6 +1526,83 @@
         },
         {
           "number": 20,
+          "name": "VCC",
+          "direction": "Power"
+        }
+      ]
+    },
+    {
+      "part_number": "74LS32",
+      "package": "DIP-14",
+      "pin_count": 14,
+      "pins": [
+        {
+          "number": 1,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 2,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 3,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 4,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 5,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 6,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 7,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 8,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 9,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 10,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 11,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 12,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 13,
+          "name": "",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 14,
           "name": "VCC",
           "direction": "Power"
         }

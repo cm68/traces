@@ -59,7 +59,9 @@ type MainWindow struct {
 	// Side panel
 	sidePanel *panels.SidePanel
 
-	// Track last saved size
+	// Track current and last saved size
+	currentWidth    int
+	currentHeight   int
 	lastSavedWidth  int
 	lastSavedHeight int
 }
@@ -89,6 +91,17 @@ func New(state *app.State, p *prefs.Prefs) *MainWindow {
 		if saved != "" && mw.sidePanel.IsPanelEnabled(saved) {
 			mw.sidePanel.ShowPanel(saved)
 		}
+	})
+
+	// Track window size on every configure-event so we have the correct
+	// geometry when the destroy signal fires (GetSize is unreliable then).
+	win.Connect("configure-event", func(win *gtk.Window, event *gdk.Event) bool {
+		w, h := win.GetSize()
+		if w > 100 && h > 100 {
+			mw.currentWidth = w
+			mw.currentHeight = h
+		}
+		return false // propagate
 	})
 
 	win.Connect("destroy", func() {
@@ -503,7 +516,10 @@ func (mw *MainWindow) restoreWindowSize() {
 
 // saveWindowSize saves the current window size to preferences.
 func (mw *MainWindow) saveWindowSize() {
-	w, h := mw.win.GetSize()
+	w, h := mw.currentWidth, mw.currentHeight
+	if w <= 100 || h <= 100 {
+		return
+	}
 	fmt.Printf("saveWindowSize: saving %dx%d\n", w, h)
 	mw.prefs.SetFloat(prefKeyWindowWidth, float64(w))
 	mw.prefs.SetFloat(prefKeyWindowHeight, float64(h))
@@ -542,7 +558,7 @@ func (mw *MainWindow) SavePreferences() {
 
 // SavePreferencesIfChanged saves window geometry only if it has changed.
 func (mw *MainWindow) SavePreferencesIfChanged() {
-	w, h := mw.win.GetSize()
+	w, h := mw.currentWidth, mw.currentHeight
 	if w != mw.lastSavedWidth || h != mw.lastSavedHeight {
 		if w > 100 && h > 100 {
 			fmt.Printf("SavePreferencesIfChanged: %dx%d -> %dx%d\n",

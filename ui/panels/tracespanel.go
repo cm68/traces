@@ -947,15 +947,17 @@ func (tp *TracesPanel) rebuildFeaturesOverlayImpl(reconcileNets bool) {
 	tp.canvas.SetOverlay(OverlayFeaturesVias, viasOverlay)
 }
 
-// onClearVias clears all detected vias.
+// onClearVias clears all detected features — vias, confirmed vias, nets, and traces.
 func (tp *TracesPanel) onClearVias() {
-	tp.state.FeaturesLayer.ClearVias()
-	tp.state.FeaturesLayer.ClearConfirmedVias()
+	tp.state.FeaturesLayer.Clear()
+	tp.deselectVia()
 	tp.rebuildFeaturesOverlay()
 	tp.viaCountLabel.SetText("No vias detected")
 	tp.confirmedCountLabel.SetText("Confirmed: 0")
 	tp.viaStatusLabel.SetText("Cleared")
+	tp.state.SetModified(true)
 	tp.state.Emit(app.EventFeaturesChanged, nil)
+	tp.state.Emit(app.EventConfirmedViasChanged, nil)
 }
 
 // onDetectPins detects solder joint pins on the back image for all DIP components.
@@ -1016,6 +1018,8 @@ func (tp *TracesPanel) onDetectPins() {
 			return n
 		})
 
+		existingVias := tp.state.FeaturesLayer.GetConfirmedVias()
+		skipped := 0
 		for _, cv := range detected {
 			// Shift detected center back from back-image coords to canvas coords
 			cv.Center.X -= offsetX
@@ -1024,9 +1028,31 @@ func (tp *TracesPanel) onDetectPins() {
 				cv.IntersectionBoundary[j].X -= offsetX
 				cv.IntersectionBoundary[j].Y -= offsetY
 			}
+
+			// Skip if an existing via for the same component already occupies this position
+			duplicate := false
+			for _, ev := range existingVias {
+				if ev.ComponentID != cv.ComponentID {
+					continue
+				}
+				dx := ev.Center.X - cv.Center.X
+				dy := ev.Center.Y - cv.Center.Y
+				if math.Sqrt(dx*dx+dy*dy) < cv.Radius*0.5 {
+					duplicate = true
+					break
+				}
+			}
+			if duplicate {
+				skipped++
+				continue
+			}
+
 			tp.state.FeaturesLayer.AddConfirmedVia(cv)
 			component.ResolveSignalName(cv, tp.state.Components, tp.state.ComponentLibrary)
 			totalPins++
+		}
+		if skipped > 0 {
+			fmt.Printf("[DetectPins] %s: skipped %d duplicate pins\n", comp.ID, skipped)
 		}
 
 		fmt.Printf("[DetectPins] %s: detected %d/%d pins\n", comp.ID, len(detected), len(expectedPins))

@@ -2089,18 +2089,46 @@ func (cp *ComponentsPanel) onDetectComponents() {
 		return
 	}
 
-	// Filter out detections that overlap existing components
+	// Filter out detections that overlap existing components.
+	// Check both directions: new center in existing bounds, existing center in new bounds,
+	// and significant bounding box intersection (>25% of either area).
 	var newBounds []geometry.Rect
 	for _, db := range detectedBounds {
-		centerX := db.X + db.Width/2
-		centerY := db.Y + db.Height/2
+		dbCX := db.X + db.Width/2
+		dbCY := db.Y + db.Height/2
 
 		overlaps := false
 		for _, existing := range cp.state.Components {
-			if centerX >= existing.Bounds.X && centerX <= existing.Bounds.X+existing.Bounds.Width &&
-				centerY >= existing.Bounds.Y && centerY <= existing.Bounds.Y+existing.Bounds.Height {
+			eb := existing.Bounds
+			ebCX := eb.X + eb.Width/2
+			ebCY := eb.Y + eb.Height/2
+
+			// New center inside existing bounds
+			if dbCX >= eb.X && dbCX <= eb.X+eb.Width &&
+				dbCY >= eb.Y && dbCY <= eb.Y+eb.Height {
 				overlaps = true
 				break
+			}
+			// Existing center inside new bounds
+			if ebCX >= db.X && ebCX <= db.X+db.Width &&
+				ebCY >= db.Y && ebCY <= db.Y+db.Height {
+				overlaps = true
+				break
+			}
+			// Bounding box intersection area > 25% of either
+			ix0 := math.Max(db.X, eb.X)
+			iy0 := math.Max(db.Y, eb.Y)
+			ix1 := math.Min(db.X+db.Width, eb.X+eb.Width)
+			iy1 := math.Min(db.Y+db.Height, eb.Y+eb.Height)
+			if ix1 > ix0 && iy1 > iy0 {
+				interArea := (ix1 - ix0) * (iy1 - iy0)
+				dbArea := db.Width * db.Height
+				ebArea := eb.Width * eb.Height
+				if dbArea > 0 && interArea/dbArea > 0.25 ||
+					ebArea > 0 && interArea/ebArea > 0.25 {
+					overlaps = true
+					break
+				}
 			}
 		}
 		if !overlaps {

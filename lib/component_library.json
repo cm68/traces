@@ -2,7 +2,7 @@
   "parts": [
     {
       "part_number": "54LS08",
-      "package": "",
+      "package": "DIP-14",
       "pin_count": 14,
       "pins": [
         {
@@ -79,7 +79,7 @@
     },
     {
       "part_number": "7414",
-      "package": "",
+      "package": "DIP-14",
       "pin_count": 14,
       "pins": [
         {
@@ -152,11 +152,16 @@
           "name": "VCC",
           "direction": "Power"
         }
+      ],
+      "aliases": [
+        "74LS14",
+        "74HC14",
+        "SN7414N"
       ]
     },
     {
       "part_number": "7438",
-      "package": "",
+      "package": "DIP-14",
       "pin_count": 14,
       "pins": [
         {
@@ -233,7 +238,7 @@
     },
     {
       "part_number": "74LS00",
-      "package": "",
+      "package": "DIP-14",
       "pin_count": 14,
       "pins": [
         {
@@ -310,7 +315,7 @@
     },
     {
       "part_number": "74LS02",
-      "package": "",
+      "package": "DIP-14",
       "pin_count": 14,
       "pins": [
         {
@@ -387,7 +392,7 @@
     },
     {
       "part_number": "74LS04",
-      "package": "",
+      "package": "DIP-14",
       "pin_count": 14,
       "pins": [
         {
@@ -464,7 +469,7 @@
     },
     {
       "part_number": "74LS123",
-      "package": "",
+      "package": "DIP-16",
       "pin_count": 16,
       "pins": [
         {
@@ -547,6 +552,11 @@
           "name": "VCC",
           "direction": "Power"
         }
+      ],
+      "aliases": [
+        "54LS123",
+        "74123",
+        "SN74LS123N"
       ]
     },
     {
@@ -638,7 +648,7 @@
     },
     {
       "part_number": "74LS139",
-      "package": "",
+      "package": "DIP-16",
       "pin_count": 16,
       "pins": [
         {
@@ -725,7 +735,7 @@
     },
     {
       "part_number": "74LS153",
-      "package": "",
+      "package": "DIP-16",
       "pin_count": 16,
       "pins": [
         {
@@ -812,7 +822,7 @@
     },
     {
       "part_number": "74LS195",
-      "package": "",
+      "package": "DIP-16",
       "pin_count": 16,
       "pins": [
         {
@@ -899,7 +909,7 @@
     },
     {
       "part_number": "74LS197",
-      "package": "",
+      "package": "DIP-14",
       "pin_count": 14,
       "pins": [
         {
@@ -976,7 +986,7 @@
     },
     {
       "part_number": "74LS240",
-      "package": "",
+      "package": "DIP-20",
       "pin_count": 20,
       "pins": [
         {
@@ -1083,7 +1093,7 @@
     },
     {
       "part_number": "74LS244",
-      "package": "",
+      "package": "DIP-20",
       "pin_count": 20,
       "pins": [
         {
@@ -1190,7 +1200,7 @@
     },
     {
       "part_number": "74LS245",
-      "package": "",
+      "package": "DIP-20",
       "pin_count": 20,
       "pins": [
         {
@@ -1297,7 +1307,7 @@
     },
     {
       "part_number": "74LS273",
-      "package": "",
+      "package": "DIP-20",
       "pin_count": 20,
       "pins": [
         {
@@ -1404,7 +1414,7 @@
     },
     {
       "part_number": "74LS373",
-      "package": "",
+      "package": "DIP-20",
       "pin_count": 20,
       "pins": [
         {
@@ -1434,13 +1444,13 @@
         },
         {
           "number": 6,
-          "name": "3D",
-          "direction": "Input"
+          "name": "3Q",
+          "direction": "Output"
         },
         {
           "number": 7,
-          "name": "3Q",
-          "direction": "Output"
+          "name": "3D",
+          "direction": "Input"
         },
         {
           "number": 8,
@@ -1474,23 +1484,23 @@
         },
         {
           "number": 14,
-          "name": "6Q",
-          "direction": "Output"
-        },
-        {
-          "number": 15,
           "name": "6D",
           "direction": "Input"
         },
         {
+          "number": 15,
+          "name": "6Q",
+          "direction": "Output"
+        },
+        {
           "number": 16,
-          "name": "7D",
-          "direction": "Input"
+          "name": "7Q",
+          "direction": "Output"
         },
         {
           "number": 17,
-          "name": "7Q",
-          "direction": "Output"
+          "name": "7D",
+          "direction": "Input"
         },
         {
           "number": 18,
@@ -1507,11 +1517,15 @@
           "name": "VCC",
           "direction": "Power"
         }
+      ],
+      "aliases": [
+        "74LS373N",
+        "SN74LS373N"
       ]
     },
     {
       "part_number": "74LS74",
-      "package": "",
+      "package": "DIP-14",
       "pin_count": 14,
       "pins": [
         {
@@ -1588,7 +1602,7 @@
     },
     {
       "part_number": "AM25LS2521",
-      "package": "",
+      "package": "DIP-20",
       "pin_count": 20,
       "pins": [
         {
@@ -1695,7 +1709,7 @@
     },
     {
       "part_number": "DP8303",
-      "package": "",
+      "package": "DIP-20",
       "pin_count": 20,
       "pins": [
         {

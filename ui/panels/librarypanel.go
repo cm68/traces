@@ -65,6 +65,9 @@ type LibraryPanel struct {
 
 	// Currently editing part (pointer into library)
 	currentPart *component.PartDefinition
+
+	// populating suppresses "changed" signals during selectPart
+	populating bool
 }
 
 // NewLibraryPanel creates a new library panel.
@@ -332,11 +335,14 @@ func (lp *LibraryPanel) selectPart(idx int) {
 	part := lib.Parts[idx]
 	lp.currentPart = part
 
-	// Block signals while populating (to prevent feedback from "changed" signals)
+	// Block signals while populating to prevent applyPartFields from
+	// reading stale values from entries that haven't been set yet.
+	lp.populating = true
 	lp.partNumberEntry.SetText(part.PartNumber)
 	lp.packageEntry.SetText(part.Package)
 	lp.aliasesEntry.SetText(strings.Join(part.Aliases, ", "))
 	lp.pinCountEntry.SetText(strconv.Itoa(part.PinCount))
+	lp.populating = false
 
 	lp.refreshPinTable()
 }
@@ -364,7 +370,7 @@ func (lp *LibraryPanel) refreshPinTable() {
 
 // applyPartFields updates the current part from the entry fields.
 func (lp *LibraryPanel) applyPartFields() {
-	if lp.currentPart == nil {
+	if lp.currentPart == nil || lp.populating {
 		return
 	}
 	pn, _ := lp.partNumberEntry.GetText()

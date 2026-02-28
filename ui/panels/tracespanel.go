@@ -793,9 +793,9 @@ func (tp *TracesPanel) rebuildFeaturesOverlayImpl(reconcileNets bool) {
 	tp.canvas.ClearOverlay("front_contacts")
 	tp.canvas.ClearOverlay("back_contacts")
 
-	frontOverlay := &canvas.Overlay{Layer: canvas.LayerFront}
-	backOverlay := &canvas.Overlay{Layer: canvas.LayerBack}
-	viasOverlay := &canvas.Overlay{}
+	frontOverlay := &canvas.Overlay{Layer: canvas.LayerFront, ZOrder: 10}
+	backOverlay := &canvas.Overlay{Layer: canvas.LayerBack, ZOrder: 10}
+	viasOverlay := &canvas.Overlay{ZOrder: 0}
 
 	cyan := &colorutil.Cyan
 	magenta := &colorutil.Magenta
@@ -828,7 +828,7 @@ func (tp *TracesPanel) rebuildFeaturesOverlayImpl(reconcileNets bool) {
 		})
 	}
 
-	// 2. Confirmed vias: blue, filled, labeled — always visible
+	// 2. Confirmed vias: blue, filled, labeled
 	for _, cv := range tp.state.FeaturesLayer.GetConfirmedVias() {
 		label := ""
 		if cv.SignalName != "" {
@@ -883,16 +883,6 @@ func (tp *TracesPanel) rebuildFeaturesOverlayImpl(reconcileNets bool) {
 		}
 	}
 
-	// Build set of via/connector centers so trace vertex dots are suppressed there.
-	type gridKey struct{ x, y int }
-	occupiedByFeature := make(map[gridKey]bool)
-	for _, cv := range tp.state.FeaturesLayer.GetConfirmedVias() {
-		occupiedByFeature[gridKey{int(math.Round(cv.Center.X)), int(math.Round(cv.Center.Y))}] = true
-	}
-	for _, conn := range tp.state.FeaturesLayer.GetConnectors() {
-		occupiedByFeature[gridKey{int(math.Round(conn.Center.X)), int(math.Round(conn.Center.Y))}] = true
-	}
-
 	// 4. Completed traces: split by layer, colored by net status
 	red := &color.RGBA{R: 255, G: 0, B: 0, A: 255}
 	for _, tid := range tp.state.FeaturesLayer.GetTraces() {
@@ -928,13 +918,9 @@ func (tp *TracesPanel) rebuildFeaturesOverlayImpl(reconcileNets bool) {
 				Color:     traceColor,
 			})
 		}
-		// Draw dots on vertices that are NOT at via/connector centers.
-		// Vias and connectors have their own visual markers.
+		// Draw dots on all vertices (including those at via/connector centers)
+		// so they are always pickable on top of vias.
 		for _, pt := range tf.Points {
-			gk := gridKey{int(math.Round(pt.X)), int(math.Round(pt.Y))}
-			if occupiedByFeature[gk] {
-				continue
-			}
 			target.Circles = append(target.Circles, canvas.OverlayCircle{
 				X: pt.X, Y: pt.Y, Radius: 6, Filled: true,
 				Color: traceColor,
@@ -2281,6 +2267,22 @@ func (tp *TracesPanel) refreshNetElements() {
 
 	for _, elem := range net.Elements {
 		label := fmt.Sprintf("[%s] %s", elem.Type.String(), elem.ID)
+		switch elem.Type {
+		case netlist.ElementVia:
+			if cv := tp.state.FeaturesLayer.GetConfirmedViaByID(elem.ID); cv != nil {
+				if cv.ComponentID != "" && cv.PinNumber != "" {
+					if cv.SignalName != "" {
+						label = fmt.Sprintf("[Pin] %s.%s %s", cv.ComponentID, cv.PinNumber, cv.SignalName)
+					} else {
+						label = fmt.Sprintf("[Pin] %s.%s", cv.ComponentID, cv.PinNumber)
+					}
+				}
+			}
+		case netlist.ElementConnector:
+			if c := tp.state.FeaturesLayer.GetConnectorByID(elem.ID); c != nil && c.SignalName != "" {
+				label = fmt.Sprintf("[Conn] %s %s", elem.ID, c.SignalName)
+			}
+		}
 		row, _ := gtk.LabelNew(label)
 		row.SetHAlign(gtk.ALIGN_START)
 		tp.netElementsBox.Add(row)
@@ -3842,10 +3844,101 @@ func (tp *TracesPanel) deleteVertex(traceID string, pointIdx int) {
 	newPoints := make([]geometry.Point2D, 0, len(tf.Points)-1)
 	newPoints = append(newPoints, tf.Points[:pointIdx]...)
 	newPoints = append(newPoints, tf.Points[pointIdx+1:]...)
+
+	// Recursively collapse interior vertices that are now collinear (turn < 1°)
+	newPoints = collapseCollinear(newPoints)
+
 	tp.state.FeaturesLayer.UpdateTracePoints(traceID, newPoints)
 	tp.rebuildFeaturesOverlay()
 	tp.canvas.Refresh()
-	tp.traceStatusLabel.SetText(fmt.Sprintf("Deleted vertex %d of %s", pointIdx, traceID))
+	tp.traceStatusLabel.SetText(fmt.Sprintf("Deleted vertex %d of %s (%d pts remain)", pointIdx, traceID, len(newPoints)))
+}
+
+// collapseCollinear removes interior vertices where the turn angle is < 1 degree
+// (effectively 180° straight-through). Repeats until stable.
+func collapseCollinear(pts []geometry.Point2D) []geometry.Point2D {
+	for {
+		changed := false
+		var result []geometry.Point2D
+		result = append(result, pts[0])
+		for i := 1; i < len(pts)-1; i++ {
+			prev := result[len(result)-1]
+			cur := pts[i]
+			next := pts[i+1]
+			ax, ay := cur.X-prev.X, cur.Y-prev.Y
+			bx, by := next.X-cur.X, next.Y-cur.Y
+			alen := math.Sqrt(ax*ax + ay*ay)
+			blen := math.Sqrt(bx*bx + by*by)
+			if alen == 0 || blen == 0 {
+				changed = true
+				continue
+			}
+			dot := (ax*bx + ay*by) / (alen * blen)
+			if dot > 1 {
+				dot = 1
+			}
+			// dot ≈ 1.0 means ~0° turn (straight through) → collinear
+			if dot > math.Cos(1.0*math.Pi/180.0) {
+				changed = true
+				continue
+			}
+			result = append(result, cur)
+		}
+		result = append(result, pts[len(pts)-1])
+		pts = result
+		if !changed {
+			break
+		}
+	}
+	return pts
+}
+
+// snapTraceToTerminals snaps a trace's endpoints to the centers of the source and
+// destination terminals, and removes any interior vertices that fall within either
+// terminal's radius. This ensures traces originate cleanly from via/connector centers
+// with no vertices overlapping the via area.
+func snapTraceToTerminals(path []geometry.Point2D, srcCenter geometry.Point2D, srcRadius float64, dstCenter geometry.Point2D, dstRadius float64) []geometry.Point2D {
+	if len(path) < 2 {
+		return path
+	}
+
+	// Snap endpoints to terminal centers
+	path[0] = srcCenter
+	path[len(path)-1] = dstCenter
+
+	// Remove interior points within either terminal's radius
+	var cleaned []geometry.Point2D
+	cleaned = append(cleaned, path[0])
+	for i := 1; i < len(path)-1; i++ {
+		pt := path[i]
+		dx1, dy1 := pt.X-srcCenter.X, pt.Y-srcCenter.Y
+		dx2, dy2 := pt.X-dstCenter.X, pt.Y-dstCenter.Y
+		if dx1*dx1+dy1*dy1 < srcRadius*srcRadius {
+			continue
+		}
+		if dx2*dx2+dy2*dy2 < dstRadius*dstRadius {
+			continue
+		}
+		cleaned = append(cleaned, pt)
+	}
+	cleaned = append(cleaned, path[len(path)-1])
+
+	// Remove consecutive overlapping points (within 1px)
+	var deduped []geometry.Point2D
+	deduped = append(deduped, cleaned[0])
+	for i := 1; i < len(cleaned); i++ {
+		prev := deduped[len(deduped)-1]
+		dx, dy := cleaned[i].X-prev.X, cleaned[i].Y-prev.Y
+		if dx*dx+dy*dy < 1.0 {
+			continue
+		}
+		deduped = append(deduped, cleaned[i])
+	}
+	// Always keep the last point even if close to previous
+	if len(deduped) >= 2 {
+		deduped[len(deduped)-1] = cleaned[len(cleaned)-1]
+	}
+	return deduped
 }
 
 // autoTraceFromVia follows copper from the given via to find where it connects.
@@ -3960,6 +4053,12 @@ func (tp *TracesPanel) autoTraceFromVia(cv *via.ConfirmedVia) {
 		}
 		_ = usedProbeR
 
+		// Build terminal lookup for endpoint snapping
+		termMap := make(map[string]pcbtrace.Terminal)
+		for _, t := range terminators {
+			termMap[t.ID] = t
+		}
+
 		// Simplify paths to minimum vertices
 		type traceData struct {
 			path       []geometry.Point2D
@@ -3967,9 +4066,11 @@ func (tp *TracesPanel) autoTraceFromVia(cv *via.ConfirmedVia) {
 		}
 		var traces []traceData
 		for _, w := range result.Walks {
-			// Aggressive simplification, then suppress turns < 20°
 			simplified := pcbtrace.SimplifyPath(w.Path, 4.0)
 			simplified = pcbtrace.SuppressSmallTurns(simplified, 20.0)
+			if dst, ok := termMap[w.TerminalID]; ok {
+				simplified = snapTraceToTerminals(simplified, viaCenter, viaRadius, dst.Center, dst.Radius)
+			}
 			traces = append(traces, traceData{path: simplified, terminalID: w.TerminalID})
 			fmt.Printf("  -> %s (%d raw -> %d simplified)\n", w.TerminalID, len(w.Path), len(simplified))
 		}
@@ -3984,29 +4085,31 @@ func (tp *TracesPanel) autoTraceFromVia(cv *via.ConfirmedVia) {
 
 		glib.IdleAdd(func() {
 			// Debug overlay: explored cells + simplified paths
-			cyan := color.RGBA{R: 0, G: 200, B: 255, A: 100}
-			debugCircles := make([]canvas.OverlayCircle, len(exploredPts))
-			for i, ep := range exploredPts {
-				debugCircles[i] = canvas.OverlayCircle{
-					X: ep.X, Y: ep.Y, Radius: pr, Filled: true, Color: &cyan,
+			if false {
+				cyan := color.RGBA{R: 0, G: 200, B: 255, A: 100}
+				debugCircles := make([]canvas.OverlayCircle, len(exploredPts))
+				for i, ep := range exploredPts {
+					debugCircles[i] = canvas.OverlayCircle{
+						X: ep.X, Y: ep.Y, Radius: pr, Filled: true, Color: &cyan,
+					}
 				}
-			}
-			// Show simplified paths as green lines
-			green := color.RGBA{R: 0, G: 255, B: 0, A: 220}
-			var debugLines []canvas.OverlayLine
-			for _, td := range traces {
-				for j := 1; j < len(td.path); j++ {
-					debugLines = append(debugLines, canvas.OverlayLine{
-						X1: td.path[j-1].X, Y1: td.path[j-1].Y,
-						X2: td.path[j].X, Y2: td.path[j].Y,
-						Thickness: 2, Color: &green,
-					})
+				// Show simplified paths as green lines
+				green := color.RGBA{R: 0, G: 255, B: 0, A: 220}
+				var debugLines []canvas.OverlayLine
+				for _, td := range traces {
+					for j := 1; j < len(td.path); j++ {
+						debugLines = append(debugLines, canvas.OverlayLine{
+							X1: td.path[j-1].X, Y1: td.path[j-1].Y,
+							X2: td.path[j].X, Y2: td.path[j].Y,
+							Thickness: 2, Color: &green,
+						})
+					}
 				}
+				tp.canvas.SetOverlay("auto_trace_debug", &canvas.Overlay{
+					Circles: debugCircles,
+					Lines:   debugLines,
+				})
 			}
-			tp.canvas.SetOverlay("auto_trace_debug", &canvas.Overlay{
-				Circles: debugCircles,
-				Lines:   debugLines,
-			})
 
 			// Create traces
 			for _, td := range traces {
@@ -4547,10 +4650,22 @@ func (tp *TracesPanel) onAutoTraceLayer() {
 			startID    string
 			terminalID string
 		}
+		// Build terminal lookup for endpoint snapping
+		termMap := make(map[string]pcbtrace.Terminal)
+		for _, t := range terminators {
+			termMap[t.ID] = t
+		}
+
 		var allTraces []traceData
 		totalExplored := 0
+		connected := make(map[string]bool) // vias that already have a trace from this run
 
 		for vi, src := range unconnected {
+			// Skip if this via was already reached as a destination
+			if connected[src.id] {
+				continue
+			}
+
 			// Exclude self from terminators
 			var srcTerminators []pcbtrace.Terminal
 			for _, t := range terminators {
@@ -4577,9 +4692,15 @@ func (tp *TracesPanel) onAutoTraceLayer() {
 			for _, w := range walks {
 				simplified := pcbtrace.SimplifyPath(w.Path, 4.0)
 				simplified = pcbtrace.SuppressSmallTurns(simplified, 20.0)
+				if dst, ok := termMap[w.TerminalID]; ok {
+					simplified = snapTraceToTerminals(simplified, src.center, src.radius, dst.Center, dst.Radius)
+				}
 				allTraces = append(allTraces, traceData{
 					path: simplified, startID: src.id, terminalID: w.TerminalID,
 				})
+				// Mark both ends as connected so neither floods again
+				connected[src.id] = true
+				connected[w.TerminalID] = true
 			}
 
 			// Update status periodically
@@ -4592,6 +4713,26 @@ func (tp *TracesPanel) onAutoTraceLayer() {
 				})
 			}
 		}
+
+		// Deduplicate A→B / B→A pairs: keep the one with fewer vertices
+		type pairKey struct{ a, b string }
+		seen := make(map[pairKey]int) // key → index in allTraces
+		var deduped []traceData
+		for _, td := range allTraces {
+			k := pairKey{td.startID, td.terminalID}
+			kr := pairKey{td.terminalID, td.startID}
+			if idx, ok := seen[kr]; ok {
+				// Duplicate found — keep the cleaner one (fewer vertices)
+				if len(td.path) < len(deduped[idx].path) {
+					deduped[idx] = td
+				}
+				continue
+			}
+			seen[k] = len(deduped)
+			deduped = append(deduped, td)
+		}
+		fmt.Printf("Auto-trace layer: %d traces after dedup (was %d)\n", len(deduped), len(allTraces))
+		allTraces = deduped
 
 		fmt.Printf("Auto-trace layer: %d endpoints processed, %d traces found, %d cells explored\n",
 			len(unconnected), len(allTraces), totalExplored)

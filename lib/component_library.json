@@ -5,20 +5,76 @@
       "package": "DIP-14",
       "pin_count": 14,
       "pins": [
-        { "number": 1,  "name": "T1", "direction": "Bidirectional" },
-        { "number": 2,  "name": "T2", "direction": "Bidirectional" },
-        { "number": 3,  "name": "T3", "direction": "Bidirectional" },
-        { "number": 4,  "name": "T4", "direction": "Bidirectional" },
-        { "number": 5,  "name": "T5", "direction": "Bidirectional" },
-        { "number": 6,  "name": "T6", "direction": "Bidirectional" },
-        { "number": 7,  "name": "GND", "direction": "Ground" },
-        { "number": 8,  "name": "T7", "direction": "Bidirectional" },
-        { "number": 9,  "name": "T8", "direction": "Bidirectional" },
-        { "number": 10, "name": "T9", "direction": "Bidirectional" },
-        { "number": 11, "name": "T10", "direction": "Bidirectional" },
-        { "number": 12, "name": "T11", "direction": "Bidirectional" },
-        { "number": 13, "name": "T12", "direction": "Bidirectional" },
-        { "number": 14, "name": "VCC", "direction": "Power" }
+        {
+          "number": 1,
+          "name": "T1",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 2,
+          "name": "T2",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 3,
+          "name": "T3",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 4,
+          "name": "T4",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 5,
+          "name": "T5",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 6,
+          "name": "T6",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 7,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 8,
+          "name": "T7",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 9,
+          "name": "T8",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 10,
+          "name": "T9",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 11,
+          "name": "T10",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 12,
+          "name": "T11",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 13,
+          "name": "T12",
+          "direction": "Bidirectional"
+        },
+        {
+          "number": 14,
+          "name": "VCC",
+          "direction": "Power"
+        }
       ]
     },
     {
@@ -495,73 +551,73 @@
       "pins": [
         {
           "number": 1,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "1A",
+          "direction": "Input"
         },
         {
           "number": 2,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "1B",
+          "direction": "Input"
         },
         {
           "number": 3,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "1Y",
+          "direction": "Output"
         },
         {
           "number": 4,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "2A",
+          "direction": "Input"
         },
         {
           "number": 5,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "2B",
+          "direction": "Input"
         },
         {
           "number": 6,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "2Y",
+          "direction": "Output"
         },
         {
           "number": 7,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "GND",
+          "direction": "Ground"
         },
         {
           "number": 8,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "3Y",
+          "direction": "Output"
         },
         {
           "number": 9,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "3B",
+          "direction": "Input"
         },
         {
           "number": 10,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "3A",
+          "direction": "Input"
         },
         {
           "number": 11,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "4Y",
+          "direction": "Output"
         },
         {
           "number": 12,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "3B",
+          "direction": "Input"
         },
         {
           "number": 13,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "3A",
+          "direction": "Input"
         },
         {
           "number": 14,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "VCC",
+          "direction": "Power"
         }
       ]
     },
@@ -570,20 +626,76 @@
       "package": "DIP-14",
       "pin_count": 14,
       "pins": [
-        { "number": 1,  "name": "A1",  "direction": "Input"  },
-        { "number": 2,  "name": "B1",  "direction": "Input"  },
-        { "number": 3,  "name": "A2",  "direction": "Input"  },
-        { "number": 4,  "name": "B2",  "direction": "Input"  },
-        { "number": 5,  "name": "C2",  "direction": "Input"  },
-        { "number": 6,  "name": "Y2",  "direction": "Output" },
-        { "number": 7,  "name": "GND", "direction": "Ground" },
-        { "number": 8,  "name": "Y3",  "direction": "Output" },
-        { "number": 9,  "name": "A3",  "direction": "Input"  },
-        { "number": 10, "name": "B3",  "direction": "Input"  },
-        { "number": 11, "name": "C3",  "direction": "Input"  },
-        { "number": 12, "name": "Y1",  "direction": "Output" },
-        { "number": 13, "name": "C1",  "direction": "Input"  },
-        { "number": 14, "name": "VCC", "direction": "Power"  }
+        {
+          "number": 1,
+          "name": "A1",
+          "direction": "Input"
+        },
+        {
+          "number": 2,
+          "name": "B1",
+          "direction": "Input"
+        },
+        {
+          "number": 3,
+          "name": "A2",
+          "direction": "Input"
+        },
+        {
+          "number": 4,
+          "name": "B2",
+          "direction": "Input"
+        },
+        {
+          "number": 5,
+          "name": "C2",
+          "direction": "Input"
+        },
+        {
+          "number": 6,
+          "name": "Y2",
+          "direction": "Output"
+        },
+        {
+          "number": 7,
+          "name": "GND",
+          "direction": "Ground"
+        },
+        {
+          "number": 8,
+          "name": "Y3",
+          "direction": "Output"
+        },
+        {
+          "number": 9,
+          "name": "A3",
+          "direction": "Input"
+        },
+        {
+          "number": 10,
+          "name": "B3",
+          "direction": "Input"
+        },
+        {
+          "number": 11,
+          "name": "C3",
+          "direction": "Input"
+        },
+        {
+          "number": 12,
+          "name": "Y1",
+          "direction": "Output"
+        },
+        {
+          "number": 13,
+          "name": "C1",
+          "direction": "Input"
+        },
+        {
+          "number": 14,
+          "name": "VCC",
+          "direction": "Power"
+        }
       ]
     },
     {
@@ -1538,33 +1650,33 @@
       "pins": [
         {
           "number": 1,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "1A",
+          "direction": "Input"
         },
         {
           "number": 2,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "1B",
+          "direction": "Input"
         },
         {
           "number": 3,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "1Y",
+          "direction": "Output"
         },
         {
           "number": 4,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "2A",
+          "direction": "Input"
         },
         {
           "number": 5,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "2B",
+          "direction": "Input"
         },
         {
           "number": 6,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "2Y",
+          "direction": "Output"
         },
         {
           "number": 7,
@@ -1573,33 +1685,33 @@
         },
         {
           "number": 8,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "3Y",
+          "direction": "Output"
         },
         {
           "number": 9,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "3B",
+          "direction": "Input"
         },
         {
           "number": 10,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "3A",
+          "direction": "Input"
         },
         {
           "number": 11,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "4Y",
+          "direction": "Output"
         },
         {
           "number": 12,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "4B",
+          "direction": "Input"
         },
         {
           "number": 13,
-          "name": "",
-          "direction": "Bidirectional"
+          "name": "4A",
+          "direction": "Input"
         },
         {
           "number": 14,

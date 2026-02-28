@@ -24,6 +24,7 @@ type Overlay struct {
 	Lines      []OverlayLine
 	Color      color.RGBA
 	Layer      LayerRef // Which layer this overlay is associated with (for offset)
+	ZOrder     int      // Lower values draw first (under); higher values draw on top
 }
 
 // OverlayCircle represents a circle to draw on the overlay.

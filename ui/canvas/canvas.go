@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"image/draw"
 	"math"
+	"sort"
 
 	pcbimage "pcb-tracer/internal/image"
 	"pcb-tracer/pkg/geometry"
@@ -1038,14 +1039,21 @@ func (ic *ImageCanvas) draw(w, h int) image.Image {
 		}
 	}
 
-	// Draw overlays, skipping layer-specific overlays not on the top layer
+	// Draw overlays sorted by ZOrder, skipping layer-specific overlays not on the top layer
+	sortedOverlays := make([]*Overlay, 0, len(ic.overlays))
 	for _, overlay := range ic.overlays {
 		if overlay != nil {
 			if overlay.Layer != LayerNone && overlay.Layer != topLayerRef {
 				continue
 			}
-			ic.drawOverlay(output, overlay)
+			sortedOverlays = append(sortedOverlays, overlay)
 		}
+	}
+	sort.Slice(sortedOverlays, func(i, j int) bool {
+		return sortedOverlays[i].ZOrder < sortedOverlays[j].ZOrder
+	})
+	for _, overlay := range sortedOverlays {
+		ic.drawOverlay(output, overlay)
 	}
 
 	// Draw rubber band line if active

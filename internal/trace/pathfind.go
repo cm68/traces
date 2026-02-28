@@ -19,11 +19,11 @@ func FindPathOnSkeleton(skeleton gocv.Mat, start, end geometry.Point2D, maxSearc
 	}
 
 	// Find nearest skeleton pixels to start and end
-	startPt, ok := nearestSkeletonPixel(skeleton, start, maxSearchRadius)
+	startPt, ok := NearestSkeletonPixel(skeleton, start, maxSearchRadius)
 	if !ok {
 		return nil, false
 	}
-	endPt, ok := nearestSkeletonPixel(skeleton, end, maxSearchRadius)
+	endPt, ok := NearestSkeletonPixel(skeleton, end, maxSearchRadius)
 	if !ok {
 		return nil, false
 	}
@@ -124,9 +124,9 @@ func FindPathOnSkeleton(skeleton gocv.Mat, start, end geometry.Point2D, maxSearc
 	return nil, false
 }
 
-// nearestSkeletonPixel finds the nearest white pixel on the skeleton mask
+// NearestSkeletonPixel finds the nearest white pixel on the skeleton mask
 // to the given point, scanning outward in a spiral pattern up to maxRadius.
-func nearestSkeletonPixel(skeleton gocv.Mat, pt geometry.Point2D, maxRadius int) (image.Point, bool) {
+func NearestSkeletonPixel(skeleton gocv.Mat, pt geometry.Point2D, maxRadius int) (image.Point, bool) {
 	cx, cy := int(math.Round(pt.X)), int(math.Round(pt.Y))
 	rows, cols := skeleton.Rows(), skeleton.Cols()
 

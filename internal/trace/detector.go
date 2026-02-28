@@ -4,6 +4,7 @@ package trace
 import (
 	"image"
 	"image/color"
+	"sort"
 
 	"pcb-tracer/pkg/geometry"
 
@@ -156,6 +157,82 @@ func AutoDetectCopper(img gocv.Mat, numClusters int) gocv.Mat {
 		for x := 0; x < w; x++ {
 			idx := y*w + x
 			if labels.GetIntAt(idx, 0) == int32(copperCluster) {
+				mask.SetUCharAt(y, x, 255)
+			}
+		}
+	}
+
+	return mask
+}
+
+// AutoDetectCopperTopN detects copper using K-means but includes the top N
+// scoring clusters. This captures copper under solder mask that appears dimmer
+// than bare copper pads but still brighter/warmer than the board background.
+func AutoDetectCopperTopN(img gocv.Mat, numClusters, topN int) gocv.Mat {
+	if img.Empty() || topN <= 0 {
+		return gocv.NewMat()
+	}
+	if topN >= numClusters {
+		topN = numClusters - 1
+	}
+
+	lab := gocv.NewMat()
+	defer lab.Close()
+	gocv.CvtColor(img, &lab, gocv.ColorBGRToLab)
+
+	h, w := lab.Rows(), lab.Cols()
+	pixels := gocv.NewMatWithSize(h*w, 3, gocv.MatTypeCV32F)
+	defer pixels.Close()
+
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			idx := y*w + x
+			vec := lab.GetVecbAt(y, x)
+			pixels.SetFloatAt(idx, 0, float32(vec[0]))
+			pixels.SetFloatAt(idx, 1, float32(vec[1]))
+			pixels.SetFloatAt(idx, 2, float32(vec[2]))
+		}
+	}
+
+	labels := gocv.NewMat()
+	defer labels.Close()
+	centers := gocv.NewMat()
+	defer centers.Close()
+
+	criteria := gocv.NewTermCriteria(gocv.EPS+gocv.MaxIter, 100, 0.2)
+	gocv.KMeans(pixels, numClusters, &labels, criteria, 10, gocv.KMeansRandomCenters, &centers)
+
+	// Score each cluster
+	type clusterScore struct {
+		idx   int
+		score float64
+	}
+	scored := make([]clusterScore, numClusters)
+	for i := 0; i < numClusters; i++ {
+		l := centers.GetFloatAt(i, 0)
+		a := centers.GetFloatAt(i, 1)
+		b := centers.GetFloatAt(i, 2)
+		brightness := float64(l) / 255.0
+		warmth := (float64(a) + float64(b)) / 256.0
+		scored[i] = clusterScore{idx: i, score: brightness * (1 + warmth)}
+	}
+
+	// Sort descending by score
+	sort.Slice(scored, func(i, j int) bool {
+		return scored[i].score > scored[j].score
+	})
+
+	// Build set of top-N cluster indices
+	copperClusters := make(map[int32]bool, topN)
+	for i := 0; i < topN; i++ {
+		copperClusters[int32(scored[i].idx)] = true
+	}
+
+	mask := gocv.NewMatWithSize(h, w, gocv.MatTypeCV8U)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			idx := y*w + x
+			if copperClusters[labels.GetIntAt(idx, 0)] {
 				mask.SetUCharAt(y, x, 255)
 			}
 		}

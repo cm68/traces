@@ -224,6 +224,42 @@ func perpendicularDistance(p, a, b geometry.Point2D) float64 {
 	return num / den
 }
 
+// SuppressSmallTurns removes interior vertices where the turn angle is less than
+// minAngle degrees. First and last points are always kept.
+func SuppressSmallTurns(path []geometry.Point2D, minAngleDeg float64) []geometry.Point2D {
+	if len(path) <= 2 {
+		return path
+	}
+	minRad := minAngleDeg * math.Pi / 180.0
+	result := []geometry.Point2D{path[0]}
+	for i := 1; i < len(path)-1; i++ {
+		prev := result[len(result)-1]
+		cur := path[i]
+		next := path[i+1]
+		// Vectors prev→cur and cur→next
+		ax, ay := cur.X-prev.X, cur.Y-prev.Y
+		bx, by := next.X-cur.X, next.Y-cur.Y
+		alen := math.Sqrt(ax*ax + ay*ay)
+		blen := math.Sqrt(bx*bx + by*by)
+		if alen == 0 || blen == 0 {
+			continue
+		}
+		dot := (ax*bx + ay*by) / (alen * blen)
+		if dot > 1 {
+			dot = 1
+		}
+		if dot < -1 {
+			dot = -1
+		}
+		angle := math.Acos(dot) // 0 = straight, pi = U-turn
+		if angle >= minRad {
+			result = append(result, cur)
+		}
+	}
+	result = append(result, path[len(path)-1])
+	return result
+}
+
 // estimateWidths estimates trace width for each path by sampling mask coverage.
 func estimateWidths(paths [][]geometry.Point2D, mask gocv.Mat, maxWidth float64) []float64 {
 	widths := make([]float64, len(paths))

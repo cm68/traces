@@ -4,18 +4,9 @@ A PCB reverse engineering tool written in Go with a GTK3 GUI. Designed for traci
 
 ![Screenshot](Screenshot.png)
 
-The current status is that it is becoming a useful tool to analyze a board, but there is still a tremendous amount of automation that is possible.
-
-## Todos: 
+## Todos
 
 ### current manual steps that can be automated:
-
-- via detection for two-side visible vias
-- chip pin assignment
-- trace detection between connectors, vias and pins
-- alignment is way too fragile
-- auto-detect component packages from board scan (bounding boxes exist, but placement is manual)
-- auto-populate part library from detected component labels (OCR → library lookup)
 - batch net naming from connector signal definitions (propagate pin names through connected nets)
 
 ### bugs:
@@ -24,30 +15,32 @@ The current status is that it is becoming a useful tool to analyze a board, but 
 - the UI is pretty slow, maybe there are some polynomial time searches that need to be hashed
 - zoom out with cursor centering clips at scroll boundary (can't scroll to negative offsets)
 - net reconciliation runs on every overlay rebuild — expensive for large boards
-- deleting a trace that splits a net doesn't always clean up orphan single-element nets
 
 ### missing features:
 - undo/redo for trace, via, and net operations
-- netlist export (KiCad, PADS, generic CSV)
 - schematic generation from traced netlist
 - DRC (design rule check) — detect unconnected pins, shorted nets
-- multi-select for bulk via/trace operations
 - search/filter in net list and component list
 - print or PDF export of board with overlay annotations
 - support for multi-layer boards (4+ layers)
 - passive component detection (resistors, capacitors, discrete semiconductors)
-	
+
 ## Features
 
 ### Image & Alignment
 - Image loading (TIFF, PNG, JPEG) with automatic DPI extraction
 - Layer management with visibility and opacity controls
-- Mouse wheel zoom centered on cursor, middle-click pan
+- Mouse wheel zoom centered on cursor (clamped at 150%), middle-click pan
+- Zoom percentage display in toolbar
 - Automatic gold edge contact detection using HSV color filtering
 - Contact sampling via rubber-band selection to train color detection
-- Front/back image alignment using detected contacts
+- Multi-pass alignment: coarse contacts + iterative via refinement
+- Via-based alignment pipeline with contact fallback
+- RANSAC affine alignment from via positions
+- Line-following grid rescue for robust contact detection
 - Ejector mark detection for precision alignment
 - Manual alignment adjustment (offset, rotation, shear)
+- Project-specific normalized image caching
 
 ### Board Support
 - **S-100 (IEEE 696)**: 100-pin, 50 per side, 0.125" pitch
@@ -58,40 +51,64 @@ The current status is that it is becoming a useful tool to analyze a board, but 
 - **STD Bus**: 56-pin
 
 ### Via Detection & Management
-- Hough circle transform and contour analysis detection
-- Manual via placement and confirmation
+- Distance-transform pipeline with color confirmation and circularity checks
+- Contour analysis rescue pass for missed vias
+- Manual via placement with smart centering (Fourier vector-shift)
 - Cross-side matching (front/back correlation)
-- Training set with parameter annealing
+- Training set with parameter annealing and adaptive dense filter retry
 - Arrow-key nudging, radius adjustment
+- Multi-select vias with shift-click
+- Delete-on-hover, via/pin overlap protection
 - Auto-assign component ID and pin number from nearest DIP
+- Duplicate via prevention on repeated detection runs
+
+### Component Detection & Library
+- Black plastic IC detection with HSV color profiling (multiple color profiles)
+- Grid-based detection pipeline with size templates and aspect ratio filtering
+- DIP package support (DIP-8 through DIP-40)
+- DIP pin detection with hybrid edge finding and rotation-aware positioning
+- Square-pad pin 1 detection, notch/dot/chamfer recognition
+- OCR for component labels (Tesseract v5) with trainable parameters
+- Global component training set with auto-training on save
+- OCR text correction for building training data
+- Component library with part definitions, pin names, and signal directions
+- Fuzzy part matching: aliases, normalized part numbers (strips family codes, suffixes)
+- Auto-add detected parts to library on save
+- Package mismatch fallback with warning
+- Component image preview with Cairo DrawingArea
+- Manufacturer logo template matching
+- IC date code decoding
+- Arrow-key movement, click-to-add components
 
 ### Trace Drawing & Editing
 - Interactive polyline trace drawing between vias, connectors, and junctions
-- Auto-trace along copper skeleton between adjacent vias
+- Flood-fill auto-trace from individual vias with progressive threshold relaxation
+- Layer-wide auto-trace with conservative fixed parameters
+- Noise reduction via small-turn suppression
 - Vertex editing: move (right-click drag) and delete vertices
+- Delete trace from right-click context menu
 - Start traces from vias, connectors, or existing junction vertices
 - Per-layer traces (front/back) with side-aware filtering
 - Junction dots at trace intersection points (not at vias/connectors)
+- Trace cancel on right/middle click
 
 ### Electrical Netlist
 - Automatic net creation and merging when traces connect elements
 - Union-find based net reconciliation (single source of truth)
+- Per-element type tracking (connectors, vias, traces, component pads)
 - Side-aware connector matching (front traces join front connectors only)
 - Net name priority: manual names > signal names > component.pin > auto-generated
-- Net splitting when traces are deleted
+- Net splitting when traces are deleted, with orphan cleanup
 - Net list panel with per-net element display
 - Right-click context menu: rename net, delete net, remove/delete elements
 - Signal name resolution from parts library (output pins rename nets)
+- Connectivity analysis (connected components)
 
-### Component Detection & Library
-- Black plastic IC detection with HSV color profiling
-- DIP package support (DIP-8 through DIP-40)
-- DIP-aware pin guessing based on component geometry
-- OCR for component labels (Tesseract v5)
-- Component library with part definitions, pin names, and signal directions
-- Fuzzy part matching: aliases, normalized part numbers (strips family codes, suffixes)
-- Package mismatch fallback with warning
-- Manufacturer logo template matching
+### Netlist Export
+- KiCad netlist format export
+- SPICE netlist format export
+- Text-based connectivity dump with net statistics
+- File > Export Netlist menu
 
 ### Connectors
 - Persistent board edge connectors with per-pin signal names
@@ -103,6 +120,7 @@ The current status is that it is becoming a useful tool to analyze a board, but 
 - JSON-based `.pcbproj` project files
 - Saves/restores all alignment, component, via, trace, and net state
 - Viewport state persistence (zoom, scroll, active panel)
+- Window geometry persistence (size and position across sessions)
 - Hot reload for development
 
 ## Architecture
@@ -111,34 +129,40 @@ The current status is that it is becoming a useful tool to analyze a board, but 
 traces/
 ├── main.go
 ├── cmd/
-│   ├── ocrtrain/              # OCR parameter training tool
-│   └── viatest/               # Via detection testing tool
+│   ├── aligntest/            # Alignment testing tool
+│   ├── componenttrain/       # Component detection training tool
+│   ├── ocrtrain/             # OCR parameter training tool
+│   └── viatest/              # Via detection testing tool
 ├── internal/
-│   ├── alignment/             # Contact detection, image alignment
-│   ├── app/                   # Application state, event system, hot reload
-│   ├── board/                 # Board specifications (S-100, ISA, Multibus, ECB, STD)
-│   ├── component/             # Component detection, library, DIP definitions
-│   ├── connector/             # Board edge connectors, bus pin maps
-│   ├── datecode/              # IC date code decoding
-│   ├── features/              # Unified feature layer, net reconciliation
-│   ├── image/                 # Image loading, layers, DPI extraction
-│   ├── logo/                  # Manufacturer logo detection
-│   ├── netlist/               # Electrical nets, connectivity analysis
-│   ├── ocr/                   # Tesseract integration, training database
-│   ├── project/               # Project file management
-│   ├── trace/                 # Trace detection, vectorization, skeletonization
-│   ├── version/               # Build version info
-│   └── via/                   # Via detection, training, cross-side matching
+│   ├── alignment/            # Contact detection, via-based alignment, RANSAC
+│   ├── app/                  # Application state, event system, hot reload
+│   ├── board/                # Board specifications (S-100, ISA, Multibus, ECB, STD)
+│   ├── component/            # Component detection, pin detection, library, DIP definitions
+│   ├── connector/            # Board edge connectors, bus pin maps
+│   ├── cv/                   # Computer vision utilities
+│   ├── datecode/             # IC date code decoding
+│   ├── features/             # Unified feature layer, net reconciliation
+│   ├── image/                # Image loading, layers, DPI extraction
+│   ├── logo/                 # Manufacturer logo detection
+│   ├── netlist/              # Electrical nets, connectivity analysis, export (KiCad, SPICE)
+│   ├── ocr/                  # Tesseract integration, training database
+│   ├── project/              # Project file management
+│   ├── schematic/            # Schematic generation (WIP)
+│   ├── trace/                # Trace drawing, flood-fill auto-trace, vectorization
+│   ├── version/              # Build version info
+│   └── via/                  # Via detection, training, cross-side matching
 ├── ui/
-│   ├── canvas/                # Image canvas: zoom, pan, overlays, grid
-│   ├── dialogs/               # Board spec editor, component dialogs
-│   ├── mainwindow/            # Main window, menus, panel switching
-│   ├── panels/                # Import, Components, Traces, Library, Logos, Properties
-│   ├── prefs/                 # User preferences
-│   └── widgets/               # Custom GTK3 widgets
+│   ├── canvas/               # Image canvas: zoom, pan, overlays, grid
+│   ├── dialogs/              # Board spec editor, component dialogs
+│   ├── mainwindow/           # Main window, menus, panel switching
+│   ├── panels/               # Import, Components, Traces, Library, Logos, Properties
+│   ├── prefs/                # User preferences, window geometry
+│   └── widgets/              # Custom GTK3 widgets
 └── pkg/
-    ├── colorutil/             # HSV/RGB conversions
-    └── geometry/              # Point, Rect, Polygon types
+    ├── colorutil/            # HSV/RGB conversions
+    ├── format/               # Output formatting utilities
+    ├── geometry/             # Point, Rect, Polygon types
+    └── util/                 # General utilities
 ```
 
 ## Dependencies
@@ -176,11 +200,13 @@ make install-deps-macos
 1. **Import images**: File > Import Front/Back Image (TIFF at 600+ DPI recommended)
 2. **Select board type**: Configure board spec for your bus standard
 3. **Detect contacts**: Sample a gold contact, then detect all edge contacts
-4. **Align**: Front/back registration using detected contacts
+4. **Align**: Front/back registration using detected contacts or via-based alignment
 5. **Detect vias**: Auto-detect or manually place through-hole vias
 6. **Identify components**: Detect ICs, OCR labels, assign parts from library
-7. **Draw traces**: Connect vias and connectors with polyline traces
-8. **Build netlist**: Nets auto-merge as traces connect elements; rename for signal names
+7. **Detect pins**: Auto-detect DIP pin positions from back image
+8. **Draw traces**: Connect vias and connectors with polyline traces, or use auto-trace
+9. **Build netlist**: Nets auto-merge as traces connect elements; rename for signal names
+10. **Export**: File > Export Netlist (KiCad or SPICE format)
 
 ## License
 

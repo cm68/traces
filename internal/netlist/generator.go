@@ -389,6 +389,138 @@ func (d *NetlistDump) ExportText(path string) error {
 	return os.WriteFile(path, []byte(d.FormatText()), 0644)
 }
 
+// FormatLogicText formats the dump with logic function context from the parts library.
+// Groups pins by gate/function within each component, showing the logic relationship.
+func (d *NetlistDump) FormatLogicText(
+	lib *component.ComponentLibrary,
+	compResolver func(compID string) (partNumber, pkg string),
+) string {
+	var sb strings.Builder
+
+	for _, comp := range d.Components {
+		partNum, pkg := compResolver(comp.ComponentID)
+		partDef := lib.GetByAlias(partNum, pkg)
+
+		// Header with part info
+		if partDef != nil && partDef.Description != "" {
+			sb.WriteString(fmt.Sprintf("=== %s (%s - %s) ===\n", comp.ComponentID, partNum, partDef.Description))
+		} else if partNum != "" {
+			sb.WriteString(fmt.Sprintf("=== %s (%s) ===\n", comp.ComponentID, partNum))
+		} else {
+			sb.WriteString(fmt.Sprintf("=== %s ===\n", comp.ComponentID))
+		}
+
+		if partDef == nil || !partDef.HasFunctions() {
+			// No logic functions — fall back to flat pin list
+			for _, pc := range comp.Pins {
+				formatPinConnection(&sb, &pc)
+			}
+			sb.WriteString("\n")
+			continue
+		}
+
+		// Build pin lookup for this component's connections
+		pinMap := make(map[string]*PinConnection)
+		for i := range comp.Pins {
+			pinMap[comp.Pins[i].Pin.Pin] = &comp.Pins[i]
+		}
+
+		// Group pins by function
+		emitted := make(map[string]bool)
+		for _, fn := range partDef.Functions {
+			header := fmt.Sprintf("  Gate %s (%s)", fn.Name, fn.Type)
+			if fn.Expression != "" {
+				header += ": " + fn.Expression
+			}
+			sb.WriteString(header + "\n")
+
+			// Emit input pins
+			for _, pinNum := range fn.Inputs {
+				key := fmt.Sprintf("%d", pinNum)
+				if pc, ok := pinMap[key]; ok {
+					formatPinConnection(&sb, pc)
+					emitted[key] = true
+				}
+			}
+			// Emit enable pins
+			for _, pinNum := range fn.Enables {
+				key := fmt.Sprintf("%d", pinNum)
+				if emitted[key] {
+					continue // shared enable, already printed
+				}
+				if pc, ok := pinMap[key]; ok {
+					formatPinConnection(&sb, pc)
+					emitted[key] = true
+				}
+			}
+			// Emit clock pins
+			for _, pinNum := range fn.Clocks {
+				key := fmt.Sprintf("%d", pinNum)
+				if emitted[key] {
+					continue
+				}
+				if pc, ok := pinMap[key]; ok {
+					formatPinConnection(&sb, pc)
+					emitted[key] = true
+				}
+			}
+			// Emit output pins
+			for _, pinNum := range fn.Outputs {
+				key := fmt.Sprintf("%d", pinNum)
+				if pc, ok := pinMap[key]; ok {
+					formatPinConnection(&sb, pc)
+					emitted[key] = true
+				}
+			}
+		}
+
+		// Power/unassigned pins
+		var powerPins []*PinConnection
+		for _, pc := range comp.Pins {
+			if !emitted[pc.Pin.Pin] {
+				powerPins = append(powerPins, &PinConnection{
+					Pin:        pc.Pin,
+					NetName:    pc.NetName,
+					ConnectsTo: pc.ConnectsTo,
+				})
+			}
+		}
+		if len(powerPins) > 0 {
+			sb.WriteString("  Power:\n")
+			for _, pc := range powerPins {
+				formatPinConnection(&sb, pc)
+			}
+		}
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// ExportLogicText writes the logic-aware dump to a text file.
+func (d *NetlistDump) ExportLogicText(
+	path string,
+	lib *component.ComponentLibrary,
+	compResolver func(compID string) (partNumber, pkg string),
+) error {
+	return os.WriteFile(path, []byte(d.FormatLogicText(lib, compResolver)), 0644)
+}
+
+func formatPinConnection(sb *strings.Builder, pc *PinConnection) {
+	pinLabel := pc.Pin.Pin
+	if pc.Pin.Signal != "" {
+		pinLabel += "(" + pc.Pin.Signal + ")"
+	}
+	if len(pc.ConnectsTo) == 0 {
+		sb.WriteString(fmt.Sprintf("    pin %-12s [%s] (no connections)\n", pinLabel, pc.NetName))
+		return
+	}
+	var others []string
+	for _, o := range pc.ConnectsTo {
+		others = append(others, o.String())
+	}
+	sb.WriteString(fmt.Sprintf("    pin %-12s [%s] -> %s\n", pinLabel, pc.NetName, strings.Join(others, ", ")))
+}
+
 // Statistics returns statistics about the netlist.
 type Statistics struct {
 	ComponentCount int

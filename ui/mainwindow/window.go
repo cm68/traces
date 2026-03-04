@@ -14,6 +14,7 @@ import (
 	"pcb-tracer/ui/canvas"
 	"pcb-tracer/ui/panels"
 	"pcb-tracer/ui/prefs"
+	"pcb-tracer/ui/schematic"
 
 	"github.com/gotk3/gotk3/gdk"
 	"github.com/gotk3/gotk3/glib"
@@ -290,6 +291,7 @@ func (mw *MainWindow) setupMenus() {
 		menuEntry{"Save Project As...", mw.onSaveProjectAs},
 		menuEntry{}, // separator
 		menuEntry{"Export Netlist...", mw.onExportNetlist},
+		menuEntry{"Generate Schematic...", mw.onGenerateSchematic},
 		menuEntry{}, // separator
 		menuEntry{"Quit", func() { mw.win.Close() }},
 	)
@@ -832,6 +834,21 @@ func (mw *MainWindow) onExportNetlist() {
 			mw.updateStatus(fmt.Sprintf("Netlist exported to %s (%d components)", path, len(dump.Components)))
 		}
 	}
+}
+
+func (mw *MainWindow) onGenerateSchematic() {
+	if mw.state.FeaturesLayer == nil || mw.state.FeaturesLayer.NetCount() == 0 {
+		mw.updateStatus("No nets to generate schematic from")
+		return
+	}
+
+	schWin, err := schematic.NewSchematicWindow(mw.state)
+	if err != nil {
+		mw.updateStatus(fmt.Sprintf("Schematic error: %v", err))
+		return
+	}
+	schWin.Show()
+	mw.updateStatus("Schematic generated")
 }
 
 func (mw *MainWindow) onZoomIn() {

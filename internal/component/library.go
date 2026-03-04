@@ -19,13 +19,120 @@ type PartPin struct {
 	Direction connector.SignalDirection `json:"direction"`
 }
 
+// GateType identifies the logic function of a gate or functional unit.
+type GateType string
+
+const (
+	GateNOT      GateType = "NOT"
+	GateAND      GateType = "AND"
+	GateNAND     GateType = "NAND"
+	GateOR       GateType = "OR"
+	GateNOR      GateType = "NOR"
+	GateXOR      GateType = "XOR"
+	GateBUFFER   GateType = "BUFFER"
+	GateTRISTATE GateType = "TRISTATE" // buffer with enable
+	GateFLIPFLOP GateType = "FLIPFLOP" // D-FF, JK-FF, etc.
+	GateLATCH    GateType = "LATCH"
+	GateDECODER  GateType = "DECODER"
+	GateMUX      GateType = "MUX"
+	GateCOUNTER  GateType = "COUNTER"
+	GateSHIFTREG GateType = "SHIFTREG"
+	GateRAM      GateType = "RAM"
+	GateBLOCK    GateType = "BLOCK" // generic complex IC
+)
+
+// LogicFunction defines one logical unit within a package.
+// A 74LS00 has 4 of these (one per NAND gate).
+// A 74LS244 has 8 tri-state buffers in 2 groups.
+type LogicFunction struct {
+	Name       string   `json:"name"`              // gate designator: "1", "2", "A", etc.
+	Type       GateType `json:"type"`              // NAND, NOT, TRISTATE, etc.
+	Inputs     []int    `json:"inputs"`            // input pin numbers
+	Outputs    []int    `json:"outputs"`           // output pin numbers
+	Enables    []int    `json:"enables,omitempty"` // enable/control pins
+	Clocks     []int    `json:"clocks,omitempty"`  // clock pins (for flip-flops)
+	Expression string   `json:"expr,omitempty"`    // e.g., "Y = ~(A & B)"
+}
+
 // PartDefinition defines a component part template (e.g., 74LS244 / DIP-20).
 type PartDefinition struct {
-	PartNumber string    `json:"part_number"`
-	Package    string    `json:"package"`
-	PinCount   int       `json:"pin_count"`
-	Pins       []PartPin `json:"pins"`
-	Aliases    []string  `json:"aliases,omitempty"` // Alternate part numbers that map to this part
+	PartNumber  string           `json:"part_number"`
+	Package     string           `json:"package"`
+	PinCount    int              `json:"pin_count"`
+	Pins        []PartPin        `json:"pins"`
+	Aliases     []string         `json:"aliases,omitempty"`     // Alternate part numbers that map to this part
+	Description string           `json:"description,omitempty"` // e.g., "Quad 2-input NAND gate"
+	Functions   []LogicFunction  `json:"functions,omitempty"`   // internal logic units
+}
+
+// HasFunctions returns true if this part has logic function definitions.
+func (pd *PartDefinition) HasFunctions() bool {
+	return len(pd.Functions) > 0
+}
+
+// FunctionForPin returns the logic function that a given pin belongs to, or nil.
+func (pd *PartDefinition) FunctionForPin(pinNum int) *LogicFunction {
+	for i := range pd.Functions {
+		f := &pd.Functions[i]
+		for _, p := range f.Inputs {
+			if p == pinNum {
+				return f
+			}
+		}
+		for _, p := range f.Outputs {
+			if p == pinNum {
+				return f
+			}
+		}
+		for _, p := range f.Enables {
+			if p == pinNum {
+				return f
+			}
+		}
+		for _, p := range f.Clocks {
+			if p == pinNum {
+				return f
+			}
+		}
+	}
+	return nil
+}
+
+// PowerPins returns pins not assigned to any logic function (typically VCC/GND).
+func (pd *PartDefinition) PowerPins() []PartPin {
+	var power []PartPin
+	for _, pin := range pd.Pins {
+		if pd.FunctionForPin(pin.Number) == nil {
+			power = append(power, pin)
+		}
+	}
+	return power
+}
+
+// DeriveOutputName computes the output net name for a gate given the input signal name.
+// For inverters: FOO → /FOO, /FOO → FOO (double inversion cancels).
+// For buffers/tri-state: FOO → bFOO.
+// For NAND/NOR/AND/OR/XOR with a single identifiable input signal: returns "".
+// Returns "" if no derivation applies.
+func DeriveOutputName(gateType GateType, inputName string) string {
+	switch gateType {
+	case GateNOT:
+		// Inversion: FOO → /FOO, /FOO → FOO
+		if len(inputName) > 1 && inputName[0] == '/' {
+			return inputName[1:] // double inversion cancels
+		}
+		return "/" + inputName
+	case GateBUFFER, GateTRISTATE:
+		return "b" + inputName
+	case GateNAND:
+		// Single-input NAND is an inverter
+		return "/" + inputName
+	case GateNOR:
+		// Single-input NOR is an inverter
+		return "/" + inputName
+	default:
+		return ""
+	}
 }
 
 // Key returns the display/lookup key for this part definition.

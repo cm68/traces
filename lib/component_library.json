@@ -75,6 +75,141 @@
           "name": "VCC",
           "direction": "Power"
         }
+      ],
+      "description": "12-circuit dual terminator network",
+      "functions": [
+        {
+          "name": "1",
+          "type": "BLOCK",
+          "inputs": [
+            1
+          ],
+          "outputs": [
+            1
+          ],
+          "expr": "Terminator"
+        },
+        {
+          "name": "2",
+          "type": "BLOCK",
+          "inputs": [
+            2
+          ],
+          "outputs": [
+            2
+          ],
+          "expr": "Terminator"
+        },
+        {
+          "name": "3",
+          "type": "BLOCK",
+          "inputs": [
+            3
+          ],
+          "outputs": [
+            3
+          ],
+          "expr": "Terminator"
+        },
+        {
+          "name": "4",
+          "type": "BLOCK",
+          "inputs": [
+            4
+          ],
+          "outputs": [
+            4
+          ],
+          "expr": "Terminator"
+        },
+        {
+          "name": "5",
+          "type": "BLOCK",
+          "inputs": [
+            5
+          ],
+          "outputs": [
+            5
+          ],
+          "expr": "Terminator"
+        },
+        {
+          "name": "6",
+          "type": "BLOCK",
+          "inputs": [
+            6
+          ],
+          "outputs": [
+            6
+          ],
+          "expr": "Terminator"
+        },
+        {
+          "name": "8",
+          "type": "BLOCK",
+          "inputs": [
+            8
+          ],
+          "outputs": [
+            8
+          ],
+          "expr": "Terminator"
+        },
+        {
+          "name": "9",
+          "type": "BLOCK",
+          "inputs": [
+            9
+          ],
+          "outputs": [
+            9
+          ],
+          "expr": "Terminator"
+        },
+        {
+          "name": "10",
+          "type": "BLOCK",
+          "inputs": [
+            10
+          ],
+          "outputs": [
+            10
+          ],
+          "expr": "Terminator"
+        },
+        {
+          "name": "11",
+          "type": "BLOCK",
+          "inputs": [
+            11
+          ],
+          "outputs": [
+            11
+          ],
+          "expr": "Terminator"
+        },
+        {
+          "name": "12",
+          "type": "BLOCK",
+          "inputs": [
+            12
+          ],
+          "outputs": [
+            12
+          ],
+          "expr": "Terminator"
+        },
+        {
+          "name": "13",
+          "type": "BLOCK",
+          "inputs": [
+            13
+          ],
+          "outputs": [
+            13
+          ],
+          "expr": "Terminator"
+        }
       ]
     },
     {
@@ -151,6 +286,57 @@
           "number": 14,
           "name": "VCC",
           "direction": "Power"
+        }
+      ],
+      "description": "Quad 2-input AND gate",
+      "functions": [
+        {
+          "name": "1",
+          "type": "AND",
+          "inputs": [
+            1,
+            2
+          ],
+          "outputs": [
+            3
+          ],
+          "expr": "Y = A & B"
+        },
+        {
+          "name": "2",
+          "type": "AND",
+          "inputs": [
+            4,
+            5
+          ],
+          "outputs": [
+            6
+          ],
+          "expr": "Y = A & B"
+        },
+        {
+          "name": "3",
+          "type": "AND",
+          "inputs": [
+            9,
+            10
+          ],
+          "outputs": [
+            8
+          ],
+          "expr": "Y = A & B"
+        },
+        {
+          "name": "4",
+          "type": "AND",
+          "inputs": [
+            12,
+            13
+          ],
+          "outputs": [
+            11
+          ],
+          "expr": "Y = A & B"
         }
       ]
     },
@@ -234,6 +420,75 @@
         "74LS14",
         "74HC14",
         "SN7414N"
+      ],
+      "description": "Hex Schmitt-trigger inverter",
+      "functions": [
+        {
+          "name": "1",
+          "type": "NOT",
+          "inputs": [
+            1
+          ],
+          "outputs": [
+            2
+          ],
+          "expr": "Y = ~A"
+        },
+        {
+          "name": "2",
+          "type": "NOT",
+          "inputs": [
+            3
+          ],
+          "outputs": [
+            4
+          ],
+          "expr": "Y = ~A"
+        },
+        {
+          "name": "3",
+          "type": "NOT",
+          "inputs": [
+            5
+          ],
+          "outputs": [
+            6
+          ],
+          "expr": "Y = ~A"
+        },
+        {
+          "name": "4",
+          "type": "NOT",
+          "inputs": [
+            9
+          ],
+          "outputs": [
+            8
+          ],
+          "expr": "Y = ~A"
+        },
+        {
+          "name": "5",
+          "type": "NOT",
+          "inputs": [
+            11
+          ],
+          "outputs": [
+            10
+          ],
+          "expr": "Y = ~A"
+        },
+        {
+          "name": "6",
+          "type": "NOT",
+          "inputs": [
+            13
+          ],
+          "outputs": [
+            12
+          ],
+          "expr": "Y = ~A"
+        }
       ]
     },
     {
@@ -310,6 +565,57 @@
           "number": 14,
           "name": "VCC",
           "direction": "Power"
+        }
+      ],
+      "description": "Quad 2-input NAND buffer (open collector)",
+      "functions": [
+        {
+          "name": "1",
+          "type": "NAND",
+          "inputs": [
+            1,
+            2
+          ],
+          "outputs": [
+            3
+          ],
+          "expr": "Y = ~(A & B)"
+        },
+        {
+          "name": "2",
+          "type": "NAND",
+          "inputs": [
+            4,
+            5
+          ],
+          "outputs": [
+            6
+          ],
+          "expr": "Y = ~(A & B)"
+        },
+        {
+          "name": "3",
+          "type": "NAND",
+          "inputs": [
+            9,
+            10
+          ],
+          "outputs": [
+            8
+          ],
+          "expr": "Y = ~(A & B)"
+        },
+        {
+          "name": "4",
+          "type": "NAND",
+          "inputs": [
+            12,
+            13
+          ],
+          "outputs": [
+            11
+          ],
+          "expr": "Y = ~(A & B)"
         }
       ]
     },
@@ -388,6 +694,57 @@
           "name": "VCC",
           "direction": "Power"
         }
+      ],
+      "description": "Quad 2-input NAND gate",
+      "functions": [
+        {
+          "name": "1",
+          "type": "NAND",
+          "inputs": [
+            1,
+            2
+          ],
+          "outputs": [
+            3
+          ],
+          "expr": "Y = ~(A & B)"
+        },
+        {
+          "name": "2",
+          "type": "NAND",
+          "inputs": [
+            4,
+            5
+          ],
+          "outputs": [
+            6
+          ],
+          "expr": "Y = ~(A & B)"
+        },
+        {
+          "name": "3",
+          "type": "NAND",
+          "inputs": [
+            9,
+            10
+          ],
+          "outputs": [
+            8
+          ],
+          "expr": "Y = ~(A & B)"
+        },
+        {
+          "name": "4",
+          "type": "NAND",
+          "inputs": [
+            12,
+            13
+          ],
+          "outputs": [
+            11
+          ],
+          "expr": "Y = ~(A & B)"
+        }
       ]
     },
     {
@@ -464,6 +821,57 @@
           "number": 14,
           "name": "VCC",
           "direction": "Power"
+        }
+      ],
+      "description": "Quad 2-input NOR gate",
+      "functions": [
+        {
+          "name": "1",
+          "type": "NOR",
+          "inputs": [
+            2,
+            3
+          ],
+          "outputs": [
+            1
+          ],
+          "expr": "Y = ~(A | B)"
+        },
+        {
+          "name": "2",
+          "type": "NOR",
+          "inputs": [
+            5,
+            6
+          ],
+          "outputs": [
+            4
+          ],
+          "expr": "Y = ~(A | B)"
+        },
+        {
+          "name": "3",
+          "type": "NOR",
+          "inputs": [
+            8,
+            9
+          ],
+          "outputs": [
+            10
+          ],
+          "expr": "Y = ~(A | B)"
+        },
+        {
+          "name": "4",
+          "type": "NOR",
+          "inputs": [
+            11,
+            12
+          ],
+          "outputs": [
+            13
+          ],
+          "expr": "Y = ~(A | B)"
         }
       ]
     },
@@ -542,6 +950,75 @@
           "name": "VCC",
           "direction": "Power"
         }
+      ],
+      "description": "Hex inverter",
+      "functions": [
+        {
+          "name": "1",
+          "type": "NOT",
+          "inputs": [
+            1
+          ],
+          "outputs": [
+            2
+          ],
+          "expr": "Y = ~A"
+        },
+        {
+          "name": "2",
+          "type": "NOT",
+          "inputs": [
+            3
+          ],
+          "outputs": [
+            4
+          ],
+          "expr": "Y = ~A"
+        },
+        {
+          "name": "3",
+          "type": "NOT",
+          "inputs": [
+            5
+          ],
+          "outputs": [
+            6
+          ],
+          "expr": "Y = ~A"
+        },
+        {
+          "name": "4",
+          "type": "NOT",
+          "inputs": [
+            9
+          ],
+          "outputs": [
+            8
+          ],
+          "expr": "Y = ~A"
+        },
+        {
+          "name": "5",
+          "type": "NOT",
+          "inputs": [
+            11
+          ],
+          "outputs": [
+            10
+          ],
+          "expr": "Y = ~A"
+        },
+        {
+          "name": "6",
+          "type": "NOT",
+          "inputs": [
+            13
+          ],
+          "outputs": [
+            12
+          ],
+          "expr": "Y = ~A"
+        }
       ]
     },
     {
@@ -619,6 +1096,57 @@
           "name": "VCC",
           "direction": "Power"
         }
+      ],
+      "description": "Quad 2-input AND gate",
+      "functions": [
+        {
+          "name": "1",
+          "type": "AND",
+          "inputs": [
+            1,
+            2
+          ],
+          "outputs": [
+            3
+          ],
+          "expr": "Y = A & B"
+        },
+        {
+          "name": "2",
+          "type": "AND",
+          "inputs": [
+            4,
+            5
+          ],
+          "outputs": [
+            6
+          ],
+          "expr": "Y = A & B"
+        },
+        {
+          "name": "3",
+          "type": "AND",
+          "inputs": [
+            9,
+            10
+          ],
+          "outputs": [
+            8
+          ],
+          "expr": "Y = A & B"
+        },
+        {
+          "name": "4",
+          "type": "AND",
+          "inputs": [
+            12,
+            13
+          ],
+          "outputs": [
+            11
+          ],
+          "expr": "Y = A & B"
+        }
       ]
     },
     {
@@ -695,6 +1223,48 @@
           "number": 14,
           "name": "VCC",
           "direction": "Power"
+        }
+      ],
+      "description": "Triple 3-input NAND gate",
+      "functions": [
+        {
+          "name": "1",
+          "type": "NAND",
+          "inputs": [
+            1,
+            2,
+            13
+          ],
+          "outputs": [
+            12
+          ],
+          "expr": "Y = ~(A & B & C)"
+        },
+        {
+          "name": "2",
+          "type": "NAND",
+          "inputs": [
+            3,
+            4,
+            5
+          ],
+          "outputs": [
+            6
+          ],
+          "expr": "Y = ~(A & B & C)"
+        },
+        {
+          "name": "3",
+          "type": "NAND",
+          "inputs": [
+            9,
+            10,
+            11
+          ],
+          "outputs": [
+            8
+          ],
+          "expr": "Y = ~(A & B & C)"
         }
       ]
     },
@@ -788,6 +1358,39 @@
         "54LS123",
         "74123",
         "SN74LS123N"
+      ],
+      "description": "Dual retriggerable monostable multivibrator",
+      "functions": [
+        {
+          "name": "1",
+          "type": "BLOCK",
+          "inputs": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "outputs": [
+            13,
+            4
+          ],
+          "expr": "Monostable: /Q, Q"
+        },
+        {
+          "name": "2",
+          "type": "BLOCK",
+          "inputs": [
+            9,
+            10,
+            11,
+            12
+          ],
+          "outputs": [
+            5,
+            12
+          ],
+          "expr": "Monostable: /Q, Q"
+        }
       ]
     },
     {
@@ -874,6 +1477,34 @@
           "number": 16,
           "name": "VCC",
           "direction": "Power"
+        }
+      ],
+      "description": "3-to-8 line decoder/demultiplexer",
+      "functions": [
+        {
+          "name": "1",
+          "type": "DECODER",
+          "inputs": [
+            1,
+            2,
+            3
+          ],
+          "outputs": [
+            15,
+            14,
+            13,
+            12,
+            11,
+            10,
+            9,
+            7
+          ],
+          "enables": [
+            4,
+            5,
+            6
+          ],
+          "expr": "/Y0-/Y7 = decode(A,B,C) when /G2A & /G2B & G1"
         }
       ]
     },
@@ -962,6 +1593,45 @@
           "name": "VCC",
           "direction": "Power"
         }
+      ],
+      "description": "Dual 2-to-4 line decoder/demultiplexer",
+      "functions": [
+        {
+          "name": "1",
+          "type": "DECODER",
+          "inputs": [
+            2,
+            3
+          ],
+          "outputs": [
+            4,
+            5,
+            6,
+            7
+          ],
+          "enables": [
+            1
+          ],
+          "expr": "/Y0-/Y3 = decode(A,B) when /G"
+        },
+        {
+          "name": "2",
+          "type": "DECODER",
+          "inputs": [
+            14,
+            13
+          ],
+          "outputs": [
+            12,
+            11,
+            10,
+            9
+          ],
+          "enables": [
+            15
+          ],
+          "expr": "/Y0-/Y3 = decode(A,B) when /G"
+        }
       ]
     },
     {
@@ -1048,6 +1718,43 @@
           "number": 16,
           "name": "VCC",
           "direction": "Power"
+        }
+      ],
+      "description": "Dual 4-to-1 data selector/multiplexer",
+      "functions": [
+        {
+          "name": "1",
+          "type": "MUX",
+          "inputs": [
+            6,
+            5,
+            4,
+            3
+          ],
+          "outputs": [
+            7
+          ],
+          "enables": [
+            1
+          ],
+          "expr": "Y = Dn selected by S1,S0"
+        },
+        {
+          "name": "2",
+          "type": "MUX",
+          "inputs": [
+            10,
+            11,
+            12,
+            13
+          ],
+          "outputs": [
+            9
+          ],
+          "enables": [
+            15
+          ],
+          "expr": "Y = Dn selected by S1,S0"
         }
       ]
     },
@@ -1136,6 +1843,35 @@
           "name": "VCC",
           "direction": "Power"
         }
+      ],
+      "description": "4-bit parallel-access shift register",
+      "functions": [
+        {
+          "name": "1",
+          "type": "SHIFTREG",
+          "inputs": [
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            9
+          ],
+          "outputs": [
+            10,
+            11,
+            12,
+            13
+          ],
+          "clocks": [
+            8
+          ],
+          "enables": [
+            1
+          ],
+          "expr": "Q0-Q3, shift/load"
+        }
       ]
     },
     {
@@ -1212,6 +1948,31 @@
           "number": 14,
           "name": "VCC",
           "direction": "Power"
+        }
+      ],
+      "description": "Presettable 4-bit binary counter",
+      "functions": [
+        {
+          "name": "1",
+          "type": "COUNTER",
+          "inputs": [
+            2,
+            3,
+            6,
+            7,
+            9,
+            10
+          ],
+          "outputs": [
+            8,
+            11,
+            12,
+            13
+          ],
+          "clocks": [
+            1
+          ],
+          "expr": "QA-QD, preset/clear"
         }
       ]
     },
@@ -1320,6 +2081,121 @@
           "name": "VCC",
           "direction": "Power"
         }
+      ],
+      "description": "Octal buffer/line driver with inverted tri-state outputs",
+      "functions": [
+        {
+          "name": "1A1",
+          "type": "TRISTATE",
+          "inputs": [
+            2
+          ],
+          "outputs": [
+            18
+          ],
+          "enables": [
+            1
+          ],
+          "expr": "Y = ~A when /G"
+        },
+        {
+          "name": "1A2",
+          "type": "TRISTATE",
+          "inputs": [
+            4
+          ],
+          "outputs": [
+            16
+          ],
+          "enables": [
+            1
+          ],
+          "expr": "Y = ~A when /G"
+        },
+        {
+          "name": "1A3",
+          "type": "TRISTATE",
+          "inputs": [
+            6
+          ],
+          "outputs": [
+            14
+          ],
+          "enables": [
+            1
+          ],
+          "expr": "Y = ~A when /G"
+        },
+        {
+          "name": "1A4",
+          "type": "TRISTATE",
+          "inputs": [
+            8
+          ],
+          "outputs": [
+            12
+          ],
+          "enables": [
+            1
+          ],
+          "expr": "Y = ~A when /G"
+        },
+        {
+          "name": "2A1",
+          "type": "TRISTATE",
+          "inputs": [
+            11
+          ],
+          "outputs": [
+            9
+          ],
+          "enables": [
+            19
+          ],
+          "expr": "Y = ~A when /G"
+        },
+        {
+          "name": "2A2",
+          "type": "TRISTATE",
+          "inputs": [
+            13
+          ],
+          "outputs": [
+            7
+          ],
+          "enables": [
+            19
+          ],
+          "expr": "Y = ~A when /G"
+        },
+        {
+          "name": "2A3",
+          "type": "TRISTATE",
+          "inputs": [
+            15
+          ],
+          "outputs": [
+            5
+          ],
+          "enables": [
+            19
+          ],
+          "expr": "Y = ~A when /G"
+        },
+        {
+          "name": "2A4",
+          "type": "TRISTATE",
+          "inputs": [
+            17
+          ],
+          "outputs": [
+            3
+          ],
+          "enables": [
+            19
+          ],
+          "expr": "Y = ~A when /G"
+        }
       ]
     },
     {
@@ -1426,6 +2302,121 @@
           "number": 20,
           "name": "VCC",
           "direction": "Power"
+        }
+      ],
+      "description": "Octal buffer/line driver with tri-state outputs",
+      "functions": [
+        {
+          "name": "1A1",
+          "type": "TRISTATE",
+          "inputs": [
+            2
+          ],
+          "outputs": [
+            18
+          ],
+          "enables": [
+            1
+          ],
+          "expr": "Y = A when /G"
+        },
+        {
+          "name": "1A2",
+          "type": "TRISTATE",
+          "inputs": [
+            4
+          ],
+          "outputs": [
+            16
+          ],
+          "enables": [
+            1
+          ],
+          "expr": "Y = A when /G"
+        },
+        {
+          "name": "1A3",
+          "type": "TRISTATE",
+          "inputs": [
+            6
+          ],
+          "outputs": [
+            14
+          ],
+          "enables": [
+            1
+          ],
+          "expr": "Y = A when /G"
+        },
+        {
+          "name": "1A4",
+          "type": "TRISTATE",
+          "inputs": [
+            8
+          ],
+          "outputs": [
+            12
+          ],
+          "enables": [
+            1
+          ],
+          "expr": "Y = A when /G"
+        },
+        {
+          "name": "2A1",
+          "type": "TRISTATE",
+          "inputs": [
+            11
+          ],
+          "outputs": [
+            9
+          ],
+          "enables": [
+            19
+          ],
+          "expr": "Y = A when /G"
+        },
+        {
+          "name": "2A2",
+          "type": "TRISTATE",
+          "inputs": [
+            13
+          ],
+          "outputs": [
+            7
+          ],
+          "enables": [
+            19
+          ],
+          "expr": "Y = A when /G"
+        },
+        {
+          "name": "2A3",
+          "type": "TRISTATE",
+          "inputs": [
+            15
+          ],
+          "outputs": [
+            5
+          ],
+          "enables": [
+            19
+          ],
+          "expr": "Y = A when /G"
+        },
+        {
+          "name": "2A4",
+          "type": "TRISTATE",
+          "inputs": [
+            17
+          ],
+          "outputs": [
+            3
+          ],
+          "enables": [
+            19
+          ],
+          "expr": "Y = A when /G"
         }
       ]
     },
@@ -1534,6 +2525,129 @@
           "name": "VCC",
           "direction": "Power"
         }
+      ],
+      "description": "Octal bus transceiver with tri-state outputs",
+      "functions": [
+        {
+          "name": "1",
+          "type": "TRISTATE",
+          "inputs": [
+            2
+          ],
+          "outputs": [
+            18
+          ],
+          "enables": [
+            1,
+            19
+          ],
+          "expr": "B = A or A = B, direction by DIR, /OE"
+        },
+        {
+          "name": "2",
+          "type": "TRISTATE",
+          "inputs": [
+            3
+          ],
+          "outputs": [
+            17
+          ],
+          "enables": [
+            1,
+            19
+          ],
+          "expr": "B = A or A = B"
+        },
+        {
+          "name": "3",
+          "type": "TRISTATE",
+          "inputs": [
+            4
+          ],
+          "outputs": [
+            16
+          ],
+          "enables": [
+            1,
+            19
+          ],
+          "expr": "B = A or A = B"
+        },
+        {
+          "name": "4",
+          "type": "TRISTATE",
+          "inputs": [
+            5
+          ],
+          "outputs": [
+            15
+          ],
+          "enables": [
+            1,
+            19
+          ],
+          "expr": "B = A or A = B"
+        },
+        {
+          "name": "5",
+          "type": "TRISTATE",
+          "inputs": [
+            6
+          ],
+          "outputs": [
+            14
+          ],
+          "enables": [
+            1,
+            19
+          ],
+          "expr": "B = A or A = B"
+        },
+        {
+          "name": "6",
+          "type": "TRISTATE",
+          "inputs": [
+            7
+          ],
+          "outputs": [
+            13
+          ],
+          "enables": [
+            1,
+            19
+          ],
+          "expr": "B = A or A = B"
+        },
+        {
+          "name": "7",
+          "type": "TRISTATE",
+          "inputs": [
+            8
+          ],
+          "outputs": [
+            12
+          ],
+          "enables": [
+            1,
+            19
+          ],
+          "expr": "B = A or A = B"
+        },
+        {
+          "name": "8",
+          "type": "TRISTATE",
+          "inputs": [
+            9
+          ],
+          "outputs": [
+            11
+          ],
+          "enables": [
+            1,
+            19
+          ],
+          "expr": "B = A or A = B"
+        }
       ]
     },
     {
@@ -1641,6 +2755,145 @@
           "name": "VCC",
           "direction": "Power"
         }
+      ],
+      "description": "Octal D-type flip-flop with clear",
+      "functions": [
+        {
+          "name": "1",
+          "type": "FLIPFLOP",
+          "inputs": [
+            3
+          ],
+          "outputs": [
+            2
+          ],
+          "clocks": [
+            11
+          ],
+          "enables": [
+            1
+          ],
+          "expr": "Q = D on rising CLK, /CLR async"
+        },
+        {
+          "name": "2",
+          "type": "FLIPFLOP",
+          "inputs": [
+            4
+          ],
+          "outputs": [
+            5
+          ],
+          "clocks": [
+            11
+          ],
+          "enables": [
+            1
+          ],
+          "expr": "Q = D on rising CLK, /CLR async"
+        },
+        {
+          "name": "3",
+          "type": "FLIPFLOP",
+          "inputs": [
+            7
+          ],
+          "outputs": [
+            6
+          ],
+          "clocks": [
+            11
+          ],
+          "enables": [
+            1
+          ],
+          "expr": "Q = D on rising CLK, /CLR async"
+        },
+        {
+          "name": "4",
+          "type": "FLIPFLOP",
+          "inputs": [
+            8
+          ],
+          "outputs": [
+            9
+          ],
+          "clocks": [
+            11
+          ],
+          "enables": [
+            1
+          ],
+          "expr": "Q = D on rising CLK, /CLR async"
+        },
+        {
+          "name": "5",
+          "type": "FLIPFLOP",
+          "inputs": [
+            13
+          ],
+          "outputs": [
+            12
+          ],
+          "clocks": [
+            11
+          ],
+          "enables": [
+            1
+          ],
+          "expr": "Q = D on rising CLK, /CLR async"
+        },
+        {
+          "name": "6",
+          "type": "FLIPFLOP",
+          "inputs": [
+            14
+          ],
+          "outputs": [
+            15
+          ],
+          "clocks": [
+            11
+          ],
+          "enables": [
+            1
+          ],
+          "expr": "Q = D on rising CLK, /CLR async"
+        },
+        {
+          "name": "7",
+          "type": "FLIPFLOP",
+          "inputs": [
+            17
+          ],
+          "outputs": [
+            16
+          ],
+          "clocks": [
+            11
+          ],
+          "enables": [
+            1
+          ],
+          "expr": "Q = D on rising CLK, /CLR async"
+        },
+        {
+          "name": "8",
+          "type": "FLIPFLOP",
+          "inputs": [
+            18
+          ],
+          "outputs": [
+            19
+          ],
+          "clocks": [
+            11
+          ],
+          "enables": [
+            1
+          ],
+          "expr": "Q = D on rising CLK, /CLR async"
+        }
       ]
     },
     {
@@ -1717,6 +2970,57 @@
           "number": 14,
           "name": "VCC",
           "direction": "Power"
+        }
+      ],
+      "description": "Quad 2-input OR gate",
+      "functions": [
+        {
+          "name": "1",
+          "type": "OR",
+          "inputs": [
+            1,
+            2
+          ],
+          "outputs": [
+            3
+          ],
+          "expr": "Y = A | B"
+        },
+        {
+          "name": "2",
+          "type": "OR",
+          "inputs": [
+            4,
+            5
+          ],
+          "outputs": [
+            6
+          ],
+          "expr": "Y = A | B"
+        },
+        {
+          "name": "3",
+          "type": "OR",
+          "inputs": [
+            9,
+            10
+          ],
+          "outputs": [
+            8
+          ],
+          "expr": "Y = A | B"
+        },
+        {
+          "name": "4",
+          "type": "OR",
+          "inputs": [
+            12,
+            13
+          ],
+          "outputs": [
+            11
+          ],
+          "expr": "Y = A | B"
         }
       ]
     },
@@ -1829,6 +3133,129 @@
       "aliases": [
         "74LS373N",
         "SN74LS373N"
+      ],
+      "description": "Octal transparent latch with tri-state outputs",
+      "functions": [
+        {
+          "name": "1",
+          "type": "LATCH",
+          "inputs": [
+            3
+          ],
+          "outputs": [
+            2
+          ],
+          "enables": [
+            1,
+            11
+          ],
+          "expr": "Q = D when LE high, /OE"
+        },
+        {
+          "name": "2",
+          "type": "LATCH",
+          "inputs": [
+            4
+          ],
+          "outputs": [
+            5
+          ],
+          "enables": [
+            1,
+            11
+          ],
+          "expr": "Q = D when LE high, /OE"
+        },
+        {
+          "name": "3",
+          "type": "LATCH",
+          "inputs": [
+            7
+          ],
+          "outputs": [
+            6
+          ],
+          "enables": [
+            1,
+            11
+          ],
+          "expr": "Q = D when LE high, /OE"
+        },
+        {
+          "name": "4",
+          "type": "LATCH",
+          "inputs": [
+            8
+          ],
+          "outputs": [
+            9
+          ],
+          "enables": [
+            1,
+            11
+          ],
+          "expr": "Q = D when LE high, /OE"
+        },
+        {
+          "name": "5",
+          "type": "LATCH",
+          "inputs": [
+            13
+          ],
+          "outputs": [
+            12
+          ],
+          "enables": [
+            1,
+            11
+          ],
+          "expr": "Q = D when LE high, /OE"
+        },
+        {
+          "name": "6",
+          "type": "LATCH",
+          "inputs": [
+            14
+          ],
+          "outputs": [
+            15
+          ],
+          "enables": [
+            1,
+            11
+          ],
+          "expr": "Q = D when LE high, /OE"
+        },
+        {
+          "name": "7",
+          "type": "LATCH",
+          "inputs": [
+            17
+          ],
+          "outputs": [
+            16
+          ],
+          "enables": [
+            1,
+            11
+          ],
+          "expr": "Q = D when LE high, /OE"
+        },
+        {
+          "name": "8",
+          "type": "LATCH",
+          "inputs": [
+            18
+          ],
+          "outputs": [
+            19
+          ],
+          "enables": [
+            1,
+            11
+          ],
+          "expr": "Q = D when LE high, /OE"
+        }
       ]
     },
     {
@@ -1905,6 +3332,47 @@
           "number": 14,
           "name": "VCC",
           "direction": "Power"
+        }
+      ],
+      "description": "Dual D-type positive-edge-triggered flip-flop",
+      "functions": [
+        {
+          "name": "1",
+          "type": "FLIPFLOP",
+          "inputs": [
+            2
+          ],
+          "outputs": [
+            5,
+            6
+          ],
+          "clocks": [
+            3
+          ],
+          "enables": [
+            1,
+            4
+          ],
+          "expr": "Q,/Q = D on rising CLK, /PRE,/CLR async"
+        },
+        {
+          "name": "2",
+          "type": "FLIPFLOP",
+          "inputs": [
+            12
+          ],
+          "outputs": [
+            9,
+            8
+          ],
+          "clocks": [
+            11
+          ],
+          "enables": [
+            13,
+            10
+          ],
+          "expr": "Q,/Q = D on rising CLK, /PRE,/CLR async"
         }
       ]
     },
@@ -2013,6 +3481,39 @@
           "name": "VCC",
           "direction": "Power"
         }
+      ],
+      "description": "8-bit identity comparator",
+      "functions": [
+        {
+          "name": "1",
+          "type": "BLOCK",
+          "inputs": [
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18
+          ],
+          "outputs": [
+            1,
+            19
+          ],
+          "enables": [
+            10
+          ],
+          "expr": "P=Q identity compare, /OE"
+        }
       ]
     },
     {
@@ -2119,6 +3620,129 @@
           "number": 20,
           "name": "VCC",
           "direction": "Power"
+        }
+      ],
+      "description": "Octal tri-state latch",
+      "functions": [
+        {
+          "name": "1",
+          "type": "LATCH",
+          "inputs": [
+            3
+          ],
+          "outputs": [
+            2
+          ],
+          "enables": [
+            1,
+            19
+          ],
+          "expr": "Q = D when STB, /OE"
+        },
+        {
+          "name": "2",
+          "type": "LATCH",
+          "inputs": [
+            4
+          ],
+          "outputs": [
+            5
+          ],
+          "enables": [
+            1,
+            19
+          ],
+          "expr": "Q = D when STB, /OE"
+        },
+        {
+          "name": "3",
+          "type": "LATCH",
+          "inputs": [
+            7
+          ],
+          "outputs": [
+            6
+          ],
+          "enables": [
+            1,
+            19
+          ],
+          "expr": "Q = D when STB, /OE"
+        },
+        {
+          "name": "4",
+          "type": "LATCH",
+          "inputs": [
+            8
+          ],
+          "outputs": [
+            9
+          ],
+          "enables": [
+            1,
+            19
+          ],
+          "expr": "Q = D when STB, /OE"
+        },
+        {
+          "name": "5",
+          "type": "LATCH",
+          "inputs": [
+            13
+          ],
+          "outputs": [
+            12
+          ],
+          "enables": [
+            1,
+            19
+          ],
+          "expr": "Q = D when STB, /OE"
+        },
+        {
+          "name": "6",
+          "type": "LATCH",
+          "inputs": [
+            14
+          ],
+          "outputs": [
+            15
+          ],
+          "enables": [
+            1,
+            19
+          ],
+          "expr": "Q = D when STB, /OE"
+        },
+        {
+          "name": "7",
+          "type": "LATCH",
+          "inputs": [
+            17
+          ],
+          "outputs": [
+            16
+          ],
+          "enables": [
+            1,
+            19
+          ],
+          "expr": "Q = D when STB, /OE"
+        },
+        {
+          "name": "8",
+          "type": "LATCH",
+          "inputs": [
+            18
+          ],
+          "outputs": [
+            11
+          ],
+          "enables": [
+            1,
+            19
+          ],
+          "expr": "Q = D when STB, /OE"
         }
       ]
     },
@@ -2327,6 +3951,56 @@
           "name": "VDD",
           "direction": "Power"
         }
+      ],
+      "description": "Floppy disk controller",
+      "functions": [
+        {
+          "name": "FDC",
+          "type": "BLOCK",
+          "inputs": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            22,
+            23,
+            25,
+            26,
+            27,
+            28,
+            29,
+            30,
+            31,
+            33,
+            34,
+            35,
+            36,
+            37,
+            38,
+            39
+          ],
+          "outputs": [
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            21,
+            24,
+            32
+          ],
+          "expr": "WD1793 FDC"
+        }
       ]
     },
     {
@@ -2373,6 +4047,24 @@
           "number": 8,
           "name": "SEPDATA",
           "direction": "Output"
+        }
+      ],
+      "description": "Floppy disk data separator",
+      "functions": [
+        {
+          "name": "1",
+          "type": "BLOCK",
+          "inputs": [
+            1,
+            5,
+            6,
+            7
+          ],
+          "outputs": [
+            2,
+            3
+          ],
+          "expr": "Data separator / clock recovery"
         }
       ]
     }

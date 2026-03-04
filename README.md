@@ -18,7 +18,6 @@ A PCB reverse engineering tool written in Go with a GTK3 GUI. Designed for traci
 
 ### missing features:
 - undo/redo for trace, via, and net operations
-- schematic generation from traced netlist
 - DRC (design rule check) — detect unconnected pins, shorted nets
 - search/filter in net list and component list
 - print or PDF export of board with overlay annotations
@@ -110,6 +109,28 @@ A PCB reverse engineering tool written in Go with a GTK3 GUI. Designed for traci
 - Text-based connectivity dump with net statistics
 - File > Export Netlist menu
 
+### Schematic Viewer
+- Interactive schematic generated from traced netlist (File > Generate Schematic)
+- Opens in a separate GTK window for side-by-side viewing with PCB
+- Standard IEEE/ANSI logic gate symbols: AND, NAND, OR, NOR, XOR, NOT, BUFFER, TRISTATE, FLIPFLOP, BLOCK
+- Cairo vector rendering with zoom (scroll wheel), pan (middle-click drag), and fit-to-window
+- Each logic function becomes a separate symbol (e.g., 74LS00 → 4 NAND gates)
+- Automatic left-to-right layout using topological sort with barycenter wire crossing minimization
+- Manhattan wire routing with minimum spanning tree for multi-pin nets
+- Drag symbols to rearrange; wires automatically follow
+- Right-click context menu: flip horizontal, flip vertical, rotate 90°
+- Net highlighting: right-click a wire to highlight all connected symbols and wires
+- Re-layout button to reset automatic placement
+- Show/hide stub connectors (single-terminus nets) via checkbox
+- Layout persistence: symbol positions, flip, and rotation saved alongside project file
+- Power port symbols (VCC/GND) separated from logic routing
+
+### Logic Functions & Signal Propagation
+- Logic function definitions for all 26 parts in the component library
+- Gate types: NOT, AND, NAND, OR, NOR, XOR, BUFFER, TRISTATE, FLIPFLOP, LATCH, DECODER, MUX, COUNTER, SHIFTREG, RAM, BLOCK
+- Automatic signal name propagation through logic gates (e.g., NOT gate: FOO → /FOO)
+- Logic-aware netlist export showing pins grouped by gate function
+
 ### Connectors
 - Persistent board edge connectors with per-pin signal names
 - S-100 pin map with complete IEEE 696 signal definitions
@@ -147,7 +168,7 @@ traces/
 │   ├── netlist/              # Electrical nets, connectivity analysis, export (KiCad, SPICE)
 │   ├── ocr/                  # Tesseract integration, training database
 │   ├── project/              # Project file management
-│   ├── schematic/            # Schematic generation (WIP)
+│   ├── schematic/            # Schematic generation, logic function definitions
 │   ├── trace/                # Trace drawing, flood-fill auto-trace, vectorization
 │   ├── version/              # Build version info
 │   └── via/                  # Via detection, training, cross-side matching
@@ -157,6 +178,7 @@ traces/
 │   ├── mainwindow/           # Main window, menus, panel switching
 │   ├── panels/               # Import, Components, Traces, Library, Logos, Properties
 │   ├── prefs/                # User preferences, window geometry
+│   ├── schematic/            # Interactive schematic viewer (canvas, rendering, layout, routing)
 │   └── widgets/              # Custom GTK3 widgets
 └── pkg/
     ├── colorutil/            # HSV/RGB conversions

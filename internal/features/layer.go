@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"image/color"
 	"math"
+	"strconv"
 	"sync"
 
+	"pcb-tracer/internal/component"
 	"pcb-tracer/internal/connector"
 	"pcb-tracer/internal/image"
 	"pcb-tracer/internal/netlist"
@@ -453,6 +455,31 @@ func (l *DetectedFeaturesLayer) GetTracesConnectedToVia(center geometry.Point2D,
 		}
 	}
 	return result
+}
+
+// ViaHasTraceOnLayer returns true if a confirmed via has at least one trace
+// connecting to it on the specified layer.
+func (l *DetectedFeaturesLayer) ViaHasTraceOnLayer(center geometry.Point2D, tolerance float64, layer trace.TraceLayer) bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	for _, id := range l.traces {
+		ref := l.features[id]
+		if ref == nil {
+			continue
+		}
+		tf, ok := ref.Feature.(TraceFeature)
+		if !ok || len(tf.Points) < 2 || tf.Layer != layer {
+			continue
+		}
+		start := tf.Points[0]
+		end := tf.Points[len(tf.Points)-1]
+		if math.Hypot(start.X-center.X, start.Y-center.Y) <= tolerance ||
+			math.Hypot(end.X-center.X, end.Y-center.Y) <= tolerance {
+			return true
+		}
+	}
+	return false
 }
 
 // ViaCountBySide returns the number of vias on each side.
@@ -1370,6 +1397,135 @@ func (l *DetectedFeaturesLayer) ReconcileNets(tolerance float64) {
 			l.elementToNet[e.ID] = n.ID
 		}
 	}
+}
+
+// PropagateLogicNames derives net names from logic function signal flow.
+// For each net with a low-priority name, checks if it contains an output pin
+// of a known logic function. If the corresponding input pin's net has a signal
+// name, derives the output name based on gate type:
+//   - NOT/inverter: FOO → /FOO
+//   - BUFFER/TRISTATE: FOO → bFOO
+//
+// components is the list of board components (to resolve part numbers).
+// lib is the parts library (to look up logic functions).
+func (l *DetectedFeaturesLayer) PropagateLogicNames(
+	components []*component.Component,
+	lib *component.ComponentLibrary,
+) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if lib == nil || len(components) == 0 {
+		return
+	}
+
+	// Build component lookup: ID → *Component
+	compMap := make(map[string]*component.Component)
+	for _, c := range components {
+		compMap[c.ID] = c
+	}
+
+	// For each net with a low-priority (overridable) name, try to derive a
+	// name from the logic function of an output pin in that net.
+	for _, net := range l.netsMap {
+		if net.ManualName || !netlist.IsLowPriorityName(net.Name) {
+			continue
+		}
+
+		// Look at each via in this net
+		for _, viaID := range net.ViaIDs {
+			cv := l.confirmedViasMap[viaID]
+			if cv == nil || cv.ComponentID == "" || cv.PinNumber == "" {
+				continue
+			}
+
+			comp := compMap[cv.ComponentID]
+			if comp == nil || comp.PartNumber == "" {
+				continue
+			}
+
+			partDef := lib.GetByAlias(comp.PartNumber, comp.Package)
+			if partDef == nil || !partDef.HasFunctions() {
+				continue
+			}
+
+			pinNum, err := strconv.Atoi(cv.PinNumber)
+			if err != nil {
+				continue
+			}
+
+			fn := partDef.FunctionForPin(pinNum)
+			if fn == nil {
+				continue
+			}
+
+			// Is this pin an output of the function?
+			isOutput := false
+			for _, op := range fn.Outputs {
+				if op == pinNum {
+					isOutput = true
+					break
+				}
+			}
+			if !isOutput {
+				continue
+			}
+
+			// Find the input pin(s) of this function and their net names
+			var inputSignal string
+			for _, ip := range fn.Inputs {
+				inputCV := l.findViaByComponentPin(cv.ComponentID, ip)
+				if inputCV == nil {
+					continue
+				}
+				inputNetID, ok := l.elementToNet[inputCV.ID]
+				if !ok {
+					continue
+				}
+				inputNet := l.netsMap[inputNetID]
+				if inputNet == nil {
+					continue
+				}
+				// Use the input net's name if it's a real signal name
+				if !netlist.IsLowPriorityName(inputNet.Name) {
+					inputSignal = inputNet.Name
+					break
+				}
+			}
+
+			if inputSignal == "" {
+				continue
+			}
+
+			// For single-input gates (NOT, BUFFER, TRISTATE), derive directly.
+			// For multi-input gates (NAND, NOR), only derive if there's one input.
+			derived := ""
+			if len(fn.Inputs) == 1 {
+				derived = component.DeriveOutputName(fn.Type, inputSignal)
+			} else if fn.Type == component.GateNAND || fn.Type == component.GateNOR {
+				// Multi-input NAND/NOR: don't derive (result is a complex function)
+				continue
+			}
+
+			if derived != "" {
+				fmt.Printf("Logic name propagation: %s gate %s (%s) input=%q → output=%q\n",
+					cv.ComponentID, fn.Name, fn.Type, inputSignal, derived)
+				net.Name = derived
+				break // One derivation per net is enough
+			}
+		}
+	}
+}
+
+// findViaByComponentPin finds a confirmed via assigned to a specific component pin.
+func (l *DetectedFeaturesLayer) findViaByComponentPin(compID string, pinNum int) *via.ConfirmedVia {
+	pinStr := strconv.Itoa(pinNum)
+	for _, cv := range l.confirmedViasMap {
+		if cv.ComponentID == compID && cv.PinNumber == pinStr {
+			return cv
+		}
+	}
+	return nil
 }
 
 // UpdateTracePoints updates a trace's points in-place for vertex dragging.

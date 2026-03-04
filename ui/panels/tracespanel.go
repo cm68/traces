@@ -787,6 +787,7 @@ func (tp *TracesPanel) rebuildFeaturesOverlay() {
 func (tp *TracesPanel) rebuildFeaturesOverlayImpl(reconcileNets bool) {
 	if reconcileNets {
 		tp.state.FeaturesLayer.ReconcileNets(5.0)
+		tp.state.FeaturesLayer.PropagateLogicNames(tp.state.Components, tp.state.ComponentLibrary)
 	}
 
 	// Clear import panel diagnostic overlays so they don't cover features
@@ -831,9 +832,9 @@ func (tp *TracesPanel) rebuildFeaturesOverlayImpl(reconcileNets bool) {
 	// 2. Confirmed vias: blue, filled, labeled
 	for _, cv := range tp.state.FeaturesLayer.GetConfirmedVias() {
 		label := ""
-		if cv.SignalName != "" {
+		if tp.showPinNames && cv.SignalName != "" {
 			label = cv.SignalName
-		} else if cv.ComponentID != "" && cv.PinNumber != "" {
+		} else if tp.showPinNames && cv.ComponentID != "" && cv.PinNumber != "" {
 			label = fmt.Sprintf("%s-%s", cv.ComponentID, cv.PinNumber)
 		} else if tp.showViaNumbers {
 			var viaNum int
@@ -924,6 +925,22 @@ func (tp *TracesPanel) rebuildFeaturesOverlayImpl(reconcileNets bool) {
 			target.Circles = append(target.Circles, canvas.OverlayCircle{
 				X: pt.X, Y: pt.Y, Radius: 6, Filled: true,
 				Color: traceColor,
+			})
+		}
+	}
+
+	// 5. Black dot on vias connected on the other side (drawn last so
+	// they render on top of the cyan/magenta trace vertex dots).
+	black := &color.RGBA{R: 0, G: 0, B: 0, A: 255}
+	for _, cv := range tp.state.FeaturesLayer.GetConfirmedVias() {
+		if tp.state.FeaturesLayer.ViaHasTraceOnLayer(cv.Center, 5.0, pcbtrace.LayerBack) {
+			frontOverlay.Circles = append(frontOverlay.Circles, canvas.OverlayCircle{
+				X: cv.Center.X, Y: cv.Center.Y, Radius: 3, Filled: true, Color: black,
+			})
+		}
+		if tp.state.FeaturesLayer.ViaHasTraceOnLayer(cv.Center, 5.0, pcbtrace.LayerFront) {
+			backOverlay.Circles = append(backOverlay.Circles, canvas.OverlayCircle{
+				X: cv.Center.X, Y: cv.Center.Y, Radius: 3, Filled: true, Color: black,
 			})
 		}
 	}
@@ -2523,15 +2540,7 @@ func (tp *TracesPanel) showNetListMenu(netID string) {
 		for _, tid := range net.TraceIDs {
 			fl.RemoveTrace(tid)
 		}
-		// Delete all confirmed vias belonging to this net
-		for _, vid := range net.ViaIDs {
-			cv := fl.GetConfirmedViaByID(vid)
-			if cv != nil {
-				fl.RemoveVia(cv.FrontViaID)
-				fl.RemoveVia(cv.BackViaID)
-				fl.RemoveConfirmedVia(cv.ID)
-			}
-		}
+		// Vias are kept — only connections are removed
 		fl.RemoveNet(netID)
 		tp.selectedNetID = ""
 		tp.clearNetElementHighlight()
@@ -3336,6 +3345,7 @@ func (tp *TracesPanel) associateTraceEndpoints() {
 	// Reconcile nets from physical connectivity — ensures all elements
 	// connected by traces end up in the same net.
 	tp.state.FeaturesLayer.ReconcileNets(5.0)
+	tp.state.FeaturesLayer.PropagateLogicNames(tp.state.Components, tp.state.ComponentLibrary)
 
 	tp.disambiguateNetNames()
 	tp.state.Emit(app.EventNetlistModified, nil)

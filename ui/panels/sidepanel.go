@@ -148,6 +148,7 @@ func (sp *SidePanel) ShowPanel(name string) {
 		sp.canvas.OnMiddleClick(sp.componentsPanel.OnMiddleClickFloodFill)
 		sp.canvas.OnLeftClick(func(x, y float64) { sp.componentsPanel.OnLeftClick(x, y) })
 		sp.canvas.OnRightClick(func(x, y float64) { sp.componentsPanel.onRightClickDeleteComponent(x, y) })
+		sp.componentsPanel.Refresh()
 	case PanelTraces:
 		sp.canvas.OnMiddleClick(func(x, y float64) { sp.tracesPanel.onMiddleClick(x, y) })
 		sp.canvas.OnLeftClick(func(x, y float64) { sp.tracesPanel.onLeftClick(x, y) })

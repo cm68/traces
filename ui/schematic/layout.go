@@ -226,24 +226,4 @@ func AutoLayout(doc *SchematicDoc) {
 		si.sym.Row = si.row
 	}
 
-	// Step 6: Position power ports
-	maxY := startY
-	for _, si := range syms {
-		if si.sym.Y > maxY {
-			maxY = si.sym.Y
-		}
-	}
-	for i, pp := range doc.PowerPorts {
-		if pp.IsGround {
-			pp.X = startX + float64(i)*100
-			pp.Y = maxY + 300
-			pp.PinX = pp.X
-			pp.PinY = pp.Y - 30
-		} else {
-			pp.X = startX + float64(i)*100
-			pp.Y = startY - 200
-			pp.PinX = pp.X
-			pp.PinY = pp.Y + 30
-		}
-	}
 }

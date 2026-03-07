@@ -72,6 +72,7 @@ func filterStubs(doc *SchematicDoc) {
 func GenerateSchematic(state *app.State, showStubs ...bool) *SchematicDoc {
 	doc := &SchematicDoc{
 		ProjectName: "Schematic",
+		Sheets:      []Sheet{{Number: 1, Name: "Main"}},
 	}
 
 	if state == nil || state.FeaturesLayer == nil {
@@ -222,22 +223,29 @@ func GenerateSchematic(state *app.State, showStubs ...bool) *SchematicDoc {
 		doc.Symbols = append(doc.Symbols, sym)
 	}
 
-	// Step 3: Identify power nets and create PowerPort symbols
+	// Step 3: Identify power nets and create per-pin PowerPort symbols
+	doc.PowerNetIDs = make(map[string]bool)
 	for _, net := range nets {
 		if !isPowerNet(net.Name) {
 			continue
 		}
+		doc.PowerNetIDs[net.ID] = true
 		isGnd := isGroundNet(net.Name)
 
-		// Create a power port for each component pin on this net
-		for _, padID := range net.PadIDs {
-			doc.PowerPorts = append(doc.PowerPorts, &PowerPort{
-				NetName:  net.Name,
-				IsGround: isGnd,
-				// Positions set by auto-layout
-			})
-			_ = padID // positions computed during layout
-			break     // One power port symbol per net is enough for now
+		// Create one power port for each component pin on this net
+		for _, sym := range doc.Symbols {
+			for _, pin := range sym.Pins {
+				if pin.NetID != net.ID {
+					continue
+				}
+				doc.PowerPorts = append(doc.PowerPorts, &PowerPort{
+					NetName:       net.Name,
+					IsGround:      isGnd,
+					OwnerSymbolID: sym.ID,
+					OwnerPinNum:   pin.PinNumber,
+					// Positions computed by positionPowerPorts after pin layout
+				})
+			}
 		}
 	}
 
@@ -261,10 +269,16 @@ func GenerateSchematic(state *app.State, showStubs ...bool) *SchematicDoc {
 		ComputePinPositions(sym, def)
 	}
 
-	// Step 6: Route wires
+	// Step 5.5: Position power ports adjacent to their owner pins
+	positionPowerPorts(doc)
+
+	// Step 6: Generate off-sheet connectors (before routing, so they participate as endpoints)
+	generateOffSheetConnectors(doc)
+
+	// Step 7: Route wires (includes off-sheet connector positions as endpoints)
 	RouteAllWires(doc)
 
-	// Step 7: Place net labels on wires
+	// Step 8: Place net labels on wires
 	for _, wire := range doc.Wires {
 		if wire.NetName == "" {
 			// Look up net name from net ID
@@ -289,4 +303,37 @@ func GenerateSchematic(state *app.State, showStubs ...bool) *SchematicDoc {
 	}
 
 	return doc
+}
+
+// positionPowerPorts places each power port adjacent to its owner pin.
+// VCC/power ports go above the pin; GND ports go below.
+func positionPowerPorts(doc *SchematicDoc) {
+	// Build index: symbolID → symbol
+	symByID := make(map[string]*PlacedSymbol)
+	for _, sym := range doc.Symbols {
+		symByID[sym.ID] = sym
+	}
+
+	for _, pp := range doc.PowerPorts {
+		sym := symByID[pp.OwnerSymbolID]
+		if sym == nil {
+			continue
+		}
+		// Find the owner pin
+		for _, pin := range sym.Pins {
+			if pin.PinNumber == pp.OwnerPinNum {
+				pp.PinX = pin.X
+				pp.PinY = pin.Y
+				if pp.IsGround {
+					pp.X = pin.X
+					pp.Y = pin.Y + 40
+				} else {
+					pp.X = pin.X
+					pp.Y = pin.Y - 40
+				}
+				pp.Sheet = effectiveSheet(sym.Sheet)
+				break
+			}
+		}
+	}
 }

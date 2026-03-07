@@ -21,6 +21,8 @@ type ConfirmedVia struct {
 	ComponentID          string             `json:"component_id,omitempty"`  // Associated component (e.g., "B13")
 	PinNumber            string             `json:"pin_number,omitempty"`    // Pin on that component (e.g., "1")
 	SignalName           string             `json:"signal_name,omitempty"`   // e.g. "C3-GND" from library lookup
+	PullUp               bool               `json:"pull_up,omitempty"`       // Marked as pull-up resistor connection
+	PullDown             bool               `json:"pull_down,omitempty"`     // Marked as pull-down resistor connection
 }
 
 // NewConfirmedVia creates a new confirmed via from matched front and back vias.

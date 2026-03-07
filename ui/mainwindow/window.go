@@ -291,7 +291,7 @@ func (mw *MainWindow) setupMenus() {
 		menuEntry{"Save Project As...", mw.onSaveProjectAs},
 		menuEntry{}, // separator
 		menuEntry{"Export Netlist...", mw.onExportNetlist},
-		menuEntry{"Generate Schematic...", mw.onGenerateSchematic},
+		menuEntry{"Open Schematic...", mw.onGenerateSchematic},
 		menuEntry{}, // separator
 		menuEntry{"Quit", func() { mw.win.Close() }},
 	)
@@ -842,13 +842,45 @@ func (mw *MainWindow) onGenerateSchematic() {
 		return
 	}
 
-	schWin, err := schematic.NewSchematicWindow(mw.state)
-	if err != nil {
-		mw.updateStatus(fmt.Sprintf("Schematic error: %v", err))
-		return
+	hasSaved := schematic.HasSavedLayout(mw.state.ProjectPath)
+
+	if hasSaved {
+		// Show dialog: open existing or regenerate fresh
+		dlg := gtk.MessageDialogNew(mw.win, gtk.DIALOG_MODAL,
+			gtk.MESSAGE_QUESTION, gtk.BUTTONS_NONE,
+			"A saved schematic layout exists.\nOpen the existing layout, or generate a fresh one?")
+		dlg.AddButton("Cancel", gtk.RESPONSE_CANCEL)
+		dlg.AddButton("Generate Fresh", gtk.RESPONSE_REJECT)
+		dlg.AddButton("Open Existing", gtk.RESPONSE_ACCEPT)
+		dlg.SetDefaultResponse(gtk.RESPONSE_ACCEPT)
+
+		response := dlg.Run()
+		dlg.Destroy()
+
+		switch response {
+		case gtk.RESPONSE_ACCEPT:
+			_, err := schematic.NewSchematicWindow(mw.state)
+			if err != nil {
+				mw.updateStatus(fmt.Sprintf("Schematic error: %v", err))
+				return
+			}
+			mw.updateStatus("Schematic opened")
+		case gtk.RESPONSE_REJECT:
+			_, err := schematic.NewSchematicWindowFresh(mw.state)
+			if err != nil {
+				mw.updateStatus(fmt.Sprintf("Schematic error: %v", err))
+				return
+			}
+			mw.updateStatus("Schematic regenerated")
+		}
+	} else {
+		_, err := schematic.NewSchematicWindow(mw.state)
+		if err != nil {
+			mw.updateStatus(fmt.Sprintf("Schematic error: %v", err))
+			return
+		}
+		mw.updateStatus("Schematic generated")
 	}
-	schWin.Show()
-	mw.updateStatus("Schematic generated")
 }
 
 func (mw *MainWindow) onZoomIn() {

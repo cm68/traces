@@ -52,15 +52,33 @@ func ManhattanRoute(from, to pinPos) []geometry.Point2D {
 	}
 }
 
-// RouteAllWires creates wire paths for all nets in the schematic document.
+// RouteAllWires creates wire paths for all nets, routing per-sheet.
 func RouteAllWires(doc *SchematicDoc) {
 	if doc == nil {
 		return
 	}
+	doc.Wires = nil
 
-	// Build pin-to-net index
+	// Route each sheet independently
+	sheets := doc.Sheets
+	if len(sheets) == 0 {
+		sheets = []Sheet{{Number: 1}}
+	}
+	wireID := 0
+	for _, sheet := range sheets {
+		wireID = routeSheetWires(doc, sheet.Number, wireID)
+	}
+}
+
+// routeSheetWires routes wires for symbols on a specific sheet.
+// Returns the updated wireID counter.
+func routeSheetWires(doc *SchematicDoc, sheetNum int, wireID int) int {
+	// Build pin-to-net index for this sheet only
 	netPins := make(map[string][]pinPos)
 	for _, sym := range doc.Symbols {
+		if effectiveSheet(sym.Sheet) != sheetNum {
+			continue
+		}
 		for _, pin := range sym.Pins {
 			if pin.NetID != "" {
 				netPins[pin.NetID] = append(netPins[pin.NetID], pinPos{
@@ -69,17 +87,21 @@ func RouteAllWires(doc *SchematicDoc) {
 			}
 		}
 	}
-	// Add power port pins
-	for _, pp := range doc.PowerPorts {
-		netPins[pp.NetName] = append(netPins[pp.NetName], pinPos{
-			X: pp.PinX, Y: pp.PinY, Dir: "power",
+	// Skip power nets — they use local power port symbols, not wires
+	for netID := range doc.PowerNetIDs {
+		delete(netPins, netID)
+	}
+
+	// Include off-sheet connector positions as wire endpoints
+	for _, osc := range doc.OffSheetConnectors {
+		if osc.Sheet != sheetNum {
+			continue
+		}
+		netPins[osc.NetID] = append(netPins[osc.NetID], pinPos{
+			X: osc.X, Y: osc.Y, Dir: osc.Direction,
 		})
 	}
 
-	// Clear existing wires
-	doc.Wires = nil
-
-	wireID := 0
 	for netID, pins := range netPins {
 		if len(pins) < 2 {
 			continue
@@ -88,12 +110,11 @@ func RouteAllWires(doc *SchematicDoc) {
 		// For 2-pin nets: simple Manhattan route
 		if len(pins) == 2 {
 			wireID++
-			from := pins[0]
-			to := pins[1]
 			doc.Wires = append(doc.Wires, &Wire{
-				ID:      fmt.Sprintf("wire-%d", wireID),
-				NetID:   netID,
-				Points:  ManhattanRoute(from, to),
+				ID:     fmt.Sprintf("wire-%d", wireID),
+				NetID:  netID,
+				Points: ManhattanRoute(pins[0], pins[1]),
+				Sheet:  sheetNum,
 			})
 			continue
 		}
@@ -102,15 +123,15 @@ func RouteAllWires(doc *SchematicDoc) {
 		edges := mstEdges(pins)
 		for _, edge := range edges {
 			wireID++
-			from := pins[edge[0]]
-			to := pins[edge[1]]
 			doc.Wires = append(doc.Wires, &Wire{
-				ID:      fmt.Sprintf("wire-%d", wireID),
-				NetID:   netID,
-				Points:  ManhattanRoute(from, to),
+				ID:     fmt.Sprintf("wire-%d", wireID),
+				NetID:  netID,
+				Points: ManhattanRoute(pins[edge[0]], pins[edge[1]]),
+				Sheet:  sheetNum,
 			})
 		}
 	}
+	return wireID
 }
 
 // mstEdges returns edges of a minimum spanning tree using Kruskal's algorithm.

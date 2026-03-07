@@ -27,23 +27,28 @@ func (sc *SchematicCanvas) render(cr *cairo.Context, w, h int) {
 	sc.drawGrid(cr, w, h)
 
 	// 4. Draw wires (behind symbols)
-	for _, wire := range sc.doc.Wires {
+	for _, wire := range sc.visibleWires() {
 		sc.drawWire(cr, wire)
 	}
 
 	// 5. Draw symbols
-	for _, sym := range sc.doc.Symbols {
+	for _, sym := range sc.visibleSymbols() {
 		sc.drawSymbol(cr, sym)
 	}
 
 	// 6. Draw net labels
-	for _, label := range sc.doc.NetLabels {
+	for _, label := range sc.visibleNetLabels() {
 		sc.drawNetLabel(cr, label)
 	}
 
 	// 7. Draw power ports
-	for _, pp := range sc.doc.PowerPorts {
+	for _, pp := range sc.visiblePowerPorts() {
 		sc.drawPowerPort(cr, pp)
+	}
+
+	// 8. Draw off-sheet connectors
+	for _, osc := range sc.visibleOffSheetConnectors() {
+		sc.drawOffSheetConnector(cr, osc)
 	}
 
 	cr.Restore()
@@ -293,6 +298,51 @@ func (sc *SchematicCanvas) drawPowerPort(cr *cairo.Context, pp *PowerPort) {
 		cr.MoveTo(pp.X-extents.Width/2, pp.Y-8)
 		cr.ShowText(pp.NetName)
 	}
+
+	cr.Restore()
+}
+
+// drawOffSheetConnector draws a flag/arrow shape indicating a net continues on another sheet.
+func (sc *SchematicCanvas) drawOffSheetConnector(cr *cairo.Context, osc *OffSheetConnector) {
+	cr.Save()
+	cr.SetLineWidth(2)
+	cr.SetSourceRGB(0.2, 0.4, 0.8) // blue
+
+	w := 80.0
+	h := 20.0
+
+	if osc.Direction == "output" {
+		// Arrow pointing right: rectangle + right triangle
+		cr.MoveTo(osc.X, osc.Y-h/2)
+		cr.LineTo(osc.X+w, osc.Y-h/2)
+		cr.LineTo(osc.X+w+15, osc.Y)
+		cr.LineTo(osc.X+w, osc.Y+h/2)
+		cr.LineTo(osc.X, osc.Y+h/2)
+		cr.ClosePath()
+	} else {
+		// Arrow pointing left: left triangle + rectangle
+		cr.MoveTo(osc.X, osc.Y)
+		cr.LineTo(osc.X+15, osc.Y-h/2)
+		cr.LineTo(osc.X+15+w, osc.Y-h/2)
+		cr.LineTo(osc.X+15+w, osc.Y+h/2)
+		cr.LineTo(osc.X+15, osc.Y+h/2)
+		cr.ClosePath()
+	}
+	cr.SetSourceRGBA(0.85, 0.92, 1.0, 0.8)
+	cr.FillPreserve()
+	cr.SetSourceRGB(0.2, 0.4, 0.8)
+	cr.Stroke()
+
+	// Label: "NetName → Sheet N"
+	cr.SelectFontFace("sans-serif", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+	cr.SetFontSize(12)
+	label := fmt.Sprintf("%s → Sheet %d", osc.NetName, osc.TargetSheet)
+	textX := osc.X + 4
+	if osc.Direction == "input" {
+		textX = osc.X + 19
+	}
+	cr.MoveTo(textX, osc.Y+4)
+	cr.ShowText(label)
 
 	cr.Restore()
 }

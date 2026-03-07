@@ -185,6 +185,17 @@ func (cp *ComponentsPanel) Widget() gtk.IWidget {
 	return cp.box
 }
 
+// Refresh rebuilds the component list and overlay from the live data model.
+func (cp *ComponentsPanel) Refresh() {
+	fmt.Printf("[components] Refresh: %d components in state\n", len(cp.state.Components))
+	for i, c := range cp.state.Components {
+		fmt.Printf("[components]   [%d] ID=%s Part=%s Pkg=%s\n", i, c.ID, c.PartNumber, c.Package)
+	}
+	cp.rebuildSortedIndices()
+	cp.refreshList()
+	cp.updateComponentOverlay()
+}
+
 // buildEditForm creates the inline edit form and returns a scrolled window containing it.
 func (cp *ComponentsPanel) buildEditForm() *gtk.ScrolledWindow {
 	cp.idEntry, _ = gtk.EntryNew()
@@ -1631,6 +1642,22 @@ func (cp *ComponentsPanel) selectComponentByIndex(index int) {
 }
 
 // DeselectComponent clears the current component selection.
+// SelectComponentByID finds a component by ID and selects it in the list.
+func (cp *ComponentsPanel) SelectComponentByID(id string) {
+	cp.rebuildSortedIndices()
+	cp.refreshList()
+	for rowIdx, compIdx := range cp.sortedIndices {
+		if compIdx < len(cp.state.Components) && cp.state.Components[compIdx].ID == id {
+			row := cp.listBox.GetRowAtIndex(rowIdx)
+			if row != nil {
+				cp.listBox.SelectRow(row)
+				cp.showEditDialog(compIdx)
+			}
+			return
+		}
+	}
+}
+
 func (cp *ComponentsPanel) DeselectComponent() {
 	if cp.editingIndex < 0 {
 		return

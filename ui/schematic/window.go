@@ -9,44 +9,69 @@ import (
 	"pcb-tracer/internal/app"
 )
 
-// SchematicWindow is a separate window showing the schematic view.
+// SchematicWindow is a separate window showing one sheet of the schematic.
 type SchematicWindow struct {
-	win    *gtk.Window
-	canvas *SchematicCanvas
-	doc    *SchematicDoc
-	state  *app.State
+	win      *gtk.Window
+	canvas   *SchematicCanvas
+	doc      *SchematicDoc
+	state    *app.State
+	manager  *SheetManager
+	sheetNum int
 
 	showStubs bool
 	statusBar *gtk.Label
 }
 
-// NewSchematicWindow creates a schematic window from the current app state.
-func NewSchematicWindow(state *app.State) (*SchematicWindow, error) {
+// NewSchematicWindow creates a schematic window via SheetManager, opening existing layout.
+func NewSchematicWindow(state *app.State) (*SheetManager, error) {
+	sm := NewSheetManager(state)
+	sm.OpenSheet(1)
+	return sm, nil
+}
+
+// NewSchematicWindowFresh creates a schematic window with a fresh generation (ignoring saved layout).
+func NewSchematicWindowFresh(state *app.State) (*SheetManager, error) {
+	sm := NewSheetManagerFresh(state)
+	sm.OpenSheet(1)
+	return sm, nil
+}
+
+// newSchematicWindowForSheet creates a window for a specific sheet.
+func newSchematicWindowForSheet(state *app.State, doc *SchematicDoc, sheetNum int, sheetName string, manager *SheetManager) (*SchematicWindow, error) {
 	win, err := gtk.WindowNew(gtk.WINDOW_TOPLEVEL)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create schematic window: %w", err)
 	}
-	win.SetTitle("Schematic")
+
+	title := fmt.Sprintf("Schematic — Sheet %d", sheetNum)
+	if sheetName != "" {
+		title = fmt.Sprintf("Schematic — Sheet %d: %s", sheetNum, sheetName)
+	}
+	win.SetTitle(title)
 	win.SetDefaultSize(1200, 800)
 
 	sw := &SchematicWindow{
-		win:   win,
-		state: state,
+		win:      win,
+		state:    state,
+		doc:      doc,
+		manager:  manager,
+		sheetNum: sheetNum,
 	}
 
-	// Generate schematic from current netlist data
-	sw.doc = GenerateSchematic(state)
-
-	// Restore saved layout if available
-	if layout := LoadLayout(state.ProjectPath); layout != nil {
-		ApplyLayout(sw.doc, layout)
-	}
-
-	sw.canvas = NewSchematicCanvas(sw.doc)
+	sw.canvas = NewSchematicCanvas(doc)
+	sw.canvas.sheetNum = sheetNum
+	sw.canvas.manager = manager
 
 	// Auto-save layout on any position or flip change
 	sw.canvas.OnLayoutChanged(func() {
 		SaveLayout(sw.doc, sw.state.ProjectPath)
+	})
+
+	// Propagate net renames to app state
+	sw.canvas.OnNetRenamed(func(netID, newName string) {
+		if sw.state.FeaturesLayer != nil {
+			sw.state.FeaturesLayer.RenameNet(netID, newName)
+		}
 	})
 
 	// Build UI
@@ -68,9 +93,7 @@ func NewSchematicWindow(state *app.State) (*SchematicWindow, error) {
 	sw.statusBar.SetMarginBottom(2)
 	vbox.PackStart(sw.statusBar, false, false, 0)
 
-	symCount := len(sw.doc.Symbols)
-	wireCount := len(sw.doc.Wires)
-	sw.statusBar.SetText(fmt.Sprintf("%d symbols, %d wires", symCount, wireCount))
+	sw.updateStatusText()
 
 	sw.canvas.OnStatusUpdate(func(msg string) {
 		sw.statusBar.SetText(msg)
@@ -78,7 +101,7 @@ func NewSchematicWindow(state *app.State) (*SchematicWindow, error) {
 
 	win.Add(vbox)
 
-	// Fit to window after showing — defer to idle so GTK has allocated sizes
+	// Fit to window after showing
 	win.Connect("show", func() {
 		glib.IdleAdd(func() {
 			sw.canvas.FitToWindow()
@@ -94,14 +117,18 @@ func (sw *SchematicWindow) Show() {
 	sw.win.Present()
 }
 
-func (sw *SchematicWindow) regenerate() {
-	sw.doc = GenerateSchematic(sw.state, sw.showStubs)
-	// Restore saved layout for symbols that still exist
-	if layout := LoadLayout(sw.state.ProjectPath); layout != nil {
-		ApplyLayout(sw.doc, layout)
-	}
+// refreshView updates the canvas and status bar after data changes.
+func (sw *SchematicWindow) refreshView() {
 	sw.canvas.SetDoc(sw.doc)
-	sw.statusBar.SetText(fmt.Sprintf("%d symbols, %d wires", len(sw.doc.Symbols), len(sw.doc.Wires)))
+	sw.updateStatusText()
+}
+
+func (sw *SchematicWindow) updateStatusText() {
+	if sw.manager != nil {
+		sw.statusBar.SetText(sw.manager.StatusForSheet(sw.sheetNum))
+	} else {
+		sw.statusBar.SetText(fmt.Sprintf("%d symbols, %d wires", len(sw.doc.Symbols), len(sw.doc.Wires)))
+	}
 }
 
 func (sw *SchematicWindow) buildToolbar() *gtk.Box {
@@ -148,6 +175,8 @@ func (sw *SchematicWindow) buildToolbar() *gtk.Box {
 				countPinsByDir(sym, "clock"))
 			ComputePinPositions(sym, def)
 		}
+		positionPowerPorts(sw.doc)
+		generateOffSheetConnectors(sw.doc)
 		RouteAllWires(sw.doc)
 		sw.canvas.updateContentSize()
 		sw.canvas.Refresh()
@@ -163,10 +192,30 @@ func (sw *SchematicWindow) buildToolbar() *gtk.Box {
 	stubsCheck, _ := gtk.CheckButtonNewWithLabel("Show stubs")
 	stubsCheck.SetActive(false)
 	stubsCheck.Connect("toggled", func() {
-		sw.showStubs = stubsCheck.GetActive()
-		sw.regenerate()
+		if sw.manager != nil {
+			sw.manager.SetShowStubs(stubsCheck.GetActive())
+		}
 	})
 	toolbar.PackStart(stubsCheck, false, false, 0)
+
+	// Sheet navigation combo (only if multiple sheets)
+	if sw.manager != nil && len(sw.doc.Sheets) > 0 {
+		sep3, _ := gtk.SeparatorNew(gtk.ORIENTATION_VERTICAL)
+		toolbar.PackStart(sep3, false, false, 4)
+
+		sheetLabel, _ := gtk.LabelNew("Sheets:")
+		toolbar.PackStart(sheetLabel, false, false, 4)
+
+		for _, sheet := range sw.doc.Sheets {
+			s := sheet // capture
+			label := fmt.Sprintf("%d: %s", s.Number, s.Name)
+			btn, _ := gtk.ButtonNewWithLabel(label)
+			btn.Connect("clicked", func() {
+				sw.manager.OpenSheet(s.Number)
+			})
+			toolbar.PackStart(btn, false, false, 0)
+		}
+	}
 
 	return toolbar
 }

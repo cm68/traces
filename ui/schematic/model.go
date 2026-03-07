@@ -5,15 +5,24 @@ import (
 	"pcb-tracer/pkg/geometry"
 )
 
+// Sheet represents one page of a multi-sheet schematic.
+type Sheet struct {
+	Number int    `json:"number"` // 1-based sheet number
+	Name   string `json:"name"`   // User-friendly name, e.g. "Address Decode"
+}
+
 // SchematicDoc is the top-level container for a schematic drawing.
 // Coordinates use schematic units (1 unit = 1/100 inch).
 type SchematicDoc struct {
-	ProjectName string          `json:"project_name"`
-	Symbols     []*PlacedSymbol `json:"symbols"`
-	Wires       []*Wire         `json:"wires"`
-	NetLabels   []*NetLabel     `json:"net_labels"`
-	PowerPorts  []*PowerPort    `json:"power_ports"`
-	ShowStubs   bool            `json:"-"` // Show connectors/nets with only one terminus
+	ProjectName        string               `json:"project_name"`
+	Sheets             []Sheet              `json:"sheets"`
+	Symbols            []*PlacedSymbol      `json:"symbols"`
+	Wires              []*Wire              `json:"wires"`
+	NetLabels          []*NetLabel          `json:"net_labels"`
+	PowerPorts         []*PowerPort         `json:"power_ports"`
+	OffSheetConnectors []*OffSheetConnector `json:"off_sheet_connectors,omitempty"`
+	ShowStubs          bool                 `json:"-"`
+	PowerNetIDs        map[string]bool      `json:"-"` // Net IDs that are power/ground
 }
 
 // PlacedSymbol is one logic function placed on the schematic.
@@ -34,6 +43,7 @@ type PlacedSymbol struct {
 	FlipH    bool `json:"flip_h,omitempty"`    // Mirror horizontally (swap left/right pins)
 	FlipV    bool `json:"flip_v,omitempty"`    // Mirror vertically (swap top/bottom)
 	Rotation int  `json:"rotation,omitempty"`  // Degrees: 0, 90, 180, 270
+	Sheet    int  `json:"sheet,omitempty"`     // Sheet number (1-based; 0 = sheet 1)
 
 	// Pins with their absolute positions
 	Pins []*SchematicPin `json:"pins"`
@@ -71,6 +81,7 @@ type Wire struct {
 	NetName  string             `json:"net_name,omitempty"`
 	Points   []geometry.Point2D `json:"points"` // Ordered waypoints
 	IsBus    bool               `json:"is_bus,omitempty"`
+	Sheet    int                `json:"sheet,omitempty"`
 	Selected bool               `json:"-"`
 }
 
@@ -83,13 +94,36 @@ type NetLabel struct {
 }
 
 // PowerPort represents a VCC or GND symbol on the schematic.
+// Each component pin on a power net gets its own local PowerPort.
 type PowerPort struct {
-	NetName  string  `json:"net_name"` // "VCC", "GND", "+5V", etc.
-	X        float64 `json:"x"`
-	Y        float64 `json:"y"`
-	IsGround bool    `json:"is_ground"`
-	PinX     float64 `json:"pin_x"` // Connection point
-	PinY     float64 `json:"pin_y"`
+	NetName       string  `json:"net_name"`                  // "VCC", "GND", "+5V", etc.
+	X             float64 `json:"x"`
+	Y             float64 `json:"y"`
+	IsGround      bool    `json:"is_ground"`
+	PinX          float64 `json:"pin_x"`                     // Connection point (at component pin tip)
+	PinY          float64 `json:"pin_y"`
+	OwnerSymbolID string  `json:"owner_symbol_id,omitempty"` // The symbol this port is attached to
+	OwnerPinNum   int     `json:"owner_pin_num,omitempty"`   // The specific pin number
+	Sheet         int     `json:"sheet,omitempty"`
+}
+
+// OffSheetConnector indicates a net continues on another sheet.
+type OffSheetConnector struct {
+	NetID       string  `json:"net_id"`
+	NetName     string  `json:"net_name"`
+	Sheet       int     `json:"sheet"`        // Sheet this indicator appears on
+	TargetSheet int     `json:"target_sheet"` // Sheet the net continues to
+	X           float64 `json:"x"`
+	Y           float64 `json:"y"`
+	Direction   string  `json:"direction"` // "input" or "output"
+}
+
+// effectiveSheet returns the sheet number, treating 0 as 1.
+func effectiveSheet(s int) int {
+	if s <= 0 {
+		return 1
+	}
+	return s
 }
 
 // Bounds returns the bounding rectangle of all symbols in the schematic.

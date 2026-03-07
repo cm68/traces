@@ -61,6 +61,10 @@ type TracesPanel struct {
 	// Trace detection UI
 	traceStatusLabel *gtk.Label
 
+	// Add-component mode: click to set second corner of selection rectangle
+	addComponentMode  bool
+	addComponentStart geometry.Point2D // first corner (from right-click position)
+
 	// Trace drawing state (polyline mode)
 	traceMode               bool
 	traceStartVia           *via.ConfirmedVia
@@ -829,7 +833,9 @@ func (tp *TracesPanel) rebuildFeaturesOverlayImpl(reconcileNets bool) {
 		})
 	}
 
-	// 2. Confirmed vias: blue, filled, labeled
+	// 2. Confirmed vias: blue, filled, labeled (green=pull-up, orange=pull-down)
+	green := &color.RGBA{R: 0, G: 200, B: 0, A: 255}
+	orange := &color.RGBA{R: 255, G: 165, B: 0, A: 255}
 	for _, cv := range tp.state.FeaturesLayer.GetConfirmedVias() {
 		label := ""
 		if tp.showPinNames && cv.SignalName != "" {
@@ -844,19 +850,32 @@ func (tp *TracesPanel) rebuildFeaturesOverlayImpl(reconcileNets bool) {
 				label = cv.ID
 			}
 		}
+		// Add pull-up/pull-down indicator to label
+		if cv.PullUp {
+			label = "↑" + label
+		} else if cv.PullDown {
+			label = "↓" + label
+		}
+		// Color: green for pull-up, orange for pull-down, blue for normal
+		viaColor := blue
+		if cv.PullUp {
+			viaColor = green
+		} else if cv.PullDown {
+			viaColor = orange
+		}
 		if len(cv.IntersectionBoundary) >= 3 {
 			viasOverlay.Polygons = append(viasOverlay.Polygons, canvas.OverlayPolygon{
 				Points: cv.IntersectionBoundary,
 				Label:  label,
 				Filled: true,
-				Color:  blue,
+				Color:  viaColor,
 			})
 		} else {
 			bounds := cv.Bounds()
 			viasOverlay.Rectangles = append(viasOverlay.Rectangles, canvas.OverlayRect{
 				X: bounds.X, Y: bounds.Y, Width: bounds.Width, Height: bounds.Height,
 				Fill: canvas.FillSolid, Label: label,
-				Color: blue,
+				Color: viaColor,
 			})
 		}
 	}
@@ -1099,6 +1118,12 @@ func (tp *TracesPanel) updateTrainingLabel() {
 
 // onLeftClick handles left-click for polyline trace drawing, vertex dragging, and via/connector interaction.
 func (tp *TracesPanel) onLeftClick(x, y float64) {
+	// If in add-component mode, second click completes the rectangle
+	if tp.addComponentMode {
+		tp.finishAddComponent(x, y)
+		return
+	}
+
 	// If dragging a vertex, place it
 	if tp.draggingVertex {
 		tp.finishVertexDrag(x, y)
@@ -1353,6 +1378,14 @@ func (tp *TracesPanel) showMultiViaMenu() {
 	addItem("Decrease Radius", func() { adjustAll(-radiusStep) })
 	addItem("Increase Radius", func() { adjustAll(radiusStep) })
 
+	sep, _ := gtk.SeparatorMenuItemNew()
+	menu.Append(sep)
+	addItem("Add Component...", func() {
+		vias := make([]*via.ConfirmedVia, len(tp.selectedVias))
+		copy(vias, tp.selectedVias)
+		tp.showAddComponentDialog(vias)
+	})
+
 	menu.ShowAll()
 	menu.PopupAtPointer(nil)
 }
@@ -1402,6 +1435,11 @@ func (tp *TracesPanel) updateSelectedConnectorOverlay() {
 
 // onRightClickVia handles right-click on the canvas.
 func (tp *TracesPanel) onRightClickVia(x, y float64) {
+	// Cancel add-component mode on right-click
+	if tp.addComponentMode {
+		tp.cancelAddComponent()
+		return
+	}
 	// Cancel vertex drag on right-click
 	if tp.draggingVertex {
 		tp.cancelVertexDrag()
@@ -1452,6 +1490,10 @@ func (tp *TracesPanel) onRightClickVia(x, y float64) {
 
 // onMiddleClick handles middle-click on the canvas — cancels trace drawing.
 func (tp *TracesPanel) onMiddleClick(x, y float64) {
+	if tp.addComponentMode {
+		tp.cancelAddComponent()
+		return
+	}
 	if tp.draggingVertex {
 		tp.cancelVertexDrag()
 		return
@@ -1498,6 +1540,42 @@ func (tp *TracesPanel) showConfirmedViaMenu(cv *via.ConfirmedVia) {
 		addItem("Renumber Pin (whole package)...", func() { tp.renumberPin(cv) })
 	}
 	addSep()
+
+	// Pull-up / Pull-down toggles
+	if cv.PullUp {
+		addItem("✓ Pull-Up", func() {
+			cv.PullUp = false
+			tp.rebuildFeaturesOverlay()
+			tp.canvas.Refresh()
+			tp.state.Emit(app.EventConfirmedViasChanged, nil)
+		})
+	} else {
+		addItem("Pull-Up", func() {
+			cv.PullUp = true
+			cv.PullDown = false
+			tp.rebuildFeaturesOverlay()
+			tp.canvas.Refresh()
+			tp.state.Emit(app.EventConfirmedViasChanged, nil)
+		})
+	}
+	if cv.PullDown {
+		addItem("✓ Pull-Down", func() {
+			cv.PullDown = false
+			tp.rebuildFeaturesOverlay()
+			tp.canvas.Refresh()
+			tp.state.Emit(app.EventConfirmedViasChanged, nil)
+		})
+	} else {
+		addItem("Pull-Down", func() {
+			cv.PullDown = true
+			cv.PullUp = false
+			tp.rebuildFeaturesOverlay()
+			tp.canvas.Refresh()
+			tp.state.Emit(app.EventConfirmedViasChanged, nil)
+		})
+	}
+	addSep()
+
 	addItem("Delete Via", func() { tp.deleteConfirmedVia(cv) })
 	addItem("Delete Front", func() { tp.deleteConfirmedViaSide(cv, pcbimage.SideFront) })
 	addItem("Delete Back", func() { tp.deleteConfirmedViaSide(cv, pcbimage.SideBack) })
@@ -1527,6 +1605,12 @@ func (tp *TracesPanel) showGeneralViaMenu(imgX, imgY float64) {
 	addItem("Delete Front Via", func() { tp.deleteNearestVia(imgX, imgY, pcbimage.SideFront) })
 	addItem("Delete Back Via", func() { tp.deleteNearestVia(imgX, imgY, pcbimage.SideBack) })
 
+	sep2, _ := gtk.SeparatorMenuItemNew()
+	menu.Append(sep2)
+	addItem("Add Component...", func() {
+		tp.startAddComponentMode(imgX, imgY)
+	})
+
 	if hit := tp.hitTestTraceSegment(imgX, imgY); hit != nil {
 		h := hit
 		sep, _ := gtk.SeparatorMenuItemNew()
@@ -1536,6 +1620,229 @@ func (tp *TracesPanel) showGeneralViaMenu(imgX, imgY float64) {
 
 	menu.ShowAll()
 	menu.PopupAtPointer(nil)
+}
+
+// startAddComponentMode enters add-component mode with the first corner at the given position.
+func (tp *TracesPanel) startAddComponentMode(x, y float64) {
+	tp.addComponentMode = true
+	tp.addComponentStart = geometry.Point2D{X: x, Y: y}
+	tp.canvas.ShowRubberRect(x, y)
+	tp.canvas.OnMouseMove(func(mx, my float64) {
+		tp.canvas.UpdateRubberBand(mx, my)
+	})
+	tp.viaStatusLabel.SetText("Click to set opposite corner for component selection")
+}
+
+// cancelAddComponent exits add-component mode.
+func (tp *TracesPanel) cancelAddComponent() {
+	tp.addComponentMode = false
+	tp.canvas.HideRubberBand()
+	tp.canvas.OnMouseMove(nil)
+	tp.viaStatusLabel.SetText("")
+}
+
+// finishAddComponent completes the add-component rectangle selection.
+func (tp *TracesPanel) finishAddComponent(x, y float64) {
+	x1, y1 := tp.addComponentStart.X, tp.addComponentStart.Y
+	x2, y2 := x, y
+	tp.canvas.HideRubberBand()
+	tp.canvas.OnMouseMove(nil)
+	tp.addComponentMode = false
+
+	// Normalize rect
+	if x1 > x2 {
+		x1, x2 = x2, x1
+	}
+	if y1 > y2 {
+		y1, y2 = y2, y1
+	}
+
+	if tp.state.FeaturesLayer == nil {
+		return
+	}
+	rect := geometry.Rect{X: x1, Y: y1, Width: x2 - x1, Height: y2 - y1}
+	var vias []*via.ConfirmedVia
+	for _, cv := range tp.state.FeaturesLayer.GetConfirmedVias() {
+		if rect.Contains(cv.Center) {
+			vias = append(vias, cv)
+		}
+	}
+	if len(vias) == 0 {
+		tp.viaStatusLabel.SetText("No vias in selection")
+		return
+	}
+	tp.selectedVias = vias
+	tp.updateSelectedViaOverlay()
+	tp.canvas.Refresh()
+	tp.showAddComponentDialog(vias)
+}
+
+// showAddComponentDialog shows a dialog to create a passive component from selected vias.
+func (tp *TracesPanel) showAddComponentDialog(vias []*via.ConfirmedVia) {
+	if len(vias) == 0 {
+		return
+	}
+
+	dialog, _ := gtk.DialogNewWithButtons(
+		"Add Component",
+		tp.win,
+		gtk.DIALOG_MODAL|gtk.DIALOG_DESTROY_WITH_PARENT,
+		[]interface{}{"Cancel", gtk.RESPONSE_CANCEL},
+		[]interface{}{"OK", gtk.RESPONSE_OK},
+	)
+	dialog.SetDefaultResponse(gtk.RESPONSE_OK)
+	dialog.SetDefaultSize(350, 0)
+
+	contentArea, _ := dialog.GetContentArea()
+
+	// Suggest a prefix based on the first type option
+	prefixes := map[string]string{
+		"Resistor":  "R",
+		"Capacitor": "C",
+		"Regulator": "VR",
+		"Crystal":   "Y",
+		"Inductor":  "L",
+	}
+
+	// Component type combo
+	typeLabel, _ := gtk.LabelNew("Type:")
+	typeLabel.SetHAlign(gtk.ALIGN_START)
+	contentArea.PackStart(typeLabel, false, false, 2)
+
+	typeCombo, _ := gtk.ComboBoxTextNew()
+	types := []string{"Resistor", "Capacitor", "Regulator", "Crystal", "Inductor"}
+	for _, t := range types {
+		typeCombo.AppendText(t)
+	}
+	typeCombo.SetActive(0)
+	contentArea.PackStart(typeCombo, false, false, 2)
+
+	// Component name
+	nameLabel, _ := gtk.LabelNew("Name:")
+	nameLabel.SetHAlign(gtk.ALIGN_START)
+	contentArea.PackStart(nameLabel, false, false, 2)
+
+	nameEntry, _ := gtk.EntryNew()
+	nameEntry.SetActivatesDefault(true)
+	// Generate a suggested name
+	suggestName := func() {
+		activeType := typeCombo.GetActiveText()
+		prefix := prefixes[activeType]
+		if prefix == "" {
+			prefix = "X"
+		}
+		// Find the next unused number for this prefix
+		maxNum := 0
+		for _, c := range tp.state.Components {
+			if strings.HasPrefix(c.ID, prefix) {
+				numStr := strings.TrimPrefix(c.ID, prefix)
+				if n, err := strconv.Atoi(numStr); err == nil && n > maxNum {
+					maxNum = n
+				}
+			}
+		}
+		nameEntry.SetText(fmt.Sprintf("%s%d", prefix, maxNum+1))
+	}
+	suggestName()
+	typeCombo.Connect("changed", func() { suggestName() })
+	contentArea.PackStart(nameEntry, false, false, 2)
+
+	// Value
+	valueLabel, _ := gtk.LabelNew("Value:")
+	valueLabel.SetHAlign(gtk.ALIGN_START)
+	contentArea.PackStart(valueLabel, false, false, 2)
+
+	valueEntry, _ := gtk.EntryNew()
+	valueEntry.SetActivatesDefault(true)
+	contentArea.PackStart(valueEntry, false, false, 2)
+
+	// Info label
+	infoLabel, _ := gtk.LabelNew(fmt.Sprintf("Selected %d vias", len(vias)))
+	infoLabel.SetHAlign(gtk.ALIGN_START)
+	contentArea.PackStart(infoLabel, false, false, 4)
+
+	dialog.ShowAll()
+	response := dialog.Run()
+
+	// Read values BEFORE destroying — entries are children of the dialog
+	name, _ := nameEntry.GetText()
+	value, _ := valueEntry.GetText()
+	compType := typeCombo.GetActiveText()
+	dialog.Destroy()
+
+	if response != gtk.RESPONSE_OK {
+		return
+	}
+
+	if name == "" {
+		return
+	}
+
+	fmt.Printf("[add-component] creating %s (%s %s) with %d vias\n", name, compType, value, len(vias))
+	tp.createComponentFromVias(name, value, compType, vias)
+}
+
+// createComponentFromVias creates a new component from selected vias and adds it to state.
+func (tp *TracesPanel) createComponentFromVias(name, value, compType string, vias []*via.ConfirmedVia) {
+	// Compute bounding box of all vias
+	minX, minY := vias[0].Center.X, vias[0].Center.Y
+	maxX, maxY := minX, minY
+	for _, cv := range vias[1:] {
+		if cv.Center.X < minX {
+			minX = cv.Center.X
+		}
+		if cv.Center.Y < minY {
+			minY = cv.Center.Y
+		}
+		if cv.Center.X > maxX {
+			maxX = cv.Center.X
+		}
+		if cv.Center.Y > maxY {
+			maxY = cv.Center.Y
+		}
+	}
+	pad := 20.0
+	bounds := geometry.Rect{
+		X:      minX - pad,
+		Y:      minY - pad,
+		Width:  maxX - minX + 2*pad,
+		Height: maxY - minY + 2*pad,
+	}
+
+	// Determine package name from pin count
+	pkg := fmt.Sprintf("%d-pin", len(vias))
+	if len(vias) == 2 {
+		pkg = "Axial"
+	}
+
+	comp := &component.Component{
+		ID:          name,
+		PartNumber:  value,
+		Description: compType,
+		Package:     pkg,
+		Bounds:      bounds,
+		Layer:       pcbimage.SideFront,
+		Confirmed:   true,
+	}
+
+	// Assign vias as pins, numbered sequentially
+	for i, cv := range vias {
+		comp.Pins = append(comp.Pins, component.Pin{
+			Number:   i + 1,
+			Position: cv.Center,
+		})
+		cv.ComponentID = name
+		cv.PinNumber = fmt.Sprintf("%d", i+1)
+	}
+
+	tp.state.Components = append(tp.state.Components, comp)
+	fmt.Printf("[add-component] added %s, state.Components now has %d entries\n", comp.ID, len(tp.state.Components))
+	tp.state.SetModified(true)
+	tp.state.Emit(app.EventComponentsChanged, tp.state.Components)
+	tp.state.Emit(app.EventConfirmedViasChanged, nil)
+	tp.rebuildFeaturesOverlay()
+	tp.canvas.Refresh()
+	tp.viaStatusLabel.SetText(fmt.Sprintf("Created component %s (%s %s) with %d pins", name, compType, value, len(vias)))
 }
 
 // dumpGrayscaleRegion prints a grayscale matrix of a 2mm square
@@ -2769,8 +3076,7 @@ func (tp *TracesPanel) renumberPin(cv *via.ConfirmedVia) {
 			i, v.ID, v.Center.X, v.Center.Y, v.PinNumber)
 	}
 
-	// Split into two rows using median X.
-	// Collect all X values, find median, split on it.
+	// Collect coordinates and determine spread
 	xs := make([]float64, len(sorted))
 	ys := make([]float64, len(sorted))
 	for i, v := range sorted {
@@ -2784,88 +3090,121 @@ func (tp *TracesPanel) renumberPin(cv *via.ConfirmedVia) {
 	copy(sortedYs, ys)
 	sort.Float64s(sortedYs)
 
-	// Determine orientation from pin spread
 	xSpread := sortedXs[len(sortedXs)-1] - sortedXs[0]
 	ySpread := sortedYs[len(sortedYs)-1] - sortedYs[0]
 	vertical := ySpread >= xSpread
 
-	fmt.Printf("  X spread=%.0f, Y spread=%.0f → %s DIP\n",
-		xSpread, ySpread, map[bool]string{true: "vertical", false: "horizontal"}[vertical])
+	// Detect SIP vs DIP: check if pins are roughly collinear (single row).
+	// A SIP has very small spread on the short axis relative to pin spacing.
+	isSIP := false
+	comp := tp.findComponentByID(compID)
+	if comp != nil {
+		pkg := strings.ToLower(comp.Package)
+		if pkg == "axial" || strings.HasSuffix(pkg, "-pin") || strings.HasPrefix(pkg, "sip") {
+			isSIP = true
+		}
+	}
+	if !isSIP {
+		// Also auto-detect: if short axis spread is < 2x average pin spacing, it's a SIP
+		shortSpread := xSpread
+		longSpread := ySpread
+		if !vertical {
+			shortSpread = ySpread
+			longSpread = xSpread
+		}
+		avgSpacing := longSpread / float64(len(sorted)-1)
+		if avgSpacing > 0 && shortSpread < 2*avgSpacing {
+			isSIP = true
+		}
+	}
 
-	// Split into two rows using the SHORT axis median
-	var row1, row2 []*via.ConfirmedVia
-	if vertical {
-		// Short axis = X. Split at median X.
-		medX := sortedXs[len(sortedXs)/2]
-		// Use gap midpoint: find the biggest gap between sorted X values
-		splitX := medX
-		if len(sortedXs) >= 4 {
-			maxGap := 0.0
-			for i := 1; i < len(sortedXs); i++ {
-				gap := sortedXs[i] - sortedXs[i-1]
-				if gap > maxGap {
-					maxGap = gap
-					splitX = (sortedXs[i] + sortedXs[i-1]) / 2
-				}
-			}
+	var ordered []*via.ConfirmedVia
+
+	if isSIP {
+		// SIP: single row, sorted along the long axis
+		fmt.Printf("  SIP layout (%s), sorting along %s axis\n",
+			map[bool]string{true: "vertical", false: "horizontal"}[vertical],
+			map[bool]string{true: "Y", false: "X"}[vertical])
+		ordered = make([]*via.ConfirmedVia, len(sorted))
+		copy(ordered, sorted)
+		if vertical {
+			sort.Slice(ordered, func(i, j int) bool { return ordered[i].Center.Y < ordered[j].Center.Y })
+		} else {
+			sort.Slice(ordered, func(i, j int) bool { return ordered[i].Center.X < ordered[j].Center.X })
 		}
-		fmt.Printf("  Splitting rows at X=%.0f\n", splitX)
-		for _, v := range compVias {
-			if v.Center.X < splitX {
-				row1 = append(row1, v)
-			} else {
-				row2 = append(row2, v)
-			}
-		}
-		// Sort each row by Y (along the long axis)
-		sort.Slice(row1, func(i, j int) bool { return row1[i].Center.Y < row1[j].Center.Y })
-		sort.Slice(row2, func(i, j int) bool { return row2[i].Center.Y < row2[j].Center.Y })
 	} else {
-		// Short axis = Y. Split at median Y.
-		medY := sortedYs[len(sortedYs)/2]
-		splitY := medY
-		if len(sortedYs) >= 4 {
-			maxGap := 0.0
-			for i := 1; i < len(sortedYs); i++ {
-				gap := sortedYs[i] - sortedYs[i-1]
-				if gap > maxGap {
-					maxGap = gap
-					splitY = (sortedYs[i] + sortedYs[i-1]) / 2
+		// DIP: split into two rows, U-shape numbering
+		fmt.Printf("  X spread=%.0f, Y spread=%.0f → %s DIP\n",
+			xSpread, ySpread, map[bool]string{true: "vertical", false: "horizontal"}[vertical])
+
+		var row1, row2 []*via.ConfirmedVia
+		if vertical {
+			medX := sortedXs[len(sortedXs)/2]
+			splitX := medX
+			if len(sortedXs) >= 4 {
+				maxGap := 0.0
+				for i := 1; i < len(sortedXs); i++ {
+					gap := sortedXs[i] - sortedXs[i-1]
+					if gap > maxGap {
+						maxGap = gap
+						splitX = (sortedXs[i] + sortedXs[i-1]) / 2
+					}
 				}
 			}
-		}
-		fmt.Printf("  Splitting rows at Y=%.0f\n", splitY)
-		for _, v := range compVias {
-			if v.Center.Y < splitY {
-				row1 = append(row1, v)
-			} else {
-				row2 = append(row2, v)
+			fmt.Printf("  Splitting rows at X=%.0f\n", splitX)
+			for _, v := range compVias {
+				if v.Center.X < splitX {
+					row1 = append(row1, v)
+				} else {
+					row2 = append(row2, v)
+				}
 			}
+			sort.Slice(row1, func(i, j int) bool { return row1[i].Center.Y < row1[j].Center.Y })
+			sort.Slice(row2, func(i, j int) bool { return row2[i].Center.Y < row2[j].Center.Y })
+		} else {
+			medY := sortedYs[len(sortedYs)/2]
+			splitY := medY
+			if len(sortedYs) >= 4 {
+				maxGap := 0.0
+				for i := 1; i < len(sortedYs); i++ {
+					gap := sortedYs[i] - sortedYs[i-1]
+					if gap > maxGap {
+						maxGap = gap
+						splitY = (sortedYs[i] + sortedYs[i-1]) / 2
+					}
+				}
+			}
+			fmt.Printf("  Splitting rows at Y=%.0f\n", splitY)
+			for _, v := range compVias {
+				if v.Center.Y < splitY {
+					row1 = append(row1, v)
+				} else {
+					row2 = append(row2, v)
+				}
+			}
+			sort.Slice(row1, func(i, j int) bool { return row1[i].Center.X < row1[j].Center.X })
+			sort.Slice(row2, func(i, j int) bool { return row2[i].Center.X < row2[j].Center.X })
 		}
-		// Sort each row by X (along the long axis)
-		sort.Slice(row1, func(i, j int) bool { return row1[i].Center.X < row1[j].Center.X })
-		sort.Slice(row2, func(i, j int) bool { return row2[i].Center.X < row2[j].Center.X })
+
+		fmt.Printf("  Row 1 (%d pins):", len(row1))
+		for _, v := range row1 {
+			fmt.Printf(" %s(%.0f,%.0f)", v.PinNumber, v.Center.X, v.Center.Y)
+		}
+		fmt.Println()
+		fmt.Printf("  Row 2 (%d pins):", len(row2))
+		for _, v := range row2 {
+			fmt.Printf(" %s(%.0f,%.0f)", v.PinNumber, v.Center.X, v.Center.Y)
+		}
+		fmt.Println()
+
+		ordered = make([]*via.ConfirmedVia, 0, len(compVias))
+		ordered = append(ordered, row1...)
+		for i := len(row2) - 1; i >= 0; i-- {
+			ordered = append(ordered, row2[i])
+		}
 	}
 
-	fmt.Printf("  Row 1 (%d pins):", len(row1))
-	for _, v := range row1 {
-		fmt.Printf(" %s(%.0f,%.0f)", v.PinNumber, v.Center.X, v.Center.Y)
-	}
-	fmt.Println()
-	fmt.Printf("  Row 2 (%d pins):", len(row2))
-	for _, v := range row2 {
-		fmt.Printf(" %s(%.0f,%.0f)", v.PinNumber, v.Center.X, v.Center.Y)
-	}
-	fmt.Println()
-
-	// Build DIP U-shape: row1 forward, then row2 reversed.
-	ordered := make([]*via.ConfirmedVia, 0, len(compVias))
-	ordered = append(ordered, row1...)
-	for i := len(row2) - 1; i >= 0; i-- {
-		ordered = append(ordered, row2[i])
-	}
-
-	fmt.Printf("  DIP U-shape order:\n")
+	fmt.Printf("  Pin order:\n")
 	for i, v := range ordered {
 		fmt.Printf("    slot %2d: %s at (%.0f, %.0f)\n", i, v.ID, v.Center.X, v.Center.Y)
 	}
@@ -2883,29 +3222,64 @@ func (tp *TracesPanel) renumberPin(cv *via.ConfirmedVia) {
 		return
 	}
 
-	// Assign pin numbers: clicked via = newPinNum, others follow by offset
 	total := len(ordered)
 	fmt.Printf("  Clicked %s at slot %d → pin %d\n", cv.ID, clickedSlot, newPinNum)
-	for i, v := range ordered {
-		offset := i - clickedSlot
-		pin := newPinNum + offset
-		for pin < 1 {
-			pin += total
+
+	if isSIP {
+		// SIP: infer direction from the clicked position and assigned pin number.
+		// If pin 1 would fall before the start of the sorted list, reverse the order.
+		pin1Slot := clickedSlot - (newPinNum - 1)
+		pinNSlot := clickedSlot + (total - newPinNum)
+		if pin1Slot < 0 || pinNSlot >= total {
+			// Reverse the order
+			for i, j := 0, len(ordered)-1; i < j; i, j = i+1, j-1 {
+				ordered[i], ordered[j] = ordered[j], ordered[i]
+			}
+			clickedSlot = total - 1 - clickedSlot
+			fmt.Printf("  Reversed order (pin 1 at far end)\n")
 		}
-		for pin > total {
-			pin -= total
+		// Assign linearly
+		for i, v := range ordered {
+			pin := newPinNum + (i - clickedSlot)
+			oldPin := v.PinNumber
+			v.PinNumber = strconv.Itoa(pin)
+			component.ResolveSignalName(v, tp.state.Components, tp.state.ComponentLibrary)
+			fmt.Printf("    slot %2d: pin %s → %d  %s (%.0f, %.0f)\n",
+				i, oldPin, pin, v.ID, v.Center.X, v.Center.Y)
 		}
-		oldPin := v.PinNumber
-		v.PinNumber = strconv.Itoa(pin)
-		component.ResolveSignalName(v, tp.state.Components, tp.state.ComponentLibrary)
-		fmt.Printf("    slot %2d: pin %s → %d  %s (%.0f, %.0f)\n",
-			i, oldPin, pin, v.ID, v.Center.X, v.Center.Y)
+	} else {
+		// DIP: wrapping U-shape numbering
+		for i, v := range ordered {
+			offset := i - clickedSlot
+			pin := newPinNum + offset
+			for pin < 1 {
+				pin += total
+			}
+			for pin > total {
+				pin -= total
+			}
+			oldPin := v.PinNumber
+			v.PinNumber = strconv.Itoa(pin)
+			component.ResolveSignalName(v, tp.state.Components, tp.state.ComponentLibrary)
+			fmt.Printf("    slot %2d: pin %s → %d  %s (%.0f, %.0f)\n",
+				i, oldPin, pin, v.ID, v.Center.X, v.Center.Y)
+		}
 	}
 
 	fmt.Printf("Renumbered %d pins for %s\n", total, compID)
 	tp.rebuildFeaturesOverlay()
 	tp.canvas.Refresh()
 	tp.state.Emit(app.EventConfirmedViasChanged, nil)
+}
+
+// findComponentByID returns the component with the given ID, or nil.
+func (tp *TracesPanel) findComponentByID(id string) *component.Component {
+	for _, c := range tp.state.Components {
+		if c.ID == id {
+			return c
+		}
+	}
+	return nil
 }
 
 // isOutputPin returns true if the confirmed via is an output pin according to the

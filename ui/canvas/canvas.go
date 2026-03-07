@@ -121,6 +121,7 @@ type ImageCanvas struct {
 	rubberBandFrom geometry.Point2D
 	rubberBandTo   geometry.Point2D
 	rubberBandOn   bool
+	rubberBandRect bool // true = draw rectangle instead of line
 
 	// Middle-button pan state
 	middleDragging bool
@@ -476,10 +477,19 @@ func (ic *ImageCanvas) UpdateRubberBand(toX, toY float64) {
 	ic.drawArea.QueueDraw()
 }
 
-// HideRubberBand disables the rubber band line.
+// HideRubberBand disables the rubber band line or rectangle.
 func (ic *ImageCanvas) HideRubberBand() {
 	ic.rubberBandOn = false
+	ic.rubberBandRect = false
 	ic.drawArea.QueueDraw()
+}
+
+// ShowRubberRect starts a rubber-band rectangle from the given corner.
+func (ic *ImageCanvas) ShowRubberRect(fromX, fromY float64) {
+	ic.rubberBandFrom = geometry.Point2D{X: fromX, Y: fromY}
+	ic.rubberBandTo = ic.rubberBandFrom
+	ic.rubberBandOn = true
+	ic.rubberBandRect = true
 }
 
 // SetDPI sets the DPI for the background grid (1mm squares).
@@ -1056,14 +1066,21 @@ func (ic *ImageCanvas) draw(w, h int) image.Image {
 		ic.drawOverlay(output, overlay)
 	}
 
-	// Draw rubber band line if active
+	// Draw rubber band line or rectangle if active
 	if ic.rubberBandOn {
 		rbColor := color.RGBA{R: 255, G: 255, B: 0, A: 255}
 		x1 := int(ic.rubberBandFrom.X * ic.zoom)
 		y1 := int(ic.rubberBandFrom.Y * ic.zoom)
 		x2 := int(ic.rubberBandTo.X * ic.zoom)
 		y2 := int(ic.rubberBandTo.Y * ic.zoom)
-		ic.drawLine(output, x1, y1, x2, y2, rbColor, 2)
+		if ic.rubberBandRect {
+			ic.drawLine(output, x1, y1, x2, y1, rbColor, 2)
+			ic.drawLine(output, x2, y1, x2, y2, rbColor, 2)
+			ic.drawLine(output, x2, y2, x1, y2, rbColor, 2)
+			ic.drawLine(output, x1, y2, x1, y1, rbColor, 2)
+		} else {
+			ic.drawLine(output, x1, y1, x2, y2, rbColor, 2)
+		}
 	}
 
 	// Draw selection rectangle if selecting

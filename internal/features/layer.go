@@ -1025,6 +1025,16 @@ func (l *DetectedFeaturesLayer) GetNetByName(name string) *netlist.ElectricalNet
 	return nil
 }
 
+// RenameNet sets the display name of a net by ID and marks it as manually named.
+func (l *DetectedFeaturesLayer) RenameNet(netID, newName string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if net, ok := l.netsMap[netID]; ok {
+		net.Name = newName
+		net.ManualName = true
+	}
+}
+
 // GetNetForElement returns the net containing an element.
 // Uses the reverse index for O(1) lookup, falling back to linear scan.
 func (l *DetectedFeaturesLayer) GetNetForElement(elementID string) *netlist.ElectricalNet {

@@ -22,7 +22,9 @@ type SchematicCanvas struct {
 	drawArea  *gtk.DrawingArea
 	scrollWin *gtk.ScrolledWindow
 
-	doc *SchematicDoc
+	doc      *SchematicDoc
+	sheetNum int           // Which sheet this canvas shows (1-based)
+	manager  *SheetManager // Multi-window coordinator (nil for single-window)
 
 	// View transform
 	zoom float64
@@ -48,8 +50,9 @@ type SchematicCanvas struct {
 	selected map[string]bool // symbol IDs
 
 	// Callbacks
-	onStatusUpdate func(string)
-	onLayoutChanged func() // Called when symbol position or flip changes
+	onStatusUpdate  func(string)
+	onLayoutChanged func()                   // Called when symbol position or flip changes
+	onNetRenamed    func(netID, newName string) // Called when a net is renamed via schematic
 }
 
 // NewSchematicCanvas creates a new schematic canvas widget.
@@ -237,6 +240,11 @@ func (sc *SchematicCanvas) OnLayoutChanged(fn func()) {
 	sc.onLayoutChanged = fn
 }
 
+// OnNetRenamed sets a callback for when a net is renamed via the schematic.
+func (sc *SchematicCanvas) OnNetRenamed(fn func(netID, newName string)) {
+	sc.onNetRenamed = fn
+}
+
 // --- Coordinate transforms ---
 
 // screenToSchematic converts screen (DrawingArea) coordinates to schematic coordinates.
@@ -384,8 +392,9 @@ func (sc *SchematicCanvas) hitTestSymbol(x, y float64) *PlacedSymbol {
 		return nil
 	}
 	// Check in reverse order (last drawn = on top)
-	for i := len(sc.doc.Symbols) - 1; i >= 0; i-- {
-		sym := sc.doc.Symbols[i]
+	syms := sc.visibleSymbols()
+	for i := len(syms) - 1; i >= 0; i-- {
+		sym := syms[i]
 		def := GetSymbolDef(sym.GateType,
 			countPinsByDir(sym, "input"),
 			countPinsByDir(sym, "output"),
@@ -457,20 +466,20 @@ func (sc *SchematicCanvas) rerouteWiresForSymbol(sym *PlacedSymbol) {
 	}
 }
 
-// findPinsForNet returns all pin positions that belong to a net.
+// findPinsForNet returns all pin positions that belong to a net on the current sheet.
 func (sc *SchematicCanvas) findPinsForNet(netID string) []pinPos {
 	var result []pinPos
-	for _, sym := range sc.doc.Symbols {
+	for _, sym := range sc.visibleSymbols() {
 		for _, pin := range sym.Pins {
 			if pin.NetID == netID {
 				result = append(result, pinPos{X: pin.X, Y: pin.Y, Dir: pin.Direction})
 			}
 		}
 	}
-	for _, pp := range sc.doc.PowerPorts {
-		// Power ports connect via net name matching
-		if pp.NetName == netID {
-			result = append(result, pinPos{X: pp.PinX, Y: pp.PinY, Dir: "power"})
+	// Include off-sheet connector positions
+	for _, osc := range sc.visibleOffSheetConnectors() {
+		if osc.NetID == netID {
+			result = append(result, pinPos{X: osc.X, Y: osc.Y, Dir: osc.Direction})
 		}
 	}
 	return result
@@ -492,7 +501,7 @@ func (sc *SchematicCanvas) onRightPress(schX, schY float64, ev *gdk.Event) {
 	// Try wire
 	wire := sc.hitTestWire(schX, schY)
 	if wire != nil {
-		sc.onRightPressWire(wire)
+		sc.onRightPressWire(wire, ev)
 		return
 	}
 }
@@ -523,24 +532,96 @@ func (sc *SchematicCanvas) onRightPressSymbol(sym *PlacedSymbol, ev *gdk.Event) 
 	})
 	menu.Append(rotateItem)
 
+	// "Move to Sheet" submenu (only if manager is available)
+	if sc.manager != nil {
+		sepItem, _ := gtk.SeparatorMenuItemNew()
+		menu.Append(sepItem)
+
+		moveMenu, _ := gtk.MenuNew()
+		moveItem, _ := gtk.MenuItemNewWithLabel("Move to Sheet")
+		moveItem.SetSubmenu(moveMenu)
+
+		currentSheet := effectiveSheet(sym.Sheet)
+
+		// Add existing sheets (excluding current)
+		for _, sheet := range sc.manager.Sheets() {
+			if sheet.Number == currentSheet {
+				continue
+			}
+			s := sheet // capture
+			label := fmt.Sprintf("Sheet %d: %s", s.Number, s.Name)
+			item, _ := gtk.MenuItemNewWithLabel(label)
+			item.Connect("activate", func() {
+				sc.manager.MoveSymbolToSheet(sym.ID, s.Number)
+			})
+			moveMenu.Append(item)
+		}
+
+		// "New Sheet..." option
+		newSheetItem, _ := gtk.MenuItemNewWithLabel("New Sheet...")
+		newSheetItem.Connect("activate", func() {
+			sc.promptNewSheet(sym)
+		})
+		moveMenu.Append(newSheetItem)
+
+		menu.Append(moveItem)
+	}
+
 	menu.ShowAll()
 	menu.PopupAtPointer(ev)
 }
 
-// onRightPressWire highlights the entire net: all wires, symbols, and junctions.
-func (sc *SchematicCanvas) onRightPressWire(wire *Wire) {
+// promptNewSheet shows a dialog to create a new sheet and move the symbol to it.
+func (sc *SchematicCanvas) promptNewSheet(sym *PlacedSymbol) {
+	if sc.manager == nil {
+		return
+	}
+
+	dialog, _ := gtk.DialogNewWithButtons(
+		"New Sheet",
+		nil,
+		gtk.DIALOG_MODAL|gtk.DIALOG_DESTROY_WITH_PARENT,
+		[]interface{}{"Cancel", gtk.RESPONSE_CANCEL},
+		[]interface{}{"OK", gtk.RESPONSE_OK},
+	)
+	dialog.SetDefaultSize(300, 100)
+	dialog.SetDefaultResponse(gtk.RESPONSE_OK)
+
+	box, _ := dialog.GetContentArea()
+	label, _ := gtk.LabelNew("Sheet name:")
+	box.PackStart(label, false, false, 4)
+
+	entry, _ := gtk.EntryNew()
+	entry.SetText("New Sheet")
+	entry.SetActivatesDefault(true)
+	box.PackStart(entry, false, false, 4)
+
+	dialog.ShowAll()
+	response := dialog.Run()
+	if response == gtk.RESPONSE_OK {
+		name, _ := entry.GetText()
+		if name == "" {
+			name = "New Sheet"
+		}
+		sheet := sc.manager.AddSheet(name)
+		sc.manager.MoveSymbolToSheet(sym.ID, sheet.Number)
+		sc.manager.OpenSheet(sheet.Number)
+	}
+	dialog.Destroy()
+}
+
+// onRightPressWire shows a context menu for a wire (highlight net, rename).
+func (sc *SchematicCanvas) onRightPressWire(wire *Wire, ev *gdk.Event) {
 	sc.clearSelection()
 
 	netID := wire.NetID
 
-	// Select all wires on this net
+	// Highlight the entire net
 	for _, w := range sc.doc.Wires {
 		if w.NetID == netID {
 			w.Selected = true
 		}
 	}
-
-	// Select all symbols that have a pin on this net
 	for _, sym := range sc.doc.Symbols {
 		for _, pin := range sym.Pins {
 			if pin.NetID == netID {
@@ -550,8 +631,89 @@ func (sc *SchematicCanvas) onRightPressWire(wire *Wire) {
 			}
 		}
 	}
-
 	sc.drawArea.QueueDraw()
+
+	menu, _ := gtk.MenuNew()
+
+	// Show net name in label
+	netName := wire.NetName
+	if netName == "" {
+		netName = wire.NetID
+	}
+	headerItem, _ := gtk.MenuItemNewWithLabel(fmt.Sprintf("Net: %s", netName))
+	headerItem.SetSensitive(false)
+	menu.Append(headerItem)
+
+	sepItem, _ := gtk.SeparatorMenuItemNew()
+	menu.Append(sepItem)
+
+	renameItem, _ := gtk.MenuItemNewWithLabel("Rename Net...")
+	renameItem.Connect("activate", func() {
+		sc.promptRenameNet(wire)
+	})
+	menu.Append(renameItem)
+
+	menu.ShowAll()
+	menu.PopupAtPointer(ev)
+}
+
+// promptRenameNet shows a dialog to rename a net and propagates to app state.
+func (sc *SchematicCanvas) promptRenameNet(wire *Wire) {
+	dialog, _ := gtk.DialogNewWithButtons(
+		"Rename Net",
+		nil,
+		gtk.DIALOG_MODAL|gtk.DIALOG_DESTROY_WITH_PARENT,
+		[]interface{}{"Cancel", gtk.RESPONSE_CANCEL},
+		[]interface{}{"OK", gtk.RESPONSE_OK},
+	)
+	dialog.SetDefaultSize(300, 100)
+	dialog.SetDefaultResponse(gtk.RESPONSE_OK)
+
+	box, _ := dialog.GetContentArea()
+	label, _ := gtk.LabelNew("Net name:")
+	box.PackStart(label, false, false, 4)
+
+	entry, _ := gtk.EntryNew()
+	if wire.NetName != "" {
+		entry.SetText(wire.NetName)
+	}
+	entry.SetActivatesDefault(true)
+	box.PackStart(entry, false, false, 4)
+
+	dialog.ShowAll()
+	response := dialog.Run()
+	if response == gtk.RESPONSE_OK {
+		newName, _ := entry.GetText()
+		if newName != "" {
+			// Update all wires on this net
+			for _, w := range sc.doc.Wires {
+				if w.NetID == wire.NetID {
+					w.NetName = newName
+				}
+			}
+			// Update net labels
+			for _, nl := range sc.doc.NetLabels {
+				if nl.NetID == wire.NetID {
+					nl.NetName = newName
+				}
+			}
+			// Update pin net names on symbols
+			for _, sym := range sc.doc.Symbols {
+				for _, pin := range sym.Pins {
+					if pin.NetID == wire.NetID {
+						pin.NetName = newName
+					}
+				}
+			}
+			sc.drawArea.QueueDraw()
+
+			// Propagate to app state
+			if sc.onNetRenamed != nil {
+				sc.onNetRenamed(wire.NetID, newName)
+			}
+		}
+	}
+	dialog.Destroy()
 }
 
 // hitTestWire returns the wire closest to (x, y) within tolerance, or nil.
@@ -563,7 +725,7 @@ func (sc *SchematicCanvas) hitTestWire(x, y float64) *Wire {
 	var bestWire *Wire
 	bestDist := tolerance
 
-	for _, wire := range sc.doc.Wires {
+	for _, wire := range sc.visibleWires() {
 		for i := 0; i < len(wire.Points)-1; i++ {
 			d := pointToSegmentDist(x, y,
 				wire.Points[i].X, wire.Points[i].Y,
@@ -653,4 +815,84 @@ func countPinsByDir(sym *PlacedSymbol, dir string) int {
 		}
 	}
 	return n
+}
+
+// --- Sheet filtering ---
+
+// visibleSymbols returns symbols on the current sheet.
+func (sc *SchematicCanvas) visibleSymbols() []*PlacedSymbol {
+	if sc.sheetNum <= 0 || sc.doc == nil {
+		return sc.doc.Symbols
+	}
+	var result []*PlacedSymbol
+	for _, sym := range sc.doc.Symbols {
+		if effectiveSheet(sym.Sheet) == sc.sheetNum {
+			result = append(result, sym)
+		}
+	}
+	return result
+}
+
+// visibleWires returns wires on the current sheet.
+func (sc *SchematicCanvas) visibleWires() []*Wire {
+	if sc.sheetNum <= 0 || sc.doc == nil {
+		return sc.doc.Wires
+	}
+	var result []*Wire
+	for _, w := range sc.doc.Wires {
+		if effectiveSheet(w.Sheet) == sc.sheetNum {
+			result = append(result, w)
+		}
+	}
+	return result
+}
+
+// visiblePowerPorts returns power ports on the current sheet.
+func (sc *SchematicCanvas) visiblePowerPorts() []*PowerPort {
+	if sc.sheetNum <= 0 || sc.doc == nil {
+		return sc.doc.PowerPorts
+	}
+	var result []*PowerPort
+	for _, pp := range sc.doc.PowerPorts {
+		if effectiveSheet(pp.Sheet) == sc.sheetNum {
+			result = append(result, pp)
+		}
+	}
+	return result
+}
+
+// visibleNetLabels returns net labels on the current sheet
+// (labels belong to wires, so we filter by matching wire sheet).
+func (sc *SchematicCanvas) visibleNetLabels() []*NetLabel {
+	if sc.sheetNum <= 0 || sc.doc == nil {
+		return sc.doc.NetLabels
+	}
+	// Build set of net IDs visible on this sheet
+	visNets := make(map[string]bool)
+	for _, w := range sc.doc.Wires {
+		if effectiveSheet(w.Sheet) == sc.sheetNum {
+			visNets[w.NetID] = true
+		}
+	}
+	var result []*NetLabel
+	for _, label := range sc.doc.NetLabels {
+		if visNets[label.NetID] {
+			result = append(result, label)
+		}
+	}
+	return result
+}
+
+// visibleOffSheetConnectors returns off-sheet connectors on the current sheet.
+func (sc *SchematicCanvas) visibleOffSheetConnectors() []*OffSheetConnector {
+	if sc.sheetNum <= 0 || sc.doc == nil {
+		return sc.doc.OffSheetConnectors
+	}
+	var result []*OffSheetConnector
+	for _, osc := range sc.doc.OffSheetConnectors {
+		if osc.Sheet == sc.sheetNum {
+			result = append(result, osc)
+		}
+	}
+	return result
 }

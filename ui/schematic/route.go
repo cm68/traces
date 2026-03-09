@@ -87,9 +87,23 @@ func routeSheetWires(doc *SchematicDoc, sheetNum int, wireID int) int {
 			}
 		}
 	}
-	// Skip power nets — they use local power port symbols, not wires
+	// For power nets: keep only non-"power"-direction pins for routing.
+	// Supply pins (direction="power") are represented by PowerPort symbols.
+	// Signal-function pins (input/enable/clock/output) tied to GND/VCC are
+	// logically significant and need wires to show the connection.
 	for netID := range doc.PowerNetIDs {
-		delete(netPins, netID)
+		pins := netPins[netID]
+		var signalPins []pinPos
+		for _, p := range pins {
+			if p.Dir != "power" {
+				signalPins = append(signalPins, p)
+			}
+		}
+		if len(signalPins) < 2 {
+			delete(netPins, netID) // nothing to route
+		} else {
+			netPins[netID] = signalPins
+		}
 	}
 
 	// Include off-sheet connector positions as wire endpoints
@@ -132,6 +146,48 @@ func routeSheetWires(doc *SchematicDoc, sheetNum int, wireID int) int {
 		}
 	}
 	return wireID
+}
+
+// regenerateNetLabels rebuilds doc.NetLabels from the current wire set.
+// Labels are placed at the midpoint of each wire's first segment and carry the
+// wire's sheet, so they are always in sync with routed wires regardless of
+// how symbols have been moved between sheets.
+func regenerateNetLabels(doc *SchematicDoc) {
+	doc.NetLabels = nil
+
+	// Build a netID→name fallback from symbol pins and off-sheet connectors.
+	netNames := make(map[string]string)
+	for _, sym := range doc.Symbols {
+		for _, pin := range sym.Pins {
+			if pin.NetID != "" && pin.NetName != "" {
+				netNames[pin.NetID] = pin.NetName
+			}
+		}
+	}
+	for _, osc := range doc.OffSheetConnectors {
+		if osc.NetID != "" && osc.NetName != "" {
+			netNames[osc.NetID] = osc.NetName
+		}
+	}
+
+	for _, wire := range doc.Wires {
+		netName := wire.NetName
+		if netName == "" {
+			netName = netNames[wire.NetID]
+		}
+		if netName == "" || len(wire.Points) < 2 {
+			continue
+		}
+		midX := (wire.Points[0].X + wire.Points[1].X) / 2
+		midY := (wire.Points[0].Y + wire.Points[1].Y) / 2
+		doc.NetLabels = append(doc.NetLabels, &NetLabel{
+			NetID:   wire.NetID,
+			NetName: netName,
+			X:       midX,
+			Y:       midY - 8,
+			Sheet:   effectiveSheet(wire.Sheet),
+		})
+	}
 }
 
 // mstEdges returns edges of a minimum spanning tree using Kruskal's algorithm.

@@ -218,12 +218,35 @@ func AutoLayout(doc *SchematicDoc) {
 		}
 	}
 
-	// Step 5: Assign absolute coordinates
-	for _, si := range syms {
-		si.sym.X = startX + float64(si.column)*colSpacing
-		si.sym.Y = startY + float64(si.row)*rowSpacing
-		si.sym.Column = si.column
-		si.sym.Row = si.row
+	// Step 5: Assign absolute coordinates.
+	// Columns use fixed X spacing. Within each column we stack symbols with
+	// a gap derived from their actual body heights to prevent overlap.
+	const colGap = 40.0 // minimum vertical gap between symbol bodies
+
+	for col := 0; col <= maxCol; col++ {
+		colSyms := columns[col]
+		// Sort by the row index assigned above
+		sort.Slice(colSyms, func(a, b int) bool {
+			return colSyms[a].row < colSyms[b].row
+		})
+		nextY := startY
+		for _, si := range colSyms {
+			def := GetSymbolDef(si.sym.GateType,
+				countPinsByDir(si.sym, "input"),
+				countPinsByDir(si.sym, "output"),
+				countPinsByDir(si.sym, "enable"),
+				countPinsByDir(si.sym, "clock"))
+			halfH := 50.0 // fallback half-height
+			if def != nil {
+				halfH = def.BodyHeight/2 + stubLength
+			}
+			// Place symbol centre so its top clears nextY
+			si.sym.Y = nextY + halfH
+			si.sym.X = startX + float64(col)*colSpacing
+			si.sym.Column = col
+			// Advance nextY past this symbol's bottom
+			nextY = si.sym.Y + halfH + colGap
+		}
 	}
 
 }

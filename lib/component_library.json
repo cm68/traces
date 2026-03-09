@@ -300,7 +300,7 @@
           "outputs": [
             3
           ],
-          "expr": "Y = A & B"
+          "expr": "Y = A \u0026 B"
         },
         {
           "name": "2",
@@ -312,7 +312,7 @@
           "outputs": [
             6
           ],
-          "expr": "Y = A & B"
+          "expr": "Y = A \u0026 B"
         },
         {
           "name": "3",
@@ -324,7 +324,7 @@
           "outputs": [
             8
           ],
-          "expr": "Y = A & B"
+          "expr": "Y = A \u0026 B"
         },
         {
           "name": "4",
@@ -336,7 +336,7 @@
           "outputs": [
             11
           ],
-          "expr": "Y = A & B"
+          "expr": "Y = A \u0026 B"
         }
       ]
     },
@@ -579,7 +579,7 @@
           "outputs": [
             3
           ],
-          "expr": "Y = ~(A & B)"
+          "expr": "Y = ~(A \u0026 B)"
         },
         {
           "name": "2",
@@ -591,7 +591,7 @@
           "outputs": [
             6
           ],
-          "expr": "Y = ~(A & B)"
+          "expr": "Y = ~(A \u0026 B)"
         },
         {
           "name": "3",
@@ -603,7 +603,7 @@
           "outputs": [
             8
           ],
-          "expr": "Y = ~(A & B)"
+          "expr": "Y = ~(A \u0026 B)"
         },
         {
           "name": "4",
@@ -615,7 +615,7 @@
           "outputs": [
             11
           ],
-          "expr": "Y = ~(A & B)"
+          "expr": "Y = ~(A \u0026 B)"
         }
       ]
     },
@@ -707,7 +707,7 @@
           "outputs": [
             3
           ],
-          "expr": "Y = ~(A & B)"
+          "expr": "Y = ~(A \u0026 B)"
         },
         {
           "name": "2",
@@ -719,7 +719,7 @@
           "outputs": [
             6
           ],
-          "expr": "Y = ~(A & B)"
+          "expr": "Y = ~(A \u0026 B)"
         },
         {
           "name": "3",
@@ -731,7 +731,7 @@
           "outputs": [
             8
           ],
-          "expr": "Y = ~(A & B)"
+          "expr": "Y = ~(A \u0026 B)"
         },
         {
           "name": "4",
@@ -743,7 +743,7 @@
           "outputs": [
             11
           ],
-          "expr": "Y = ~(A & B)"
+          "expr": "Y = ~(A \u0026 B)"
         }
       ]
     },
@@ -1109,7 +1109,7 @@
           "outputs": [
             3
           ],
-          "expr": "Y = A & B"
+          "expr": "Y = A \u0026 B"
         },
         {
           "name": "2",
@@ -1121,7 +1121,7 @@
           "outputs": [
             6
           ],
-          "expr": "Y = A & B"
+          "expr": "Y = A \u0026 B"
         },
         {
           "name": "3",
@@ -1133,7 +1133,7 @@
           "outputs": [
             8
           ],
-          "expr": "Y = A & B"
+          "expr": "Y = A \u0026 B"
         },
         {
           "name": "4",
@@ -1145,7 +1145,7 @@
           "outputs": [
             11
           ],
-          "expr": "Y = A & B"
+          "expr": "Y = A \u0026 B"
         }
       ]
     },
@@ -1238,7 +1238,7 @@
           "outputs": [
             12
           ],
-          "expr": "Y = ~(A & B & C)"
+          "expr": "Y = ~(A \u0026 B \u0026 C)"
         },
         {
           "name": "2",
@@ -1251,7 +1251,7 @@
           "outputs": [
             6
           ],
-          "expr": "Y = ~(A & B & C)"
+          "expr": "Y = ~(A \u0026 B \u0026 C)"
         },
         {
           "name": "3",
@@ -1264,7 +1264,7 @@
           "outputs": [
             8
           ],
-          "expr": "Y = ~(A & B & C)"
+          "expr": "Y = ~(A \u0026 B \u0026 C)"
         }
       ]
     },
@@ -1504,7 +1504,7 @@
             5,
             6
           ],
-          "expr": "/Y0-/Y7 = decode(A,B,C) when /G2A & /G2B & G1"
+          "expr": "/Y0-/Y7 = decode(A,B,C) when /G2A \u0026 /G2B \u0026 G1"
         }
       ]
     },
@@ -1864,11 +1864,11 @@
             12,
             13
           ],
-          "clocks": [
-            8
-          ],
           "enables": [
             1
+          ],
+          "clocks": [
+            8
           ],
           "expr": "Q0-Q3, shift/load"
         }
@@ -2682,13 +2682,13 @@
         },
         {
           "number": 6,
-          "name": "3D",
-          "direction": "Input"
+          "name": "3Q",
+          "direction": "Output"
         },
         {
           "number": 7,
-          "name": "3Q",
-          "direction": "Output"
+          "name": "3D",
+          "direction": "Input"
         },
         {
           "number": 8,
@@ -2722,23 +2722,23 @@
         },
         {
           "number": 14,
-          "name": "6Q",
-          "direction": "Output"
-        },
-        {
-          "number": 15,
           "name": "6D",
           "direction": "Input"
         },
         {
+          "number": 15,
+          "name": "6Q",
+          "direction": "Output"
+        },
+        {
           "number": 16,
-          "name": "7D",
-          "direction": "Input"
+          "name": "7Q",
+          "direction": "Output"
         },
         {
           "number": 17,
-          "name": "7Q",
-          "direction": "Output"
+          "name": "7D",
+          "direction": "Input"
         },
         {
           "number": 18,
@@ -2767,11 +2767,11 @@
           "outputs": [
             2
           ],
-          "clocks": [
-            11
-          ],
           "enables": [
             1
+          ],
+          "clocks": [
+            11
           ],
           "expr": "Q = D on rising CLK, /CLR async"
         },
@@ -2784,11 +2784,11 @@
           "outputs": [
             5
           ],
-          "clocks": [
-            11
-          ],
           "enables": [
             1
+          ],
+          "clocks": [
+            11
           ],
           "expr": "Q = D on rising CLK, /CLR async"
         },
@@ -2801,11 +2801,11 @@
           "outputs": [
             6
           ],
-          "clocks": [
-            11
-          ],
           "enables": [
             1
+          ],
+          "clocks": [
+            11
           ],
           "expr": "Q = D on rising CLK, /CLR async"
         },
@@ -2818,11 +2818,11 @@
           "outputs": [
             9
           ],
-          "clocks": [
-            11
-          ],
           "enables": [
             1
+          ],
+          "clocks": [
+            11
           ],
           "expr": "Q = D on rising CLK, /CLR async"
         },
@@ -2835,11 +2835,11 @@
           "outputs": [
             12
           ],
-          "clocks": [
-            11
-          ],
           "enables": [
             1
+          ],
+          "clocks": [
+            11
           ],
           "expr": "Q = D on rising CLK, /CLR async"
         },
@@ -2852,11 +2852,11 @@
           "outputs": [
             15
           ],
-          "clocks": [
-            11
-          ],
           "enables": [
             1
+          ],
+          "clocks": [
+            11
           ],
           "expr": "Q = D on rising CLK, /CLR async"
         },
@@ -2869,11 +2869,11 @@
           "outputs": [
             16
           ],
-          "clocks": [
-            11
-          ],
           "enables": [
             1
+          ],
+          "clocks": [
+            11
           ],
           "expr": "Q = D on rising CLK, /CLR async"
         },
@@ -2886,11 +2886,11 @@
           "outputs": [
             19
           ],
-          "clocks": [
-            11
-          ],
           "enables": [
             1
+          ],
+          "clocks": [
+            11
           ],
           "expr": "Q = D on rising CLK, /CLR async"
         }
@@ -3346,12 +3346,12 @@
             5,
             6
           ],
-          "clocks": [
-            3
-          ],
           "enables": [
             1,
             4
+          ],
+          "clocks": [
+            3
           ],
           "expr": "Q,/Q = D on rising CLK, /PRE,/CLR async"
         },
@@ -3365,12 +3365,12 @@
             9,
             8
           ],
-          "clocks": [
-            11
-          ],
           "enables": [
             13,
             10
+          ],
+          "clocks": [
+            11
           ],
           "expr": "Q,/Q = D on rising CLK, /PRE,/CLR async"
         }

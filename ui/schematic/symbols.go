@@ -9,11 +9,12 @@ import (
 // PinStub defines where a pin extends from the symbol body.
 // Coordinates are relative to the symbol center (0,0).
 type PinStub struct {
-	BodyX float64 // Where stub meets the body
-	BodyY float64
-	TipX  float64 // Where wire connects (end of stub)
-	TipY  float64
-	Side  string // "left", "right", "top", "bottom"
+	BodyX     float64 // Where stub meets the body
+	BodyY     float64
+	TipX      float64 // Where wire connects (end of stub)
+	TipY      float64
+	Side      string // "left", "right", "top", "bottom"
+	HasBubble bool   // Draw negation bubble at the body end (e.g. NAND/NOR outputs)
 }
 
 // SymbolDef defines the visual geometry of one gate type.
@@ -238,9 +239,10 @@ func flipflopSymbol(numInputs, numOutputs, numEnables, numClocks int) *SymbolDef
 // --- BLOCK: generic rectangle with pin labels ---
 
 func blockSymbol(gateType string, numInputs, numOutputs, numEnables, numClocks int) *SymbolDef {
-	leftPins := numInputs + numClocks + numEnables
+	// Left side order matches BuildPinsFromFunction: inputs, clocks, enables.
+	totalLeft := numInputs + numClocks + numEnables
 	rightPins := numOutputs
-	maxPins := leftPins
+	maxPins := totalLeft
 	if rightPins > maxPins {
 		maxPins = rightPins
 	}
@@ -252,26 +254,33 @@ func blockSymbol(gateType string, numInputs, numOutputs, numEnables, numClocks i
 		w = 200
 	}
 
-	// All inputs, enables, and clocks go on the left side
-	totalLeft := numInputs + numEnables + numClocks
-	var allInputs []PinStub
+	// Build all left-side stubs in one pass, then split by direction bucket.
+	allLeft := make([]PinStub, totalLeft)
 	for i := 0; i < totalLeft; i++ {
 		y := -h/2 + float64(i)*50 + 25
 		if totalLeft == 1 {
 			y = 0
 		}
-		allInputs = append(allInputs, PinStub{
+		allLeft[i] = PinStub{
 			BodyX: -w / 2, BodyY: y,
 			TipX: -w/2 - stubLength, TipY: y,
 			Side: "left",
-		})
+		}
 	}
+
+	// Slice the stubs to match the order ComputePinPositions expects:
+	// InputStubs for "input", then ClockStubs for "clock", then EnableStubs for "enable".
+	ins := allLeft[:numInputs]
+	clks := allLeft[numInputs : numInputs+numClocks]
+	ens := allLeft[numInputs+numClocks:]
 
 	return &SymbolDef{
 		GateType:    gateType,
 		BodyWidth:   w,
 		BodyHeight:  h,
-		InputStubs:  allInputs,
+		InputStubs:  ins,
+		ClockStubs:  clks,
+		EnableStubs: ens,
 		OutputStubs: outputStubs(numOutputs, w, h),
 		DrawBody:    drawRectBody,
 	}
@@ -322,7 +331,8 @@ func outputStubsWithBubble(n int, w, h float64) []PinStub {
 		stubs[i] = PinStub{
 			BodyX: w/2 + bubbleR*2, BodyY: y,
 			TipX: w/2 + bubbleR*2 + stubLength, TipY: y,
-			Side: "right",
+			Side:      "right",
+			HasBubble: true,
 		}
 	}
 	return stubs

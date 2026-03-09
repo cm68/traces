@@ -64,6 +64,16 @@ func ComputePinPositions(sym *PlacedSymbol, def *SymbolDef) {
 			pin.Y = sym.Y + tipY
 			pin.StubX = sym.X + bodyX
 			pin.StubY = sym.Y + bodyY
+			// Propagate gate-level inversion (e.g. NAND/NOR output bubble).
+			if stub.HasBubble {
+				pin.Negated = true
+			}
+		} else {
+			// No stub slot available — place at symbol center so wires don't stretch to (0,0).
+			pin.X = sym.X
+			pin.Y = sym.Y
+			pin.StubX = sym.X
+			pin.StubY = sym.Y
 		}
 	}
 }

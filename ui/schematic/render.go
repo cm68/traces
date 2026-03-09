@@ -31,9 +31,14 @@ func (sc *SchematicCanvas) render(cr *cairo.Context, w, h int) {
 		sc.drawWire(cr, wire)
 	}
 
-	// 5. Draw symbols
-	for _, sym := range sc.visibleSymbols() {
-		sc.drawSymbol(cr, sym)
+	// 5. Draw symbols — count units per component so single-unit parts omit the suffix.
+	syms := sc.visibleSymbols()
+	compCount := make(map[string]int, len(syms))
+	for _, sym := range syms {
+		compCount[sym.ComponentID]++
+	}
+	for _, sym := range syms {
+		sc.drawSymbol(cr, sym, compCount[sym.ComponentID] == 1)
 	}
 
 	// 6. Draw net labels
@@ -97,22 +102,29 @@ func (sc *SchematicCanvas) drawWire(cr *cairo.Context, wire *Wire) {
 	}
 	cr.Stroke()
 
-	// Draw junction dots where this wire bends (internal waypoints)
+	// Draw draggable corner handles at internal waypoints
 	if len(wire.Points) > 2 {
-		if wire.Selected {
-			cr.SetSourceRGB(1, 0, 0)
-		} else {
-			cr.SetSourceRGB(0, 0, 0.5)
-		}
 		for _, p := range wire.Points[1 : len(wire.Points)-1] {
-			cr.Arc(p.X, p.Y, 3, 0, 2*math.Pi)
+			// Filled inner dot
+			if wire.Selected {
+				cr.SetSourceRGB(1, 0, 0)
+			} else {
+				cr.SetSourceRGB(0, 0, 0.7)
+			}
+			cr.Arc(p.X, p.Y, 4, 0, 2*math.Pi)
+			cr.Fill()
+			// White ring so the handle reads clearly against the wire
+			cr.SetSourceRGB(1, 1, 1)
+			cr.Arc(p.X, p.Y, 2, 0, 2*math.Pi)
 			cr.Fill()
 		}
 	}
 }
 
 // drawSymbol draws a placed symbol with body, pins, labels.
-func (sc *SchematicCanvas) drawSymbol(cr *cairo.Context, sym *PlacedSymbol) {
+// singleUnit is true when this component has only one function unit on the sheet,
+// in which case the unit suffix (e.g. "-1") is omitted from the reference label.
+func (sc *SchematicCanvas) drawSymbol(cr *cairo.Context, sym *PlacedSymbol, singleUnit bool) {
 	def := GetSymbolDef(sym.GateType,
 		countPinsByDir(sym, "input"),
 		countPinsByDir(sym, "output"),
@@ -219,12 +231,15 @@ func (sc *SchematicCanvas) drawSymbol(cr *cairo.Context, sym *PlacedSymbol) {
 		}
 	}
 
-	// Component reference label above symbol (e.g., "U3-1")
+	// Component reference label above symbol (e.g., "U3-1"; "U18" when only one unit).
 	cr.Save()
 	cr.SetSourceRGB(0.8, 0, 0) // red
 	cr.SelectFontFace("sans-serif", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
 	cr.SetFontSize(18)
 	refLabel := sym.ID
+	if singleUnit {
+		refLabel = sym.ComponentID
+	}
 	extents := cr.TextExtents(refLabel)
 	cr.MoveTo(sym.X-extents.Width/2, sym.Y-def.BodyHeight/2-8)
 	cr.ShowText(refLabel)
@@ -305,6 +320,22 @@ func (sc *SchematicCanvas) drawPowerPort(cr *cairo.Context, pp *PowerPort) {
 // drawOffSheetConnector draws a flag/arrow shape indicating a net continues on another sheet.
 func (sc *SchematicCanvas) drawOffSheetConnector(cr *cairo.Context, osc *OffSheetConnector) {
 	cr.Save()
+	// apply rotation/flip transforms about connector center
+	cx := osc.X + 40 // approximate center of flag
+	cy := osc.Y
+	cr.Translate(cx, cy)
+	if osc.Rotation != 0 {
+		cr.Rotate(float64(osc.Rotation) * (math.Pi / 180))
+	}
+	if osc.FlipH {
+		cr.Scale(-1, 1)
+	}
+	if osc.FlipV {
+		cr.Scale(1, -1)
+	}
+	cr.Translate(-cx, -cy)
+
+	// draw shape
 	cr.SetLineWidth(2)
 	cr.SetSourceRGB(0.2, 0.4, 0.8) // blue
 
@@ -332,6 +363,14 @@ func (sc *SchematicCanvas) drawOffSheetConnector(cr *cairo.Context, osc *OffShee
 	cr.FillPreserve()
 	cr.SetSourceRGB(0.2, 0.4, 0.8)
 	cr.Stroke()
+
+	// highlight if selected
+	if osc.Selected {
+		cr.SetLineWidth(2)
+		cr.SetSourceRGB(1, 0, 0)
+		cr.Rectangle(osc.X-5, osc.Y-h/2-5, w+25, h+10)
+		cr.Stroke()
+	}
 
 	// Label: "NetName → Sheet N"
 	cr.SelectFontFace("sans-serif", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)

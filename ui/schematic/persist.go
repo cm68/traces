@@ -2,6 +2,7 @@ package schematic
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,10 +18,20 @@ type SymbolLayout struct {
 	Sheet    int     `json:"sheet,omitempty"`
 }
 
+// OffSheetConnectorLayout stores the user-adjusted position and transform for an off-sheet connector.
+type OffSheetConnectorLayout struct {
+	X        float64 `json:"x"`
+	Y        float64 `json:"y"`
+	FlipH    bool    `json:"flip_h,omitempty"`
+	FlipV    bool    `json:"flip_v,omitempty"`
+	Rotation int     `json:"rotation,omitempty"`
+}
+
 // SchematicLayout stores all user layout overrides, keyed by symbol ID.
 type SchematicLayout struct {
-	Symbols map[string]SymbolLayout `json:"symbols"`
-	Sheets  []Sheet                 `json:"sheets,omitempty"`
+	Symbols            map[string]SymbolLayout            `json:"symbols"`
+	OffSheetConnectors map[string]OffSheetConnectorLayout `json:"off_sheet_connectors,omitempty"`
+	Sheets             []Sheet                            `json:"sheets,omitempty"`
 }
 
 // layoutPath returns the schematic layout file path derived from the project path.
@@ -42,8 +53,9 @@ func SaveLayout(doc *SchematicDoc, projectPath string) error {
 	}
 
 	layout := &SchematicLayout{
-		Symbols: make(map[string]SymbolLayout),
-		Sheets:  doc.Sheets,
+		Symbols:            make(map[string]SymbolLayout),
+		OffSheetConnectors: make(map[string]OffSheetConnectorLayout),
+		Sheets:             doc.Sheets,
 	}
 	for _, sym := range doc.Symbols {
 		layout.Symbols[sym.ID] = SymbolLayout{
@@ -55,6 +67,17 @@ func SaveLayout(doc *SchematicDoc, projectPath string) error {
 			Sheet:    sym.Sheet,
 		}
 	}
+	for _, osc := range doc.OffSheetConnectors {
+		key := fmt.Sprintf("%d:%s", osc.Sheet, osc.NetID)
+		layout.OffSheetConnectors[key] = OffSheetConnectorLayout{
+			X:        osc.X,
+			Y:        osc.Y,
+			FlipH:    osc.FlipH,
+			FlipV:    osc.FlipV,
+			Rotation: osc.Rotation,
+		}
+	}
+	// Net labels are auto-generated from wires; no need to persist their positions.
 
 	data, err := json.MarshalIndent(layout, "", "  ")
 	if err != nil {
@@ -118,7 +141,6 @@ func ApplyLayout(doc *SchematicDoc, layout *SchematicLayout) int {
 			restored++
 		}
 	}
-
 	// Recompute pin positions after applying layout
 	for _, sym := range doc.Symbols {
 		def := GetSymbolDef(sym.GateType,
@@ -132,7 +154,23 @@ func ApplyLayout(doc *SchematicDoc, layout *SchematicLayout) int {
 	// Reposition power ports and regenerate off-sheet connectors before routing
 	positionPowerPorts(doc)
 	generateOffSheetConnectors(doc)
+
+	// Restore off-sheet connector transforms if saved
+	if layout.OffSheetConnectors != nil {
+		for _, osc := range doc.OffSheetConnectors {
+			key := fmt.Sprintf("%d:%s", osc.Sheet, osc.NetID)
+			if ocl, ok := layout.OffSheetConnectors[key]; ok {
+				osc.X = ocl.X
+				osc.Y = ocl.Y
+				osc.FlipH = ocl.FlipH
+				osc.FlipV = ocl.FlipV
+				osc.Rotation = ocl.Rotation
+			}
+		}
+	}
+
 	RouteAllWires(doc)
+	regenerateNetLabels(doc)
 
 	return restored
 }

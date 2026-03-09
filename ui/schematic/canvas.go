@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 
+	"pcb-tracer/pkg/geometry"
+
 	"github.com/gotk3/gotk3/cairo"
 	"github.com/gotk3/gotk3/gdk"
 	"github.com/gotk3/gotk3/glib"
@@ -11,10 +13,10 @@ import (
 )
 
 const (
-	schMinZoom = 0.1
-	schMaxZoom = 5.0
+	schMinZoom  = 0.1
+	schMaxZoom  = 5.0
 	schZoomStep = 1.15
-	gridSnap   = 25.0
+	gridSnap    = 25.0
 )
 
 // SchematicCanvas is an interactive schematic drawing widget.
@@ -36,10 +38,13 @@ type SchematicCanvas struct {
 	originY float64
 
 	// Interaction state
-	dragging    bool
-	dragSymbol  *PlacedSymbol
-	dragOffsetX float64 // offset from mouse to symbol origin
-	dragOffsetY float64
+	dragging              bool
+	dragSymbol            *PlacedSymbol
+	dragOffSheetConnector *OffSheetConnector
+	dragWireCorner        *Wire // wire whose corner is being dragged
+	dragCornerIdx         int   // index of the dragged corner in wire.Points
+	dragOffsetX           float64 // offset from mouse to symbol/origin
+	dragOffsetY           float64
 
 	// Middle-button pan
 	middleDragging bool
@@ -51,7 +56,7 @@ type SchematicCanvas struct {
 
 	// Callbacks
 	onStatusUpdate  func(string)
-	onLayoutChanged func()                   // Called when symbol position or flip changes
+	onLayoutChanged func()                      // Called when symbol position or flip changes
 	onNetRenamed    func(netID, newName string) // Called when a net is renamed via schematic
 }
 
@@ -132,8 +137,8 @@ func NewSchematicCanvas(doc *SchematicDoc) *SchematicCanvas {
 			return true
 		}
 
-		// Dragging a symbol
-		if sc.dragging && sc.dragSymbol != nil {
+		// Dragging a symbol, off-sheet connector, or wire corner
+		if sc.dragging && (sc.dragSymbol != nil || sc.dragOffSheetConnector != nil || sc.dragWireCorner != nil) {
 			schX, schY := sc.screenToSchematic(x, y)
 			sc.onDragMove(schX, schY)
 			return true
@@ -316,6 +321,30 @@ func (sc *SchematicCanvas) zoomAtPoint(newZoom, schX, schY, evtX, evtY float64) 
 // --- Interaction ---
 
 func (sc *SchematicCanvas) onLeftPress(schX, schY float64) {
+	// Hit test wire corners first (small targets, check before wire segments)
+	if wire, idx := sc.hitTestWireCorner(schX, schY); wire != nil {
+		sc.clearSelection()
+		wire.Selected = true
+		sc.dragging = true
+		sc.dragWireCorner = wire
+		sc.dragCornerIdx = idx
+		sc.drawArea.QueueDraw()
+		return
+	}
+
+	// Hit test off-sheet connectors
+	osc := sc.hitTestOffSheetConnector(schX, schY)
+	if osc != nil {
+		sc.clearSelection()
+		osc.Selected = true
+		sc.dragging = true
+		sc.dragOffSheetConnector = osc
+		sc.dragOffsetX = schX - osc.X
+		sc.dragOffsetY = schY - osc.Y
+		sc.drawArea.QueueDraw()
+		return
+	}
+
 	// Hit test symbols
 	sym := sc.hitTestSymbol(schX, schY)
 	if sym != nil {
@@ -337,16 +366,43 @@ func (sc *SchematicCanvas) onLeftPress(schX, schY float64) {
 }
 
 func (sc *SchematicCanvas) onLeftRelease() {
-	if sc.dragging && sc.dragSymbol != nil {
+	if sc.dragging && (sc.dragSymbol != nil || sc.dragOffSheetConnector != nil || sc.dragWireCorner != nil) {
 		if sc.onLayoutChanged != nil {
 			sc.onLayoutChanged()
 		}
 	}
 	sc.dragging = false
 	sc.dragSymbol = nil
+	sc.dragOffSheetConnector = nil
+	sc.dragWireCorner = nil
+	sc.dragCornerIdx = 0
 }
 
 func (sc *SchematicCanvas) onDragMove(schX, schY float64) {
+	// Handle wire corner dragging
+	if sc.dragWireCorner != nil {
+		newX := math.Round(schX/gridSnap) * gridSnap
+		newY := math.Round(schY/gridSnap) * gridSnap
+		sc.dragWireCorner.Points[sc.dragCornerIdx] = geometry.Point2D{X: newX, Y: newY}
+		sc.drawArea.QueueDraw()
+		return
+	}
+
+	// Handle off-sheet connector dragging
+	if sc.dragOffSheetConnector != nil {
+		// Snap to grid
+		newX := math.Round((schX-sc.dragOffsetX)/gridSnap) * gridSnap
+		newY := math.Round((schY-sc.dragOffsetY)/gridSnap) * gridSnap
+		sc.dragOffSheetConnector.X = newX
+		sc.dragOffSheetConnector.Y = newY
+
+		// Re-route affected wires
+		sc.rerouteWiresForOffSheetConnector(sc.dragOffSheetConnector)
+		sc.drawArea.QueueDraw()
+		return
+	}
+
+	// Handle symbol dragging
 	if sc.dragSymbol == nil {
 		return
 	}
@@ -365,6 +421,9 @@ func (sc *SchematicCanvas) onDragMove(schX, schY float64) {
 		countPinsByDir(sc.dragSymbol, "clock"))
 	ComputePinPositions(sc.dragSymbol, def)
 
+	// Update power port positions so GND/VCC symbols follow their pins.
+	positionPowerPorts(sc.doc)
+
 	// Re-route connected wires
 	sc.rerouteWiresForSymbol(sc.dragSymbol)
 
@@ -378,12 +437,62 @@ func (sc *SchematicCanvas) clearSelection() {
 		}
 	}
 	sc.selected = make(map[string]bool)
+	// Clear off-sheet connector selection
+	if sc.doc != nil {
+		for _, osc := range sc.doc.OffSheetConnectors {
+			osc.Selected = false
+		}
+	}
 	// Clear wire selection
 	if sc.doc != nil {
 		for _, w := range sc.doc.Wires {
 			w.Selected = false
 		}
 	}
+}
+
+// hitTestOffSheetConnector returns the off-sheet connector at (x,y) or nil.
+func (sc *SchematicCanvas) hitTestOffSheetConnector(x, y float64) *OffSheetConnector {
+	if sc.doc == nil {
+		return nil
+	}
+	// Check in reverse order (last drawn = on top)
+	oscs := sc.visibleOffSheetConnectors()
+	for i := len(oscs) - 1; i >= 0; i-- {
+		osc := oscs[i]
+		w := 80.0
+		h := 20.0
+		// Hit test the bounding box of the connector
+		if x >= osc.X-10 && x <= osc.X+w+15 && y >= osc.Y-h/2-10 && y <= osc.Y+h/2+10 {
+			return osc
+		}
+	}
+	return nil
+}
+
+// rerouteWiresForOffSheetConnector rebuilds wires for the net connected to an off-sheet connector.
+func (sc *SchematicCanvas) rerouteWiresForOffSheetConnector(osc *OffSheetConnector) {
+	if sc.doc == nil {
+		return
+	}
+
+	// Route wires for the affected net
+	affectedNets := make(map[string]bool)
+	affectedNets[osc.NetID] = true
+
+	// Remove wires for affected net from current sheet
+	kept := sc.doc.Wires[:0]
+	for _, w := range sc.doc.Wires {
+		if !affectedNets[w.NetID] || effectiveSheet(w.Sheet) != sc.sheetNum {
+			kept = append(kept, w)
+		}
+	}
+	sc.doc.Wires = kept
+
+	// Rebuild wires for current sheet
+	wireID := len(sc.doc.Wires)
+	sc.routeSheetWiresForSymbol(sc.sheetNum, affectedNets, wireID)
+	regenerateNetLabels(sc.doc)
 }
 
 // hitTestSymbol returns the symbol at (x,y) or nil.
@@ -416,7 +525,8 @@ func (sc *SchematicCanvas) hitTestSymbol(x, y float64) *PlacedSymbol {
 }
 
 // rerouteWiresForSymbol rebuilds wires for all nets connected to a symbol.
-// This properly handles multi-pin nets by recomputing the MST routing.
+// This properly handles multi-pin nets by recomputing the MST routing,
+// and preserves wires on other sheets.
 func (sc *SchematicCanvas) rerouteWiresForSymbol(sym *PlacedSymbol) {
 	if sc.doc == nil {
 		return
@@ -429,28 +539,86 @@ func (sc *SchematicCanvas) rerouteWiresForSymbol(sym *PlacedSymbol) {
 		}
 	}
 
-	// Remove wires for affected nets, keep the rest
+	// Find all sheets that have pins on affected nets (not just current sheet)
+	affectedSheets := make(map[int]bool)
+	affectedSheets[sc.sheetNum] = true // Always rebuild current sheet
+	for _, sym := range sc.doc.Symbols {
+		for _, pin := range sym.Pins {
+			if affectedNets[pin.NetID] {
+				affectedSheets[effectiveSheet(sym.Sheet)] = true
+			}
+		}
+	}
+
+	// Remove wires for affected nets only from affected sheets
 	kept := sc.doc.Wires[:0]
 	for _, w := range sc.doc.Wires {
-		if !affectedNets[w.NetID] {
+		if !affectedNets[w.NetID] || !affectedSheets[effectiveSheet(w.Sheet)] {
 			kept = append(kept, w)
 		}
 	}
 	sc.doc.Wires = kept
 
-	// Rebuild wires for affected nets using proper MST routing
+	// Rebuild wires for all affected sheets
 	wireID := len(sc.doc.Wires)
-	for netID := range affectedNets {
-		pins := sc.findPinsForNet(netID)
+	for sheetNum := range affectedSheets {
+		wireID = sc.routeSheetWiresForSymbol(sheetNum, affectedNets, wireID)
+	}
+	regenerateNetLabels(sc.doc)
+}
+
+// routeSheetWiresForSymbol routes wires on a specific sheet for affected nets.
+// This is similar to routeSheetWires in route.go but handles incremental updates.
+func (sc *SchematicCanvas) routeSheetWiresForSymbol(sheetNum int, affectedNets map[string]bool, wireID int) int {
+	if sc.doc == nil {
+		return wireID
+	}
+
+	// Build pin-to-net index for this sheet and affected nets only.
+	// Skip "power"-direction pins on power nets — they use PowerPort symbols.
+	netPins := make(map[string][]pinPos)
+	for _, sym := range sc.doc.Symbols {
+		if effectiveSheet(sym.Sheet) != sheetNum {
+			continue
+		}
+		for _, pin := range sym.Pins {
+			if pin.NetID == "" || !affectedNets[pin.NetID] {
+				continue
+			}
+			if sc.doc.PowerNetIDs[pin.NetID] && pin.Direction == "power" {
+				continue // supply pin — represented by PowerPort, not wire
+			}
+			netPins[pin.NetID] = append(netPins[pin.NetID], pinPos{
+				X: pin.X, Y: pin.Y, Dir: pin.Direction,
+			})
+		}
+	}
+
+	// Include off-sheet connector positions as wire endpoints
+	for _, osc := range sc.doc.OffSheetConnectors {
+		if osc.Sheet != sheetNum {
+			continue
+		}
+		if affectedNets[osc.NetID] {
+			netPins[osc.NetID] = append(netPins[osc.NetID], pinPos{
+				X: osc.X, Y: osc.Y, Dir: osc.Direction,
+			})
+		}
+	}
+
+	// Route each affected net
+	for netID, pins := range netPins {
 		if len(pins) < 2 {
 			continue
 		}
+
 		if len(pins) == 2 {
 			wireID++
 			sc.doc.Wires = append(sc.doc.Wires, &Wire{
 				ID:     fmt.Sprintf("wire-%d", wireID),
 				NetID:  netID,
 				Points: ManhattanRoute(pins[0], pins[1]),
+				Sheet:  sheetNum,
 			})
 		} else {
 			edges := mstEdges(pins)
@@ -460,10 +628,12 @@ func (sc *SchematicCanvas) rerouteWiresForSymbol(sym *PlacedSymbol) {
 					ID:     fmt.Sprintf("wire-%d", wireID),
 					NetID:  netID,
 					Points: ManhattanRoute(pins[edge[0]], pins[edge[1]]),
+					Sheet:  sheetNum,
 				})
 			}
 		}
 	}
+	return wireID
 }
 
 // findPinsForNet returns all pin positions that belong to a net on the current sheet.
@@ -491,7 +661,14 @@ type pinPos struct {
 }
 
 func (sc *SchematicCanvas) onRightPress(schX, schY float64, ev *gdk.Event) {
-	// Try symbol first
+	// Try off-sheet connector first
+	osc := sc.hitTestOffSheetConnector(schX, schY)
+	if osc != nil {
+		sc.onRightPressOffSheet(osc, ev)
+		return
+	}
+
+	// Try symbol
 	sym := sc.hitTestSymbol(schX, schY)
 	if sym != nil {
 		sc.onRightPressSymbol(sym, ev)
@@ -501,9 +678,70 @@ func (sc *SchematicCanvas) onRightPress(schX, schY float64, ev *gdk.Event) {
 	// Try wire
 	wire := sc.hitTestWire(schX, schY)
 	if wire != nil {
-		sc.onRightPressWire(wire, ev)
+		sc.onRightPressWire(wire, schX, schY, ev)
 		return
 	}
+}
+
+func (sc *SchematicCanvas) onRightPressOffSheet(osc *OffSheetConnector, ev *gdk.Event) {
+	sc.clearSelection()
+	osc.Selected = true
+	sc.drawArea.QueueDraw()
+
+	menu, _ := gtk.MenuNew()
+
+	moveItem, _ := gtk.MenuItemNewWithLabel("Move")
+	moveItem.Connect("activate", func() {
+		// nothing special, drag will handle
+	})
+	menu.Append(moveItem)
+
+	reverseItem, _ := gtk.MenuItemNewWithLabel("Reverse Direction")
+	reverseItem.Connect("activate", func() {
+		if osc.Direction == "input" {
+			osc.Direction = "output"
+		} else {
+			osc.Direction = "input"
+		}
+		if sc.onLayoutChanged != nil {
+			sc.onLayoutChanged()
+		}
+		sc.drawArea.QueueDraw()
+	})
+	menu.Append(reverseItem)
+
+	flipHItem, _ := gtk.MenuItemNewWithLabel("Flip Horizontal")
+	flipHItem.Connect("activate", func() {
+		osc.FlipH = !osc.FlipH
+		if sc.onLayoutChanged != nil {
+			sc.onLayoutChanged()
+		}
+		sc.drawArea.QueueDraw()
+	})
+	menu.Append(flipHItem)
+
+	flipVItem, _ := gtk.MenuItemNewWithLabel("Flip Vertical")
+	flipVItem.Connect("activate", func() {
+		osc.FlipV = !osc.FlipV
+		if sc.onLayoutChanged != nil {
+			sc.onLayoutChanged()
+		}
+		sc.drawArea.QueueDraw()
+	})
+	menu.Append(flipVItem)
+
+	rotateItem, _ := gtk.MenuItemNewWithLabel("Rotate 90°")
+	rotateItem.Connect("activate", func() {
+		osc.Rotation = (osc.Rotation + 90) % 360
+		if sc.onLayoutChanged != nil {
+			sc.onLayoutChanged()
+		}
+		sc.drawArea.QueueDraw()
+	})
+	menu.Append(rotateItem)
+
+	menu.ShowAll()
+	menu.PopupAtPointer(ev)
 }
 
 func (sc *SchematicCanvas) onRightPressSymbol(sym *PlacedSymbol, ev *gdk.Event) {
@@ -610,8 +848,8 @@ func (sc *SchematicCanvas) promptNewSheet(sym *PlacedSymbol) {
 	dialog.Destroy()
 }
 
-// onRightPressWire shows a context menu for a wire (highlight net, rename).
-func (sc *SchematicCanvas) onRightPressWire(wire *Wire, ev *gdk.Event) {
+// onRightPressWire shows a context menu for a wire (highlight net, add/remove corner, rename).
+func (sc *SchematicCanvas) onRightPressWire(wire *Wire, schX, schY float64, ev *gdk.Event) {
 	sc.clearSelection()
 
 	netID := wire.NetID
@@ -647,6 +885,35 @@ func (sc *SchematicCanvas) onRightPressWire(wire *Wire, ev *gdk.Event) {
 	sepItem, _ := gtk.SeparatorMenuItemNew()
 	menu.Append(sepItem)
 
+	// Find which segment was clicked and the nearest corner index (if any)
+	clickedSeg := sc.findClickedSegment(wire, schX, schY)
+	nearCornerIdx := sc.findNearCorner(wire, schX, schY)
+
+	addCornerItem, _ := gtk.MenuItemNewWithLabel("Add Corner Here")
+	addCornerItem.Connect("activate", func() {
+		sc.insertWireCorner(wire, clickedSeg, schX, schY)
+		if sc.onLayoutChanged != nil {
+			sc.onLayoutChanged()
+		}
+		sc.drawArea.QueueDraw()
+	})
+	menu.Append(addCornerItem)
+
+	if nearCornerIdx >= 0 {
+		removeCornerItem, _ := gtk.MenuItemNewWithLabel("Remove Corner")
+		removeCornerItem.Connect("activate", func() {
+			sc.removeWireCorner(wire, nearCornerIdx)
+			if sc.onLayoutChanged != nil {
+				sc.onLayoutChanged()
+			}
+			sc.drawArea.QueueDraw()
+		})
+		menu.Append(removeCornerItem)
+	}
+
+	sep2Item, _ := gtk.SeparatorMenuItemNew()
+	menu.Append(sep2Item)
+
 	renameItem, _ := gtk.MenuItemNewWithLabel("Rename Net...")
 	renameItem.Connect("activate", func() {
 		sc.promptRenameNet(wire)
@@ -655,6 +922,72 @@ func (sc *SchematicCanvas) onRightPressWire(wire *Wire, ev *gdk.Event) {
 
 	menu.ShowAll()
 	menu.PopupAtPointer(ev)
+}
+
+// findClickedSegment returns the index of the first point of the segment closest to (x,y).
+func (sc *SchematicCanvas) findClickedSegment(wire *Wire, x, y float64) int {
+	bestIdx := 0
+	bestDist := math.MaxFloat64
+	for i := 0; i < len(wire.Points)-1; i++ {
+		d := pointToSegmentDist(x, y,
+			wire.Points[i].X, wire.Points[i].Y,
+			wire.Points[i+1].X, wire.Points[i+1].Y)
+		if d < bestDist {
+			bestDist = d
+			bestIdx = i
+		}
+	}
+	return bestIdx
+}
+
+// findNearCorner returns the index of an internal corner near (x,y), or -1.
+func (sc *SchematicCanvas) findNearCorner(wire *Wire, x, y float64) int {
+	const tolerance = 15.0
+	for i := 1; i < len(wire.Points)-1; i++ {
+		p := wire.Points[i]
+		if math.Hypot(x-p.X, y-p.Y) < tolerance {
+			return i
+		}
+	}
+	return -1
+}
+
+// insertWireCorner inserts a new corner into wire after segment index segIdx.
+// The corner is placed at the cursor position snapped to the segment's axis.
+func (sc *SchematicCanvas) insertWireCorner(wire *Wire, segIdx int, x, y float64) {
+	if segIdx < 0 || segIdx >= len(wire.Points)-1 {
+		return
+	}
+	a := wire.Points[segIdx]
+	b := wire.Points[segIdx+1]
+
+	// Snap the new point to grid, then constrain to segment axis for clean Manhattan routing
+	newX := math.Round(x/gridSnap) * gridSnap
+	newY := math.Round(y/gridSnap) * gridSnap
+
+	// If segment is horizontal, constrain to same Y; if vertical, constrain to same X
+	if math.Abs(a.Y-b.Y) < 1 {
+		newY = a.Y // horizontal segment
+	} else if math.Abs(a.X-b.X) < 1 {
+		newX = a.X // vertical segment
+	}
+
+	newPt := geometry.Point2D{X: newX, Y: newY}
+
+	// Insert after segIdx
+	pts := make([]geometry.Point2D, 0, len(wire.Points)+1)
+	pts = append(pts, wire.Points[:segIdx+1]...)
+	pts = append(pts, newPt)
+	pts = append(pts, wire.Points[segIdx+1:]...)
+	wire.Points = pts
+}
+
+// removeWireCorner removes the internal corner at idx from wire.Points.
+func (sc *SchematicCanvas) removeWireCorner(wire *Wire, idx int) {
+	if idx <= 0 || idx >= len(wire.Points)-1 {
+		return
+	}
+	wire.Points = append(wire.Points[:idx], wire.Points[idx+1:]...)
 }
 
 // promptRenameNet shows a dialog to rename a net and propagates to app state.
@@ -714,6 +1047,24 @@ func (sc *SchematicCanvas) promptRenameNet(wire *Wire) {
 		}
 	}
 	dialog.Destroy()
+}
+
+// hitTestWireCorner returns the wire and point index of an internal corner near (x,y), or (nil,-1).
+// Only internal waypoints (index 1..n-2) are checked, not endpoints.
+func (sc *SchematicCanvas) hitTestWireCorner(x, y float64) (*Wire, int) {
+	if sc.doc == nil {
+		return nil, -1
+	}
+	const tolerance = 10.0
+	for _, wire := range sc.visibleWires() {
+		for i := 1; i < len(wire.Points)-1; i++ {
+			p := wire.Points[i]
+			if math.Hypot(x-p.X, y-p.Y) < tolerance {
+				return wire, i
+			}
+		}
+	}
+	return nil, -1
 }
 
 // hitTestWire returns the wire closest to (x, y) within tolerance, or nil.
@@ -861,22 +1212,14 @@ func (sc *SchematicCanvas) visiblePowerPorts() []*PowerPort {
 	return result
 }
 
-// visibleNetLabels returns net labels on the current sheet
-// (labels belong to wires, so we filter by matching wire sheet).
+// visibleNetLabels returns net labels on the current sheet.
 func (sc *SchematicCanvas) visibleNetLabels() []*NetLabel {
 	if sc.sheetNum <= 0 || sc.doc == nil {
 		return sc.doc.NetLabels
 	}
-	// Build set of net IDs visible on this sheet
-	visNets := make(map[string]bool)
-	for _, w := range sc.doc.Wires {
-		if effectiveSheet(w.Sheet) == sc.sheetNum {
-			visNets[w.NetID] = true
-		}
-	}
 	var result []*NetLabel
 	for _, label := range sc.doc.NetLabels {
-		if visNets[label.NetID] {
+		if effectiveSheet(label.Sheet) == sc.sheetNum {
 			result = append(result, label)
 		}
 	}

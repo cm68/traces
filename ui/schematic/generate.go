@@ -2,6 +2,7 @@ package schematic
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"pcb-tracer/internal/app"
@@ -171,6 +172,37 @@ func GenerateSchematic(state *app.State, showStubs ...bool) *SchematicDoc {
 					}
 					sym.Pins = append(sym.Pins, pin)
 				}
+			} else {
+				// No library entry: create pins from padToNet so the component
+				// still participates in wiring (e.g. resistor packs, unlisted parts).
+				prefix := comp.ID + "."
+				var pinNums []int
+				seen := make(map[int]bool)
+				for padID := range padToNet {
+					if !strings.HasPrefix(padID, prefix) {
+						continue
+					}
+					var n int
+					if _, err := fmt.Sscanf(padID[len(prefix):], "%d", &n); err == nil && !seen[n] {
+						seen[n] = true
+						pinNums = append(pinNums, n)
+					}
+				}
+				sort.Ints(pinNums)
+				for _, n := range pinNums {
+					padID := fmt.Sprintf("%s.%d", comp.ID, n)
+					netName := padToName[padID]
+					dir := "input"
+					if isPowerNet(netName) {
+						dir = "power"
+					}
+					sym.Pins = append(sym.Pins, &SchematicPin{
+						PinNumber: n,
+						Direction: dir,
+						NetID:     padToNet[padID],
+						NetName:   netName,
+					})
+				}
 			}
 			doc.Symbols = append(doc.Symbols, sym)
 		}
@@ -278,29 +310,21 @@ func GenerateSchematic(state *app.State, showStubs ...bool) *SchematicDoc {
 	// Step 7: Route wires (includes off-sheet connector positions as endpoints)
 	RouteAllWires(doc)
 
-	// Step 8: Place net labels on wires
-	for _, wire := range doc.Wires {
-		if wire.NetName == "" {
-			// Look up net name from net ID
-			for _, net := range nets {
-				if net.ID == wire.NetID {
-					wire.NetName = net.Name
-					break
-				}
-			}
-		}
-		if wire.NetName != "" && len(wire.Points) >= 2 {
-			// Place label at midpoint of first segment
-			midX := (wire.Points[0].X + wire.Points[1].X) / 2
-			midY := (wire.Points[0].Y + wire.Points[1].Y) / 2
-			doc.NetLabels = append(doc.NetLabels, &NetLabel{
-				NetID:   wire.NetID,
-				NetName: wire.NetName,
-				X:       midX,
-				Y:       midY - 8, // slightly above the wire
-			})
+	// Step 8: Populate wire NetName from the nets list (regenerateNetLabels uses it as fallback).
+	netNameByID := make(map[string]string, len(nets))
+	for _, net := range nets {
+		if net.Name != "" {
+			netNameByID[net.ID] = net.Name
 		}
 	}
+	for _, wire := range doc.Wires {
+		if wire.NetName == "" {
+			wire.NetName = netNameByID[wire.NetID]
+		}
+	}
+
+	// Step 9: Place net labels on wires (one per wire, sheet-aware).
+	regenerateNetLabels(doc)
 
 	return doc
 }

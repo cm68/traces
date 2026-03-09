@@ -108,9 +108,67 @@ func (sm *SheetManager) MoveSymbolToSheet(symID string, targetSheet int) {
 	ComputePinPositions(sym, def)
 	positionPowerPorts(sm.doc)
 
-	// Regenerate off-sheet connectors (before routing so they become wire endpoints)
+	// Save existing off-sheet connector positions before wiping and regenerating.
+	type oscPos struct {
+		x, y     float64
+		flipH    bool
+		flipV    bool
+		rotation int
+	}
+	savedOSC := make(map[string]oscPos, len(sm.doc.OffSheetConnectors))
+	for _, osc := range sm.doc.OffSheetConnectors {
+		key := fmt.Sprintf("%d:%s", osc.Sheet, osc.NetID)
+		savedOSC[key] = oscPos{osc.X, osc.Y, osc.FlipH, osc.FlipV, osc.Rotation}
+	}
+
+	// Regenerate off-sheet connectors (before routing so they become wire endpoints).
 	generateOffSheetConnectors(sm.doc)
+
+	// Restore saved positions for connectors that still exist (e.g. net still crosses
+	// the same sheet boundary). Newly created connectors keep their auto-placed position.
+	for _, osc := range sm.doc.OffSheetConnectors {
+		key := fmt.Sprintf("%d:%s", osc.Sheet, osc.NetID)
+		if saved, ok := savedOSC[key]; ok {
+			osc.X = saved.x
+			osc.Y = saved.y
+			osc.FlipH = saved.flipH
+			osc.FlipV = saved.flipV
+			osc.Rotation = saved.rotation
+		}
+	}
+
 	RouteAllWires(sm.doc)
+	regenerateNetLabels(sm.doc)
+
+	// Debug: print all objects on the target sheet
+	fmt.Printf("=== Sheet %d after moving %s ===\n", targetSheet, symID)
+	for _, s := range sm.doc.Symbols {
+		if effectiveSheet(s.Sheet) == targetSheet {
+			fmt.Printf("  SYMBOL   %s (%s) at (%.0f, %.0f)\n", s.ID, s.GateType, s.X, s.Y)
+		}
+	}
+	for _, pp := range sm.doc.PowerPorts {
+		if effectiveSheet(pp.Sheet) == targetSheet {
+			fmt.Printf("  POWER    %s at (%.0f, %.0f) owner=%s\n", pp.NetName, pp.X, pp.Y, pp.OwnerSymbolID)
+		}
+	}
+	for _, osc := range sm.doc.OffSheetConnectors {
+		if osc.Sheet == targetSheet {
+			fmt.Printf("  OSC      net=%s name=%q → sheet %d  at (%.0f, %.0f) dir=%s\n",
+				osc.NetID, osc.NetName, osc.TargetSheet, osc.X, osc.Y, osc.Direction)
+		}
+	}
+	for _, nl := range sm.doc.NetLabels {
+		if effectiveSheet(nl.Sheet) == targetSheet {
+			fmt.Printf("  NETLABEL net=%s name=%q at (%.0f, %.0f)\n", nl.NetID, nl.NetName, nl.X, nl.Y)
+		}
+	}
+	for _, w := range sm.doc.Wires {
+		if effectiveSheet(w.Sheet) == targetSheet {
+			fmt.Printf("  WIRE     net=%s %d pts\n", w.NetID, len(w.Points))
+		}
+	}
+	fmt.Printf("===\n")
 
 	// Save layout
 	SaveLayout(sm.doc, sm.state.ProjectPath)
@@ -188,9 +246,11 @@ func repositionForSheet(doc *SchematicDoc, sym *PlacedSymbol, sheetNum int) {
 	}
 
 	if len(occupied) == 0 {
-		// Empty sheet — place at default position
-		sym.X = startX
-		sym.Y = startY
+		// Empty sheet — start further right and down to give room for OSCs on all sides.
+		// Input OSCs sit 140 units left of the input pin tips; top pins of tall symbols
+		// can be far above sym.Y, so we push Y down by an extra row too.
+		sym.X = startX + colSpacing/2
+		sym.Y = startY + rowSpacing
 		return
 	}
 

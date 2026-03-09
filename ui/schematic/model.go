@@ -40,10 +40,10 @@ type PlacedSymbol struct {
 	Y float64 `json:"y"`
 
 	// Transform state (persisted in layout file)
-	FlipH    bool `json:"flip_h,omitempty"`    // Mirror horizontally (swap left/right pins)
-	FlipV    bool `json:"flip_v,omitempty"`    // Mirror vertically (swap top/bottom)
-	Rotation int  `json:"rotation,omitempty"`  // Degrees: 0, 90, 180, 270
-	Sheet    int  `json:"sheet,omitempty"`     // Sheet number (1-based; 0 = sheet 1)
+	FlipH    bool `json:"flip_h,omitempty"`   // Mirror horizontally (swap left/right pins)
+	FlipV    bool `json:"flip_v,omitempty"`   // Mirror vertically (swap top/bottom)
+	Rotation int  `json:"rotation,omitempty"` // Degrees: 0, 90, 180, 270
+	Sheet    int  `json:"sheet,omitempty"`    // Sheet number (1-based; 0 = sheet 1)
 
 	// Pins with their absolute positions
 	Pins []*SchematicPin `json:"pins"`
@@ -86,21 +86,27 @@ type Wire struct {
 }
 
 // NetLabel is a text label placed on a wire showing the net/signal name.
+// Labels serve as movable annotations; dragging one acts like moving a proxy
+// pin for the net and triggers rerouting on the current sheet.
 type NetLabel struct {
 	NetID   string  `json:"net_id"`
 	NetName string  `json:"net_name"`
 	X       float64 `json:"x"`
 	Y       float64 `json:"y"`
+	Sheet   int     `json:"sheet,omitempty"` // Sheet this label belongs to (1-based; 0 = sheet 1)
+
+	// UI state (not persisted)
+	Selected bool `json:"-"`
 }
 
 // PowerPort represents a VCC or GND symbol on the schematic.
 // Each component pin on a power net gets its own local PowerPort.
 type PowerPort struct {
-	NetName       string  `json:"net_name"`                  // "VCC", "GND", "+5V", etc.
+	NetName       string  `json:"net_name"` // "VCC", "GND", "+5V", etc.
 	X             float64 `json:"x"`
 	Y             float64 `json:"y"`
 	IsGround      bool    `json:"is_ground"`
-	PinX          float64 `json:"pin_x"`                     // Connection point (at component pin tip)
+	PinX          float64 `json:"pin_x"` // Connection point (at component pin tip)
 	PinY          float64 `json:"pin_y"`
 	OwnerSymbolID string  `json:"owner_symbol_id,omitempty"` // The symbol this port is attached to
 	OwnerPinNum   int     `json:"owner_pin_num,omitempty"`   // The specific pin number
@@ -116,6 +122,14 @@ type OffSheetConnector struct {
 	X           float64 `json:"x"`
 	Y           float64 `json:"y"`
 	Direction   string  `json:"direction"` // "input" or "output"
+
+	// Transform state (draggable/rotatable pin proxy)
+	FlipH    bool `json:"flip_h,omitempty"`   // Mirror horizontally
+	FlipV    bool `json:"flip_v,omitempty"`   // Mirror vertically
+	Rotation int  `json:"rotation,omitempty"` // Degrees: 0, 90, 180, 270
+
+	// UI state (not persisted)
+	Selected bool `json:"-"`
 }
 
 // effectiveSheet returns the sheet number, treating 0 as 1.

@@ -81,6 +81,9 @@ func generateOffSheetConnectors(doc *SchematicDoc) {
 				if pinDir == "input" || pinDir == "clock" || pinDir == "enable" {
 					dir = "input"
 					offX = pinX - 140
+					if offX < startX/2 {
+						offX = startX / 2
+					}
 				}
 
 				doc.OffSheetConnectors = append(doc.OffSheetConnectors, &OffSheetConnector{
@@ -89,7 +92,7 @@ func generateOffSheetConnectors(doc *SchematicDoc) {
 					Sheet:       sheet,
 					TargetSheet: targetSheet,
 					X:           offX,
-					Y:           pinY - 10,
+					Y:           max(pinY-10, startY/2),
 					Direction:   dir,
 				})
 			}

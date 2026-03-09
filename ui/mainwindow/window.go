@@ -844,42 +844,44 @@ func (mw *MainWindow) onGenerateSchematic() {
 
 	hasSaved := schematic.HasSavedLayout(mw.state.ProjectPath)
 
+	// Always ask the user what to do so they can choose between the saved
+	// layout and a freshly auto-generated one.
+	msg := "Generate a fresh schematic, or open the previously saved layout?"
+	if !hasSaved {
+		msg = "No saved layout found. Generate a fresh schematic?"
+	}
+	dlg := gtk.MessageDialogNew(mw.win, gtk.DIALOG_MODAL,
+		gtk.MESSAGE_QUESTION, gtk.BUTTONS_NONE, msg)
+	dlg.AddButton("Cancel", gtk.RESPONSE_CANCEL)
+	dlg.AddButton("Generate Fresh", gtk.RESPONSE_REJECT)
+	openBtn, _ := dlg.AddButton("Open Existing", gtk.RESPONSE_ACCEPT)
+	if !hasSaved {
+		openBtn.SetSensitive(false)
+	}
 	if hasSaved {
-		// Show dialog: open existing or regenerate fresh
-		dlg := gtk.MessageDialogNew(mw.win, gtk.DIALOG_MODAL,
-			gtk.MESSAGE_QUESTION, gtk.BUTTONS_NONE,
-			"A saved schematic layout exists.\nOpen the existing layout, or generate a fresh one?")
-		dlg.AddButton("Cancel", gtk.RESPONSE_CANCEL)
-		dlg.AddButton("Generate Fresh", gtk.RESPONSE_REJECT)
-		dlg.AddButton("Open Existing", gtk.RESPONSE_ACCEPT)
 		dlg.SetDefaultResponse(gtk.RESPONSE_ACCEPT)
-
-		response := dlg.Run()
-		dlg.Destroy()
-
-		switch response {
-		case gtk.RESPONSE_ACCEPT:
-			_, err := schematic.NewSchematicWindow(mw.state)
-			if err != nil {
-				mw.updateStatus(fmt.Sprintf("Schematic error: %v", err))
-				return
-			}
-			mw.updateStatus("Schematic opened")
-		case gtk.RESPONSE_REJECT:
-			_, err := schematic.NewSchematicWindowFresh(mw.state)
-			if err != nil {
-				mw.updateStatus(fmt.Sprintf("Schematic error: %v", err))
-				return
-			}
-			mw.updateStatus("Schematic regenerated")
-		}
 	} else {
+		dlg.SetDefaultResponse(gtk.RESPONSE_REJECT)
+	}
+
+	response := dlg.Run()
+	dlg.Destroy()
+
+	switch response {
+	case gtk.RESPONSE_ACCEPT:
 		_, err := schematic.NewSchematicWindow(mw.state)
 		if err != nil {
 			mw.updateStatus(fmt.Sprintf("Schematic error: %v", err))
 			return
 		}
-		mw.updateStatus("Schematic generated")
+		mw.updateStatus("Schematic opened")
+	case gtk.RESPONSE_REJECT:
+		_, err := schematic.NewSchematicWindowFresh(mw.state)
+		if err != nil {
+			mw.updateStatus(fmt.Sprintf("Schematic error: %v", err))
+			return
+		}
+		mw.updateStatus("Schematic regenerated")
 	}
 }
 

@@ -3,6 +3,7 @@ package schematic
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,7 +84,16 @@ func SaveLayout(doc *SchematicDoc, projectPath string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return err
+	}
+
+	// Also export KiCad schematic alongside JSON (best-effort)
+	if err := ExportKiCadSchematic(doc, projectPath); err != nil {
+		log.Printf("kicad export: %v", err)
+	}
+
+	return nil
 }
 
 // HasSavedLayout returns true if a schematic layout file exists for the project.

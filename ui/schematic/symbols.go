@@ -326,11 +326,12 @@ func outputStubs(n int, w, h float64) []PinStub {
 // outputStubsWithBubble creates output stubs with negation bubble offset.
 func outputStubsWithBubble(n int, w, h float64) []PinStub {
 	stubs := make([]PinStub, n)
+	bodyX := snap5(w/2 + bubbleR*2)
 	for i := 0; i < n; i++ {
 		y := pinY(i, n, h)
 		stubs[i] = PinStub{
-			BodyX: w/2 + bubbleR*2, BodyY: y,
-			TipX: w/2 + bubbleR*2 + stubLength, TipY: y,
+			BodyX: bodyX, BodyY: y,
+			TipX: bodyX + stubLength, TipY: y,
 			Side:      "right",
 			HasBubble: true,
 		}
@@ -338,13 +339,18 @@ func outputStubsWithBubble(n int, w, h float64) []PinStub {
 	return stubs
 }
 
+// snap5 rounds a coordinate to the 5-unit schematic grid (0.05" = 1.27mm),
+// so exported pins land on KiCad's connection grid.
+func snap5(v float64) float64 { return math.Round(v/5) * 5 }
+
 // pinY returns the Y offset for pin index i of n pins, centered on the body.
+// Offsets are snapped to the 5-unit grid.
 func pinY(i, n int, h float64) float64 {
 	if n == 1 {
 		return 0
 	}
 	spacing := h / float64(n+1)
-	return -h/2 + spacing*float64(i+1)
+	return snap5(-h/2 + spacing*float64(i+1))
 }
 
 // --- Cairo drawing functions ---

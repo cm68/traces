@@ -6,6 +6,45 @@ import (
 	"pcb-tracer/internal/component"
 )
 
+// assignStubs pairs each pin of sym with its stub slot in def by direction,
+// in pin order — the same assignment ComputePinPositions uses. Entries are nil
+// when the def has no remaining slot for that direction (e.g. power pins).
+func assignStubs(sym *PlacedSymbol, def *SymbolDef) []*PinStub {
+	out := make([]*PinStub, len(sym.Pins))
+	if def == nil {
+		return out
+	}
+	inputIdx := 0
+	outputIdx := 0
+	enableIdx := 0
+	clockIdx := 0
+	for i, pin := range sym.Pins {
+		switch pin.Direction {
+		case "input":
+			if inputIdx < len(def.InputStubs) {
+				out[i] = &def.InputStubs[inputIdx]
+				inputIdx++
+			}
+		case "output":
+			if outputIdx < len(def.OutputStubs) {
+				out[i] = &def.OutputStubs[outputIdx]
+				outputIdx++
+			}
+		case "enable":
+			if enableIdx < len(def.EnableStubs) {
+				out[i] = &def.EnableStubs[enableIdx]
+				enableIdx++
+			}
+		case "clock":
+			if clockIdx < len(def.ClockStubs) {
+				out[i] = &def.ClockStubs[clockIdx]
+				clockIdx++
+			}
+		}
+	}
+	return out
+}
+
 // ComputePinPositions calculates absolute schematic coordinates for all pins
 // on a placed symbol, based on its position and the symbol definition.
 func ComputePinPositions(sym *PlacedSymbol, def *SymbolDef) {
@@ -13,37 +52,9 @@ func ComputePinPositions(sym *PlacedSymbol, def *SymbolDef) {
 		return
 	}
 
-	// Assign stubs to pins by direction
-	inputIdx := 0
-	outputIdx := 0
-	enableIdx := 0
-	clockIdx := 0
-
-	for _, pin := range sym.Pins {
-		var stub *PinStub
-		switch pin.Direction {
-		case "input":
-			if inputIdx < len(def.InputStubs) {
-				stub = &def.InputStubs[inputIdx]
-				inputIdx++
-			}
-		case "output":
-			if outputIdx < len(def.OutputStubs) {
-				stub = &def.OutputStubs[outputIdx]
-				outputIdx++
-			}
-		case "enable":
-			if enableIdx < len(def.EnableStubs) {
-				stub = &def.EnableStubs[enableIdx]
-				enableIdx++
-			}
-		case "clock":
-			if clockIdx < len(def.ClockStubs) {
-				stub = &def.ClockStubs[clockIdx]
-				clockIdx++
-			}
-		}
-
+	stubs := assignStubs(sym, def)
+	for i, pin := range sym.Pins {
+		stub := stubs[i]
 		if stub != nil {
 			tipX, tipY := stub.TipX, stub.TipY
 			bodyX, bodyY := stub.BodyX, stub.BodyY

@@ -107,6 +107,9 @@ type State struct {
 	// Detected features layer (vias and traces from both sides)
 	FeaturesLayer *features.DetectedFeaturesLayer
 
+	// Board outline polygon in image coordinates (detected or user-adjusted)
+	BoardOutline []geometry.Point2D
+
 	// Via detection color parameters (nil = use defaults)
 	ViaColorParams *ColorParams
 
@@ -623,6 +626,10 @@ func (s *State) LoadProject(path string) error {
 		}
 		fmt.Printf("[Project] Restored %d nets\n", len(proj.Nets))
 	}
+	if len(proj.BoardOutline) > 0 {
+		s.BoardOutline = proj.BoardOutline
+		fmt.Printf("[Project] Restored board outline (%d points)\n", len(proj.BoardOutline))
+	}
 
 	// Logo library is now loaded from shared preferences, not project file
 	// Legacy project files with logos are ignored - logos are shared across all projects
@@ -750,6 +757,7 @@ func (s *State) SaveProject(path string) error {
 			fmt.Printf("[Project] Saving %d nets\n", len(allNets))
 		}
 	}
+	proj.BoardOutline = s.BoardOutline
 
 	// Logo library is saved to shared preferences, not project file
 
@@ -1060,6 +1068,34 @@ func (s *State) LoadBackImage(path string) error {
 	return nil
 }
 
+// DetectBoardOutline captures the board outline polygon from the front scan.
+func (s *State) DetectBoardOutline() error {
+	if s.FrontImage == nil || s.FrontImage.Image == nil {
+		return fmt.Errorf("no front image loaded")
+	}
+	var backImg goimage.Image
+	if s.BackImage != nil {
+		backImg = s.BackImage.Image
+	}
+	// Known edge-contact positions identify the finger tongue as legitimate
+	// board material among outward lobes.
+	var contacts []geometry.Point2D
+	if s.FeaturesLayer != nil {
+		for _, c := range s.FeaturesLayer.GetConnectors() {
+			contacts = append(contacts, c.Center)
+		}
+	}
+	outline := alignment.DetectBoardOutline(s.FrontImage.Image, backImg, contacts)
+	if len(outline) < 3 {
+		return fmt.Errorf("board outline detection failed")
+	}
+	s.mu.Lock()
+	s.BoardOutline = outline
+	s.Modified = true
+	s.mu.Unlock()
+	return nil
+}
+
 // ResetForNewProject clears all state for a new project.
 // This zeros all alignment, crop, and detection settings.
 func (s *State) ResetForNewProject() {
@@ -1071,6 +1107,7 @@ func (s *State) ResetForNewProject() {
 	s.BackImage = nil
 	s.AlignedFront = nil
 	s.AlignedBack = nil
+	s.BoardOutline = nil
 
 	// Clear project path
 	s.ProjectPath = ""
@@ -1627,6 +1664,8 @@ type ProjectFile struct {
 
 	// Electrical nets (v13+)
 	Nets []*netlist.ElectricalNet `json:"nets,omitempty"`
+
+	BoardOutline []geometry.Point2D `json:"board_outline,omitempty"`
 
 	// Viewport state (v12+)
 	ViewZoom    float64 `json:"view_zoom,omitempty"`

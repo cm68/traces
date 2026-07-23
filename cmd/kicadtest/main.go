@@ -96,6 +96,14 @@ func main() {
 		log.Fatalf("export: %v", err)
 	}
 
+	// Capture the board outline when the project doesn't have one yet.
+	if len(state.BoardOutline) < 3 {
+		if err := state.DetectBoardOutline(); err != nil {
+			fmt.Println("board outline:", err)
+		}
+	}
+	fmt.Printf("board outline: %d points\n", len(state.BoardOutline))
+
 	boardPath := kicad.BoardPath(outPrefix + ".pcbproj")
 	if err := kicad.ExportBoard(state, schematic.KiCadFootprintPaths(doc), boardPath); err != nil {
 		log.Fatalf("board export: %v", err)

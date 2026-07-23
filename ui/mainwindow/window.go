@@ -3,6 +3,7 @@ package mainwindow
 
 import (
 	"fmt"
+	"image/color"
 	"log"
 	"os"
 	"path/filepath"
@@ -367,6 +368,11 @@ func (mw *MainWindow) setupMenus() {
 		mi.Connect("activate", func() { mw.onSelectBoard(name) })
 		boardMenu.Append(mi)
 	}
+	sepItem, _ := gtk.SeparatorMenuItemNew()
+	boardMenu.Append(sepItem)
+	outlineItem, _ := gtk.MenuItemNewWithLabel("Detect Board Outline")
+	outlineItem.Connect("activate", mw.onDetectBoardOutline)
+	boardMenu.Append(outlineItem)
 	menuBar.Append(boardMenuItem)
 
 	// Help menu
@@ -887,6 +893,36 @@ func (mw *MainWindow) onGenerateSchematic() {
 	}
 }
 
+// onDetectBoardOutline captures the board outline polygon from the scans and
+// shows it as a canvas overlay.
+func (mw *MainWindow) onDetectBoardOutline() {
+	if err := mw.state.DetectBoardOutline(); err != nil {
+		mw.updateStatus(fmt.Sprintf("Board outline: %v", err))
+		return
+	}
+	mw.showBoardOutlineOverlay()
+	mw.updateStatus(fmt.Sprintf("Board outline captured (%d points)", len(mw.state.BoardOutline)))
+}
+
+// showBoardOutlineOverlay draws the captured outline on the canvas.
+func (mw *MainWindow) showBoardOutlineOverlay() {
+	outline := mw.state.BoardOutline
+	if len(outline) < 3 {
+		return
+	}
+	red := &color.RGBA{R: 255, G: 40, B: 40, A: 255}
+	overlay := &canvas.Overlay{ZOrder: 40}
+	for i := range outline {
+		p, q := outline[i], outline[(i+1)%len(outline)]
+		overlay.Lines = append(overlay.Lines, canvas.OverlayLine{
+			X1: p.X, Y1: p.Y, X2: q.X, Y2: q.Y,
+			Thickness: 3,
+			Color:     red,
+		})
+	}
+	mw.canvas.SetOverlay("board_outline", overlay)
+}
+
 // onSeedKiCadProject exports the full KiCad project — schematic sheets,
 // board layout, and project file — next to the pcb-tracer project file.
 func (mw *MainWindow) onSeedKiCadProject() {
@@ -897,6 +933,13 @@ func (mw *MainWindow) onSeedKiCadProject() {
 	if mw.state.FeaturesLayer == nil || mw.state.FeaturesLayer.NetCount() == 0 {
 		mw.updateStatus("No nets to seed a KiCad project from")
 		return
+	}
+
+	// Capture the board outline when the project doesn't have one yet.
+	if len(mw.state.BoardOutline) < 3 {
+		if err := mw.state.DetectBoardOutline(); err != nil {
+			mw.updateStatus(fmt.Sprintf("Board outline: %v (seeding with bounding box)", err))
+		}
 	}
 
 	// Schematic with saved layout applied (fresh auto-layout if none saved).

@@ -238,9 +238,21 @@ func ExportBoard(state *app.State, fpPaths map[string]string, path string) error
 		}
 	}
 
-	// Board outline: bounding box of everything placed, with margin.
-	// The user refines Edge.Cuts in pcbnew; this seeds a sensible extent.
-	if !math.IsInf(minX, 1) {
+	// Board outline: the captured outline polygon when available, else the
+	// bounding box of everything placed with margin.
+	if len(state.BoardOutline) >= 3 {
+		w.open("gr_poly")
+		w.open("pts")
+		for _, p := range state.BoardOutline {
+			w.line("(xy %.4f %.4f)", mm(p.X), mm(p.Y))
+		}
+		w.close() // pts
+		w.line("(stroke (width 0.1) (type default))")
+		w.line("(fill none)")
+		w.line("(layer \"Edge.Cuts\")")
+		w.line("(uuid \"%s\")", uuid("edge", "outline"))
+		w.close() // gr_poly
+	} else if !math.IsInf(minX, 1) {
 		const margin = 2.0
 		w.line("(gr_rect (start %.4f %.4f) (end %.4f %.4f) (stroke (width 0.1) (type default)) (fill none) (layer \"Edge.Cuts\") (uuid \"%s\"))",
 			minX-margin, minY-margin, maxX+margin, maxY+margin, uuid("edge", "outline"))

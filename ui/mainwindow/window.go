@@ -905,7 +905,8 @@ func (mw *MainWindow) onSeedKiCadProject() {
 		mw.updateStatus(fmt.Sprintf("KiCad schematic export failed: %v", err))
 		return
 	}
-	if err := kicad.ExportBoard(mw.state, kicad.BoardPath(mw.state.ProjectPath)); err != nil {
+	if err := kicad.ExportBoard(mw.state, schematic.KiCadFootprintPaths(sm.Doc()),
+		kicad.BoardPath(mw.state.ProjectPath)); err != nil {
 		mw.updateStatus(fmt.Sprintf("KiCad board export failed: %v", err))
 		return
 	}

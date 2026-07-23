@@ -89,7 +89,11 @@ func ProjectPath(projectPath string) string {
 // ExportBoard writes a .kicad_pcb seeded from the detected components, vias,
 // traces, and edge connectors. Coordinates convert from image pixels to mm
 // via the scan DPI, so the board is dimensionally faithful.
-func ExportBoard(state *app.State, path string) error {
+//
+// fpPaths maps component IDs to their schematic symbol KIID paths (see
+// schematic.KiCadFootprintPaths); footprints carrying them associate with
+// their symbols in "Update PCB from Schematic". May be nil.
+func ExportBoard(state *app.State, fpPaths map[string]string, path string) error {
 	if state == nil || state.FeaturesLayer == nil {
 		return fmt.Errorf("no detection data to export")
 	}
@@ -182,7 +186,7 @@ func ExportBoard(state *app.State, path string) error {
 
 	// Component footprints
 	for _, comp := range state.Components {
-		writeComponentFootprint(w, comp, dpi, mm, padToNet, netRef, extend)
+		writeComponentFootprint(w, comp, dpi, mm, padToNet, netRef, extend, fpPaths[comp.ID])
 	}
 
 	// Edge connector contacts as one footprint of surface pads
@@ -273,7 +277,7 @@ func writeLayerTable(w *writer) {
 // positions (falling back to ideal DIP geometry when pins were not detected).
 func writeComponentFootprint(w *writer, comp *component.Component, dpi float64,
 	mm func(float64) float64, padToNet map[string]string,
-	netRef func(string) string, extend func(x, y float64)) {
+	netRef func(string) string, extend func(x, y float64), symPath string) {
 
 	cx := comp.Bounds.X + comp.Bounds.Width/2
 	cy := comp.Bounds.Y + comp.Bounds.Height/2
@@ -306,6 +310,9 @@ func writeComponentFootprint(w *writer, comp *component.Component, dpi float64,
 	w.open(fmt.Sprintf("footprint \"pcb-tracer:%s\" (layer \"%s\")", escape(fpName), layer))
 	w.line("(uuid \"%s\")", uuid("fp", comp.ID))
 	w.line("(at %.4f %.4f)", mm(cx), mm(cy))
+	if symPath != "" {
+		w.line("(path \"%s\")", symPath)
+	}
 	w.line("(attr through_hole)")
 
 	w.line("(property \"Reference\" \"%s\"", escape(comp.ID))
@@ -362,7 +369,9 @@ func writeConnectorFootprint(w *writer, state *app.State,
 	w.open("footprint \"pcb-tracer:EDGE_CONN\" (layer \"F.Cu\")")
 	w.line("(uuid \"%s\")", uuid("fp", "edge-conn"))
 	w.line("(at 0 0)")
-	w.line("(attr exclude_from_pos_files)")
+	// board_only: the schematic represents the edge connector as per-signal
+	// port symbols, not one component — keep Update PCB from flagging it.
+	w.line("(attr exclude_from_pos_files board_only exclude_from_bom)")
 
 	w.line("(property \"Reference\" \"J1\"")
 	w.depth++

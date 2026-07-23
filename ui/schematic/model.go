@@ -33,6 +33,7 @@ type PlacedSymbol struct {
 	FunctionName string `json:"function_name"` // Gate designator within component
 	GateType     string `json:"gate_type"`     // component.GateType as string
 	PartNumber   string `json:"part_number"`   // e.g., "74LS00"
+	Package      string `json:"package,omitempty"` // PCB package, e.g., "DIP-14"
 	Description  string `json:"description"`   // e.g., "Quad 2-input NAND gate"
 
 	// Position in schematic units

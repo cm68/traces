@@ -124,6 +124,7 @@ func GenerateSchematic(state *app.State, showStubs ...bool) *SchematicDoc {
 					FunctionName: fn.Name,
 					GateType:     string(fn.Type),
 					PartNumber:   comp.PartNumber,
+					Package:      comp.Package,
 					Description:  partDef.Description,
 				}
 
@@ -148,6 +149,7 @@ func GenerateSchematic(state *app.State, showStubs ...bool) *SchematicDoc {
 				ComponentID: comp.ID,
 				GateType:    "BLOCK",
 				PartNumber:  comp.PartNumber,
+				Package:     comp.Package,
 			}
 			if partDef != nil {
 				sym.Description = partDef.Description

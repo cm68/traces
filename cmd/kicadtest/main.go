@@ -97,7 +97,7 @@ func main() {
 	}
 
 	boardPath := kicad.BoardPath(outPrefix + ".pcbproj")
-	if err := kicad.ExportBoard(state, boardPath); err != nil {
+	if err := kicad.ExportBoard(state, schematic.KiCadFootprintPaths(doc), boardPath); err != nil {
 		log.Fatalf("board export: %v", err)
 	}
 	fmt.Println("board exported:", boardPath)

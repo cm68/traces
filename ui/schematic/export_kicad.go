@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -281,7 +280,7 @@ func writeSheetContent(w *sexpWriter, doc *SchematicDoc, sheetNum int) {
 		if effectiveSheet(sym.Sheet) != sheetNum {
 			continue
 		}
-		writeSymbolInstance(w, sym)
+		writeSymbolInstance(w, doc, sym)
 	}
 
 	// Wires
@@ -313,7 +312,7 @@ func writeSheetContent(w *sexpWriter, doc *SchematicDoc, sheetNum int) {
 		if effectiveSheet(pp.Sheet) != sheetNum {
 			continue
 		}
-		writePowerPortInstance(w, pp)
+		writePowerPortInstance(w, doc, pp)
 	}
 
 	// One PWR_FLAG per power net per sheet marks the net as driven,
@@ -324,7 +323,7 @@ func writeSheetContent(w *sexpWriter, doc *SchematicDoc, sheetNum int) {
 			continue
 		}
 		seenPwrNet[pp.NetName] = true
-		writePwrFlagInstance(w, pp, sheetNum)
+		writePwrFlagInstance(w, doc, pp, sheetNum)
 	}
 
 	// Off-sheet connectors as global labels
@@ -449,21 +448,22 @@ func kicadPowerLibID(netName string) string {
 	return fmt.Sprintf("power:%s", netName)
 }
 
-// functionNameToUnit maps a gate function name to a KiCad unit number (1-based).
-func functionNameToUnit(name string) int {
-	if name == "" {
-		return 1
-	}
-	// Numeric: "1" -> 1, "12" -> 12, etc.
-	if n, err := strconv.Atoi(name); err == nil && n >= 1 {
-		return n
-	}
-	// Alphabetic: "A" -> 1, "B" -> 2, etc.
-	if len(name) == 1 && name[0] >= 'A' && name[0] <= 'Z' {
-		return int(name[0]-'A') + 1
-	}
-	if len(name) == 1 && name[0] >= 'a' && name[0] <= 'z' {
-		return int(name[0]-'a') + 1
+// componentUnitNumber returns the 1-based KiCad unit for a symbol: the
+// position of its function among the component's distinct functions in
+// document order. Positional numbering never collides, unlike parsing
+// function names ("1".."8" and "A".."D" work, but "1A1".."2A4" do not).
+func componentUnitNumber(doc *SchematicDoc, sym *PlacedSymbol) int {
+	n := 0
+	seen := make(map[string]bool)
+	for _, s := range doc.Symbols {
+		if s.ComponentID != sym.ComponentID || seen[s.FunctionName] {
+			continue
+		}
+		seen[s.FunctionName] = true
+		n++
+		if s.FunctionName == sym.FunctionName {
+			return n
+		}
 	}
 	return 1
 }
@@ -513,7 +513,7 @@ func writeLibSymbolDef(w *sexpWriter, sym *PlacedSymbol, libID string, doc *Sche
 	// emit the pin layout for each unit based on the actual placed symbols.
 	unitSyms := componentUnitsOnSheet(doc, sym.ComponentID, sheetNum)
 	for _, us := range unitSyms {
-		unit := functionNameToUnit(us.FunctionName)
+		unit := componentUnitNumber(doc, us)
 		writeLibSymbolUnit(w, us, libID, unit)
 	}
 
@@ -679,10 +679,10 @@ func writePowerLibSymbolDef(w *sexpWriter, netName string, libID string) {
 // --- Symbol instance writing ---
 
 // writeSymbolInstance writes a placed symbol instance.
-func writeSymbolInstance(w *sexpWriter, sym *PlacedSymbol) {
+func writeSymbolInstance(w *sexpWriter, doc *SchematicDoc, sym *PlacedSymbol) {
 	libID := kicadLibID(sym)
 	uuid := deterministicUUID("symbol", sym.ID)
-	unit := functionNameToUnit(sym.FunctionName)
+	unit := componentUnitNumber(doc, sym)
 
 	// Our model rotates clockwise in Y-down coordinates; KiCad rotates
 	// counter-clockwise in Y-up. Same matrix, so the angle negates.
@@ -701,12 +701,30 @@ func writeSymbolInstance(w *sexpWriter, sym *PlacedSymbol) {
 
 	w.line("(unit %d)", unit)
 
+	// Board-edge connector symbols have no footprint of their own — the
+	// board seeds one shared edge-connector footprint marked board_only.
+	onBoard := "yes"
+	if sym.GateType == "CONNECTOR" {
+		onBoard = "no"
+	}
+	w.line("(exclude_from_sim no)")
+	w.line("(in_bom yes)")
+	w.line("(on_board %s)", onBoard)
+	w.line("(dnp no)")
+
 	w.line("(uuid \"%s\")", uuid)
+
+	// Footprint matches the board export's lib id so Update PCB from
+	// Schematic associates rather than replaces.
+	footprint := ""
+	if sym.Package != "" {
+		footprint = "pcb-tracer:" + sym.Package
+	}
 
 	// Properties
 	writeProperty(w, "Reference", sym.ComponentID, sym.X, sym.Y-60, 0)
 	writeProperty(w, "Value", sym.PartNumber, sym.X, sym.Y+60, 1)
-	writeProperty(w, "Footprint", "", sym.X, sym.Y+80, 2)
+	writeProperty(w, "Footprint", footprint, sym.X, sym.Y+80, 2)
 
 	// Pin instances
 	w.open("instances")
@@ -811,9 +829,41 @@ func writeNetLabel(w *sexpWriter, nl *NetLabel) {
 
 // --- Power port instance writing ---
 
-func writePowerPortInstance(w *sexpWriter, pp *PowerPort) {
+// powerPortRef returns a unique annotated reference like "#PWR012" for a
+// power port, numbered by its position in doc.PowerPorts so every sheet file
+// agrees. Unannotated "#PWR?" references trip KiCad's annotation check.
+func powerPortRef(doc *SchematicDoc, pp *PowerPort) string {
+	for i, p := range doc.PowerPorts {
+		if p == pp {
+			return fmt.Sprintf("#PWR%03d", i+1)
+		}
+	}
+	return "#PWR999"
+}
+
+// pwrFlagRef returns a unique annotated reference like "#FLG003" for the
+// PWR_FLAG on a given sheet and power net.
+func pwrFlagRef(doc *SchematicDoc, sheetNum int, netName string) string {
+	n := 0
+	seen := make(map[string]bool)
+	for _, pp := range doc.PowerPorts {
+		key := fmt.Sprintf("%d:%s", effectiveSheet(pp.Sheet), pp.NetName)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		n++
+		if effectiveSheet(pp.Sheet) == sheetNum && pp.NetName == netName {
+			return fmt.Sprintf("#FLG%03d", n)
+		}
+	}
+	return "#FLG999"
+}
+
+func writePowerPortInstance(w *sexpWriter, doc *SchematicDoc, pp *PowerPort) {
 	libID := kicadPowerLibID(pp.NetName)
 	uuid := deterministicUUID("power", fmt.Sprintf("%s-%s-%d", pp.OwnerSymbolID, pp.NetName, pp.OwnerPinNum))
+	ref := powerPortRef(doc, pp)
 
 	// GND symbols point down (rotation 0 in our model, but KiCad power symbols
 	// default to pointing up, so GND needs no rotation since the lib_symbol is drawn downward).
@@ -825,13 +875,13 @@ func writePowerPortInstance(w *sexpWriter, pp *PowerPort) {
 	w.line("(unit 1)")
 	w.line("(uuid \"%s\")", uuid)
 
-	writeProperty(w, "Reference", "#PWR?", pp.X, pp.Y-20, 0)
+	writeProperty(w, "Reference", ref, pp.X, pp.Y-20, 0)
 	writeProperty(w, "Value", pp.NetName, pp.X, pp.Y+20, 1)
 
 	w.open("instances")
 	w.open("project \"pcb-tracer\"")
-	w.line("(path \"/%s\" (reference \"#PWR?\") (unit 1))",
-		deterministicUUID("root", "sheet-1"))
+	w.line("(path \"/%s\" (reference \"%s\") (unit 1))",
+		deterministicUUID("root", "sheet-1"), ref)
 	w.close()
 	w.close()
 
@@ -869,21 +919,22 @@ func writePwrFlagLibSymbolDef(w *sexpWriter) {
 }
 
 // writePwrFlagInstance places a PWR_FLAG on a power port's connection point.
-func writePwrFlagInstance(w *sexpWriter, pp *PowerPort, sheetNum int) {
+func writePwrFlagInstance(w *sexpWriter, doc *SchematicDoc, pp *PowerPort, sheetNum int) {
 	uuid := deterministicUUID("pwrflag", fmt.Sprintf("%d-%s", sheetNum, pp.NetName))
+	ref := pwrFlagRef(doc, sheetNum, pp.NetName)
 
 	w.open(fmt.Sprintf("symbol (lib_id \"power:PWR_FLAG\") (at %.4f %.4f 0)",
 		snapMM(pp.X), snapMM(pp.Y)))
 	w.line("(unit 1)")
 	w.line("(uuid \"%s\")", uuid)
 
-	writeProperty(w, "Reference", "#FLG?", pp.X, pp.Y-30, 0)
+	writeProperty(w, "Reference", ref, pp.X, pp.Y-30, 0)
 	writeProperty(w, "Value", "PWR_FLAG", pp.X, pp.Y+30, 1)
 
 	w.open("instances")
 	w.open("project \"pcb-tracer\"")
-	w.line("(path \"/%s\" (reference \"#FLG?\") (unit 1))",
-		deterministicUUID("root", "sheet-1"))
+	w.line("(path \"/%s\" (reference \"%s\") (unit 1))",
+		deterministicUUID("root", "sheet-1"), ref)
 	w.close()
 	w.close()
 
@@ -1048,6 +1099,28 @@ func componentUnitsOnSheet(doc *SchematicDoc, compID string, sheetNum int) []*Pl
 		}
 	}
 	return result
+}
+
+// KiCadFootprintPaths returns, for each PCB component with a schematic
+// symbol, the KiCad KIID path of one of its units ("/<unit-uuid>", prefixed
+// with the sheet uuid for sub-sheets). Board footprints carrying these paths
+// associate with their symbols in "Update PCB from Schematic".
+func KiCadFootprintPaths(doc *SchematicDoc) map[string]string {
+	out := make(map[string]string)
+	for _, sym := range doc.Symbols {
+		if sym.GateType == "CONNECTOR" {
+			continue
+		}
+		if _, ok := out[sym.ComponentID]; ok {
+			continue
+		}
+		path := "/" + deterministicUUID("symbol", sym.ID)
+		if s := effectiveSheet(sym.Sheet); s > 1 {
+			path = "/" + deterministicUUID("sheet", fmt.Sprintf("sheet-%d", s)) + path
+		}
+		out[sym.ComponentID] = path
+	}
+	return out
 }
 
 // escapeString escapes special characters for KiCad S-expression strings.

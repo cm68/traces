@@ -2,6 +2,7 @@ package schematic
 
 import (
 	"fmt"
+	"os/exec"
 
 	"github.com/gotk3/gotk3/glib"
 	"github.com/gotk3/gotk3/gtk"
@@ -111,6 +112,26 @@ func newSchematicWindowForSheet(state *app.State, doc *SchematicDoc, sheetNum in
 	return sw, nil
 }
 
+// openInKiCad writes a fresh KiCad export and opens the root sheet in eeschema.
+func (sw *SchematicWindow) openInKiCad() {
+	if sw.state == nil || sw.state.ProjectPath == "" {
+		sw.statusBar.SetText("Save the project first — the KiCad export is written next to the project file")
+		return
+	}
+	if err := ExportKiCadSchematic(sw.doc, sw.state.ProjectPath); err != nil {
+		sw.statusBar.SetText(fmt.Sprintf("KiCad export failed: %v", err))
+		return
+	}
+	path := kicadSchPath(sw.state.ProjectPath, 1)
+	cmd := exec.Command("eeschema", path)
+	if err := cmd.Start(); err != nil {
+		sw.statusBar.SetText(fmt.Sprintf("Cannot launch eeschema: %v (is KiCad installed?)", err))
+		return
+	}
+	go cmd.Wait() // reap the child on exit
+	sw.statusBar.SetText("Opened in KiCad: " + path)
+}
+
 // Show displays the schematic window.
 func (sw *SchematicWindow) Show() {
 	sw.win.ShowAll()
@@ -178,11 +199,19 @@ func (sw *SchematicWindow) buildToolbar() *gtk.Box {
 		positionPowerPorts(sw.doc)
 		generateOffSheetConnectors(sw.doc)
 		RouteAllWires(sw.doc)
+		regenerateNetLabels(sw.doc)
 		sw.canvas.updateContentSize()
 		sw.canvas.Refresh()
 		SaveLayout(sw.doc, sw.state.ProjectPath)
 	})
 	toolbar.PackStart(relayoutBtn, false, false, 0)
+
+	// Open in KiCad — exports .kicad_sch and launches eeschema on it
+	kicadBtn, _ := gtk.ButtonNewWithLabel("Open in KiCad")
+	kicadBtn.Connect("clicked", func() {
+		sw.openInKiCad()
+	})
+	toolbar.PackStart(kicadBtn, false, false, 0)
 
 	// Separator
 	sep2, _ := gtk.SeparatorNew(gtk.ORIENTATION_VERTICAL)

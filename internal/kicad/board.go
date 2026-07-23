@@ -192,21 +192,35 @@ func ExportBoard(state *app.State, fpPaths map[string]string, path string) error
 	// Edge connector contacts as one footprint of surface pads
 	writeConnectorFootprint(w, state, mm, netRef, extend)
 
-	// Vias
+	// Vias. Large unlinked pads are mounting or hardware holes, not signal
+	// vias — they become mounting-hole footprints instead.
+	mountingHoles := 0
 	for _, cv := range fl.GetConfirmedVias() {
 		size := mm(cv.Radius * 2)
 		if size < 0.6 {
 			size = 0.6
-		}
-		drill := size * 0.5
-		if drill < 0.3 {
-			drill = 0.3
 		}
 		netID := ""
 		if n := fl.GetNetForElement(cv.ID); n != nil {
 			netID = n.ID
 		}
 		extend(cv.Center.X, cv.Center.Y)
+
+		if size >= 4.0 && cv.ComponentID == "" {
+			mountingHoles++
+			writeMountingHole(w, mountingHoles, mm(cv.Center.X), mm(cv.Center.Y), size, netRef(netID), cv.ID)
+			continue
+		}
+
+		// Drill from a typical ~0.4mm annular ring, bounded to stay sane on
+		// mis-sized detections.
+		drill := size - 0.8
+		if drill < 0.4 {
+			drill = 0.4
+		}
+		if drill > size*0.7 {
+			drill = size * 0.7
+		}
 		w.line("(via (at %.4f %.4f) (size %.3f) (drill %.3f) (layers \"F.Cu\" \"B.Cu\") (net %d) (uuid \"%s\"))",
 			mm(cv.Center.X), mm(cv.Center.Y), size, drill, netNumOf(netID), uuid("via", cv.ID))
 	}
@@ -427,6 +441,37 @@ func writeConnectorFootprint(w *writer, state *app.State,
 			c.PinNumber, mm(c.Center.X), mm(c.Center.Y), cw, ch, layer,
 			netRef(netID), uuid("cpad", c.ID))
 	}
+
+	w.close() // footprint
+}
+
+// writeMountingHole emits a plated mounting hole as a small footprint.
+func writeMountingHole(w *writer, num int, xMM, yMM, size float64, netRef, id string) {
+	w.open("footprint \"pcb-tracer:MountingHole\" (layer \"F.Cu\")")
+	w.line("(uuid \"%s\")", uuid("mnt", id))
+	w.line("(at %.4f %.4f)", xMM, yMM)
+	w.line("(attr exclude_from_pos_files exclude_from_bom board_only)")
+
+	w.line("(property \"Reference\" \"H%d\"", num)
+	w.depth++
+	w.line("(at 0 %.4f 0)", -size/2-1)
+	w.line("(layer \"F.SilkS\")")
+	w.line("(uuid \"%s\")", uuid("mntref", id))
+	w.line("(effects (font (size 1 1) (thickness 0.15)))")
+	w.depth--
+	w.line(")")
+
+	w.line("(property \"Value\" \"MountingHole\"")
+	w.depth++
+	w.line("(at 0 %.4f 0)", size/2+1)
+	w.line("(layer \"F.Fab\")")
+	w.line("(uuid \"%s\")", uuid("mntval", id))
+	w.line("(effects (font (size 1 1) (thickness 0.15)))")
+	w.depth--
+	w.line(")")
+
+	w.line("(pad \"1\" thru_hole circle (at 0 0) (size %.3f %.3f) (drill %.3f) (layers \"*.Cu\" \"*.Mask\") %s (uuid \"%s\"))",
+		size, size, size*0.6, netRef, uuid("mntpad", id))
 
 	w.close() // footprint
 }

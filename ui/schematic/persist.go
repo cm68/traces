@@ -139,11 +139,14 @@ func ApplyLayout(doc *SchematicDoc, layout *SchematicLayout) int {
 		doc.Sheets = layout.Sheets
 	}
 
+	// Positions are snapped to the 5-unit schematic grid on restore: older
+	// layouts may hold off-grid coordinates, which break pin/wire coincidence
+	// in the KiCad export (it snaps everything to KiCad's 1.27mm grid).
 	restored := 0
 	for _, sym := range doc.Symbols {
 		if sl, ok := layout.Symbols[sym.ID]; ok {
-			sym.X = sl.X
-			sym.Y = sl.Y
+			sym.X = snap5(sl.X)
+			sym.Y = snap5(sl.Y)
 			sym.FlipH = sl.FlipH
 			sym.FlipV = sl.FlipV
 			sym.Rotation = sl.Rotation
@@ -170,8 +173,8 @@ func ApplyLayout(doc *SchematicDoc, layout *SchematicLayout) int {
 		for _, osc := range doc.OffSheetConnectors {
 			key := fmt.Sprintf("%d:%s", osc.Sheet, osc.NetID)
 			if ocl, ok := layout.OffSheetConnectors[key]; ok {
-				osc.X = ocl.X
-				osc.Y = ocl.Y
+				osc.X = snap5(ocl.X)
+				osc.Y = snap5(ocl.Y)
 				osc.FlipH = ocl.FlipH
 				osc.FlipV = ocl.FlipV
 				osc.Rotation = ocl.Rotation

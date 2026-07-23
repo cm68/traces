@@ -606,34 +606,8 @@ func (sc *SchematicCanvas) routeSheetWiresForSymbol(sheetNum int, affectedNets m
 		}
 	}
 
-	// Route each affected net
-	for netID, pins := range netPins {
-		if len(pins) < 2 {
-			continue
-		}
-
-		if len(pins) == 2 {
-			wireID++
-			sc.doc.Wires = append(sc.doc.Wires, &Wire{
-				ID:     fmt.Sprintf("wire-%d", wireID),
-				NetID:  netID,
-				Points: ManhattanRoute(pins[0], pins[1]),
-				Sheet:  sheetNum,
-			})
-		} else {
-			edges := mstEdges(pins)
-			for _, edge := range edges {
-				wireID++
-				sc.doc.Wires = append(sc.doc.Wires, &Wire{
-					ID:     fmt.Sprintf("wire-%d", wireID),
-					NetID:  netID,
-					Points: ManhattanRoute(pins[edge[0]], pins[edge[1]]),
-					Sheet:  sheetNum,
-				})
-			}
-		}
-	}
-	return wireID
+	// Route each affected net, avoiding collisions with the kept wires.
+	return routeNetsOnSheet(sc.doc, sheetNum, netPins, wireID)
 }
 
 // findPinsForNet returns all pin positions that belong to a net on the current sheet.

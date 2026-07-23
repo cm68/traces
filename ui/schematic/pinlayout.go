@@ -107,6 +107,18 @@ func rotatePoint(x, y float64, degrees int) (float64, float64) {
 func BuildPinsFromFunction(fn *component.LogicFunction, partDef *component.PartDefinition) []*SchematicPin {
 	var pins []*SchematicPin
 
+	// A physical pin listed under more than one role (terminator functions
+	// declare the same pin as both input and output) is emitted once, with
+	// the first role encountered.
+	seen := make(map[int]bool)
+	taken := func(pn int) bool {
+		if seen[pn] {
+			return true
+		}
+		seen[pn] = true
+		return false
+	}
+
 	// Helper to find pin name from part definition
 	pinName := func(pinNum int) string {
 		for _, p := range partDef.Pins {
@@ -119,6 +131,9 @@ func BuildPinsFromFunction(fn *component.LogicFunction, partDef *component.PartD
 
 	// Input pins
 	for _, pn := range fn.Inputs {
+		if taken(pn) {
+			continue
+		}
 		name := pinName(pn)
 		negated := len(name) > 0 && name[0] == '/'
 		pins = append(pins, &SchematicPin{
@@ -131,6 +146,9 @@ func BuildPinsFromFunction(fn *component.LogicFunction, partDef *component.PartD
 
 	// Clock pins
 	for _, pn := range fn.Clocks {
+		if taken(pn) {
+			continue
+		}
 		pins = append(pins, &SchematicPin{
 			PinNumber: pn,
 			Name:      pinName(pn),
@@ -141,6 +159,9 @@ func BuildPinsFromFunction(fn *component.LogicFunction, partDef *component.PartD
 
 	// Enable pins
 	for _, pn := range fn.Enables {
+		if taken(pn) {
+			continue
+		}
 		name := pinName(pn)
 		negated := len(name) > 0 && name[0] == '/'
 		pins = append(pins, &SchematicPin{
@@ -153,6 +174,9 @@ func BuildPinsFromFunction(fn *component.LogicFunction, partDef *component.PartD
 
 	// Output pins
 	for _, pn := range fn.Outputs {
+		if taken(pn) {
+			continue
+		}
 		name := pinName(pn)
 		negated := len(name) > 0 && (name[0] == '/' || name[0] == '~')
 		pins = append(pins, &SchematicPin{

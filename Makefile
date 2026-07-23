@@ -84,9 +84,11 @@ clean:
 install-deps-linux:
 	@echo "Installing system dependencies for Linux..."
 	sudo apt-get update
-	sudo apt-get install -y libgl1-mesa-dev xorg-dev
-	sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
+	sudo apt-get install -y build-essential pkg-config git
+	sudo apt-get install -y libgtk-3-dev
 	sudo apt-get install -y libopencv-dev
+	sudo apt-get install -y libtesseract-dev libleptonica-dev
+	sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
 
 # Install system dependencies (macOS)
 .PHONY: install-deps-macos

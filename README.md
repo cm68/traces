@@ -195,21 +195,70 @@ traces/
 
 ## Building
 
+This is a CGo project: the Go bindings for GTK3, OpenCV, and Tesseract all
+compile C/C++ at build time, so the development headers for each library must
+be installed — not just the runtime libraries.
+
+### Required packages
+
+Starting from a bare Unix machine you need:
+
+**Toolchain**
+- Go 1.24 or newer (https://go.dev/dl/ if your distribution's package is too old)
+- A C and C++ compiler (gcc/g++ or clang)
+- `make`, `pkg-config`, `git`
+
+**Libraries (development headers)**
+- GTK3 (`gtk+-3.0` ≥ 3.24, pulls in glib/gobject/gio/cairo/gdk)
+- OpenCV 4.x
+- Tesseract 5.x and Leptonica
+- Tesseract English language data (runtime, needed for OCR)
+
+### Debian / Ubuntu
+
+```bash
+sudo apt-get install -y \
+    build-essential pkg-config git make golang \
+    libgtk-3-dev \
+    libopencv-dev \
+    libtesseract-dev libleptonica-dev \
+    tesseract-ocr tesseract-ocr-eng
+```
+
+(If your release's `golang` package is older than 1.24, install Go from
+https://go.dev/dl/ instead.)
+
+### Fedora / RHEL
+
+```bash
+sudo dnf install -y \
+    gcc gcc-c++ pkgconf-pkg-config git make golang \
+    gtk3-devel \
+    opencv-devel \
+    tesseract-devel leptonica-devel \
+    tesseract-langpack-eng
+```
+
+### macOS
+
+```bash
+brew install go pkg-config gtk+3 opencv tesseract
+```
+
+### Build
+
 ```bash
 make
 ```
 
-Requires OpenCV 4.x and Tesseract 5 installed.
+The first build compiles the OpenCV (gocv) bindings and takes several
+minutes; subsequent builds are fast. The binary lands in `build/pcb-tracer`.
 
-On Linux:
-```bash
-make install-deps-linux
-```
+`make install-deps-linux` runs the Debian/Ubuntu package installation above
+for you (requires sudo).
 
-On macOS:
-```bash
-make install-deps-macos
-```
+Do not use `go build ./...` directly — always build through `make`, which
+sets the version ldflags the app expects.
 
 ## Usage
 

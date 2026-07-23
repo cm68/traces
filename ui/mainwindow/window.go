@@ -9,6 +9,7 @@ import (
 
 	"pcb-tracer/internal/app"
 	"pcb-tracer/internal/board"
+	"pcb-tracer/internal/kicad"
 	"pcb-tracer/internal/netlist"
 	"pcb-tracer/internal/version"
 	"pcb-tracer/ui/canvas"
@@ -292,6 +293,7 @@ func (mw *MainWindow) setupMenus() {
 		menuEntry{}, // separator
 		menuEntry{"Export Netlist...", mw.onExportNetlist},
 		menuEntry{"Open Schematic...", mw.onGenerateSchematic},
+		menuEntry{"Seed KiCad Project", mw.onSeedKiCadProject},
 		menuEntry{}, // separator
 		menuEntry{"Quit", func() { mw.win.Close() }},
 	)
@@ -883,6 +885,35 @@ func (mw *MainWindow) onGenerateSchematic() {
 		}
 		mw.updateStatus("Schematic regenerated")
 	}
+}
+
+// onSeedKiCadProject exports the full KiCad project — schematic sheets,
+// board layout, and project file — next to the pcb-tracer project file.
+func (mw *MainWindow) onSeedKiCadProject() {
+	if mw.state.ProjectPath == "" {
+		mw.updateStatus("Save the project first — KiCad files are written next to it")
+		return
+	}
+	if mw.state.FeaturesLayer == nil || mw.state.FeaturesLayer.NetCount() == 0 {
+		mw.updateStatus("No nets to seed a KiCad project from")
+		return
+	}
+
+	// Schematic with saved layout applied (fresh auto-layout if none saved).
+	sm := schematic.NewSheetManager(mw.state)
+	if err := schematic.ExportKiCadSchematic(sm.Doc(), mw.state.ProjectPath); err != nil {
+		mw.updateStatus(fmt.Sprintf("KiCad schematic export failed: %v", err))
+		return
+	}
+	if err := kicad.ExportBoard(mw.state, kicad.BoardPath(mw.state.ProjectPath)); err != nil {
+		mw.updateStatus(fmt.Sprintf("KiCad board export failed: %v", err))
+		return
+	}
+	if err := kicad.ExportProject(mw.state.ProjectPath); err != nil {
+		mw.updateStatus(fmt.Sprintf("KiCad project file failed: %v", err))
+		return
+	}
+	mw.updateStatus("Seeded KiCad project: " + kicad.ProjectPath(mw.state.ProjectPath))
 }
 
 func (mw *MainWindow) onZoomIn() {

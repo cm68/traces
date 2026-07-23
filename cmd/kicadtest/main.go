@@ -15,6 +15,7 @@ import (
 	"sort"
 
 	"pcb-tracer/internal/app"
+	"pcb-tracer/internal/kicad"
 	"pcb-tracer/ui/schematic"
 )
 
@@ -94,6 +95,12 @@ func main() {
 	if err := schematic.ExportKiCadSchematic(doc, outPrefix); err != nil {
 		log.Fatalf("export: %v", err)
 	}
+
+	boardPath := kicad.BoardPath(outPrefix + ".pcbproj")
+	if err := kicad.ExportBoard(state, boardPath); err != nil {
+		log.Fatalf("board export: %v", err)
+	}
+	fmt.Println("board exported:", boardPath)
 
 	// Dump wire geometry with net IDs for external analysis.
 	if wf, err := os.Create(outPrefix + "_wires.json"); err == nil {

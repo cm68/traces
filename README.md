@@ -109,6 +109,17 @@ A PCB reverse engineering tool written in Go with a GTK3 GUI. Designed for traci
 - Text-based connectivity dump with net statistics
 - File > Export Netlist menu
 
+### KiCad Project Seeding
+- File > Seed KiCad Project generates a complete KiCad project from detection
+- Schematic sheets (.kicad_sch) with embedded symbols, validated against KiCad 9
+- Board layout (.kicad_pcb): footprints at detected component positions, pads at
+  detected pin locations, vias, traces with detected widths on F.Cu/B.Cu, edge
+  connector pads — dimensionally faithful via scan DPI
+- Nets shared by name between schematic and board
+- Collision-aware schematic wire routing (no shorts from crossing/overlap)
+- "Open in KiCad" button in the schematic viewer launches eeschema directly
+- One-way export: pcb-tracer owns generation; finish the design in KiCad
+
 ### Schematic Viewer
 - Interactive schematic generated from traced netlist (File > Generate Schematic)
 - Opens in a separate GTK window for side-by-side viewing with PCB
@@ -164,6 +175,7 @@ traces/
 │   ├── datecode/             # IC date code decoding
 │   ├── features/             # Unified feature layer, net reconciliation
 │   ├── image/                # Image loading, layers, DPI extraction
+│   ├── kicad/                # KiCad board (.kicad_pcb) and project seeding
 │   ├── logo/                 # Manufacturer logo detection
 │   ├── netlist/              # Electrical nets, connectivity analysis, export (KiCad, SPICE)
 │   ├── ocr/                  # Tesseract integration, training database

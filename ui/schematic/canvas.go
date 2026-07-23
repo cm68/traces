@@ -480,6 +480,24 @@ func (sc *SchematicCanvas) rerouteWiresForOffSheetConnector(osc *OffSheetConnect
 	affectedNets := make(map[string]bool)
 	affectedNets[osc.NetID] = true
 
+	// Also reroute nets whose wires pass under the connector's new position
+	// — the connector point is an electrical contact in KiCad.
+	for _, w := range sc.doc.Wires {
+		if affectedNets[w.NetID] || effectiveSheet(w.Sheet) != sc.sheetNum {
+			continue
+		}
+		for i := 1; i < len(w.Points); i++ {
+			seg := obSegment{
+				X1: w.Points[i-1].X, Y1: w.Points[i-1].Y,
+				X2: w.Points[i].X, Y2: w.Points[i].Y,
+			}
+			if onSegment(osc.X, osc.Y, seg) {
+				affectedNets[w.NetID] = true
+				break
+			}
+		}
+	}
+
 	// Remove wires for affected net from current sheet
 	kept := sc.doc.Wires[:0]
 	for _, w := range sc.doc.Wires {
@@ -536,6 +554,38 @@ func (sc *SchematicCanvas) rerouteWiresForSymbol(sym *PlacedSymbol) {
 	for _, pin := range sym.Pins {
 		if pin.NetID != "" {
 			affectedNets[pin.NetID] = true
+		}
+	}
+
+	// Also reroute nets whose wires now pass under the symbol's pins or
+	// power ports — they were routed before the symbol moved here, and a
+	// pin resting on a foreign wire is an electrical contact in KiCad.
+	var contact []geometry.Point2D
+	for _, pin := range sym.Pins {
+		contact = append(contact, geometry.Point2D{X: pin.X, Y: pin.Y})
+	}
+	for _, pp := range sc.doc.PowerPorts {
+		if pp.OwnerSymbolID == sym.ID {
+			contact = append(contact, geometry.Point2D{X: pp.X, Y: pp.Y})
+		}
+	}
+	symSheet := effectiveSheet(sym.Sheet)
+	for _, w := range sc.doc.Wires {
+		if affectedNets[w.NetID] || effectiveSheet(w.Sheet) != symSheet {
+			continue
+		}
+	wireScan:
+		for i := 1; i < len(w.Points); i++ {
+			seg := obSegment{
+				X1: w.Points[i-1].X, Y1: w.Points[i-1].Y,
+				X2: w.Points[i].X, Y2: w.Points[i].Y,
+			}
+			for _, p := range contact {
+				if onSegment(p.X, p.Y, seg) {
+					affectedNets[w.NetID] = true
+					break wireScan
+				}
+			}
 		}
 	}
 

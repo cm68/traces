@@ -109,6 +109,9 @@ func main() {
 		log.Fatalf("board export: %v", err)
 	}
 	fmt.Println("board exported:", boardPath)
+	if err := kicad.ExportProject(outPrefix + ".pcbproj"); err != nil {
+		log.Fatalf("project export: %v", err)
+	}
 
 	// Dump wire geometry with net IDs for external analysis.
 	if wf, err := os.Create(outPrefix + "_wires.json"); err == nil {

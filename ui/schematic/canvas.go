@@ -371,6 +371,16 @@ func (sc *SchematicCanvas) onLeftRelease() {
 			sc.onLayoutChanged()
 		}
 	}
+	// Overlapping symbols put pins of different nets on the same spot —
+	// a placement-level short in the KiCad export. Warn on drop.
+	if sc.dragging && sc.dragSymbol != nil {
+		if other := sc.findOverlappingSymbol(sc.dragSymbol); other != nil {
+			if sc.onStatusUpdate != nil {
+				sc.onStatusUpdate(fmt.Sprintf("Warning: %s overlaps %s — pins may collide in the export",
+					sc.dragSymbol.ID, other.ID))
+			}
+		}
+	}
 	sc.dragging = false
 	sc.dragSymbol = nil
 	sc.dragOffSheetConnector = nil
@@ -449,6 +459,37 @@ func (sc *SchematicCanvas) clearSelection() {
 			w.Selected = false
 		}
 	}
+}
+
+// findOverlappingSymbol returns another symbol on the same sheet whose body
+// rectangle intersects sym's, or nil.
+func (sc *SchematicCanvas) findOverlappingSymbol(sym *PlacedSymbol) *PlacedSymbol {
+	bodyRect := func(s *PlacedSymbol) (x0, y0, x1, y1 float64) {
+		def := GetSymbolDef(s.GateType,
+			countPinsByDir(s, "input"),
+			countPinsByDir(s, "output"),
+			countPinsByDir(s, "enable"),
+			countPinsByDir(s, "clock"))
+		hw, hh := 100.0, 50.0
+		if def != nil {
+			hw, hh = def.BodyWidth/2, def.BodyHeight/2
+			if s.Rotation == 90 || s.Rotation == 270 {
+				hw, hh = hh, hw
+			}
+		}
+		return s.X - hw, s.Y - hh, s.X + hw, s.Y + hh
+	}
+	ax0, ay0, ax1, ay1 := bodyRect(sym)
+	for _, other := range sc.doc.Symbols {
+		if other == sym || effectiveSheet(other.Sheet) != effectiveSheet(sym.Sheet) {
+			continue
+		}
+		bx0, by0, bx1, by1 := bodyRect(other)
+		if ax0 < bx1 && bx0 < ax1 && ay0 < by1 && by0 < ay1 {
+			return other
+		}
+	}
+	return nil
 }
 
 // hitTestOffSheetConnector returns the off-sheet connector at (x,y) or nil.

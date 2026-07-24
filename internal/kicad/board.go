@@ -4,6 +4,7 @@ package kicad
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -476,8 +477,12 @@ func writeMountingHole(w *writer, num int, xMM, yMM, size float64, netRef, id st
 	w.close() // footprint
 }
 
-// ExportProject writes a minimal .kicad_pro so KiCad opens the schematic and
-// board as one project.
+// ExportProject writes a .kicad_pro so KiCad opens the schematic and board
+// as one project, with ERC severities preset to silence findings inherent to
+// seeded projects: unregistered inline symbol/footprint libraries, drawings
+// that differ from the official 74xx library, and shared pins drawn on every
+// unit. Genuinely useful checks (unconnected pins, net conflicts) keep their
+// defaults.
 func ExportProject(projectPath string) error {
 	path := ProjectPath(projectPath)
 	if path == "" {
@@ -486,6 +491,30 @@ func ExportProject(projectPath string) error {
 	if _, err := os.Stat(path); err == nil {
 		return nil // never clobber an existing project file (user settings live there)
 	}
-	content := "{\n  \"meta\": {\n    \"filename\": \"" + escape(filepath.Base(path)) + "\",\n    \"version\": 3\n  }\n}\n"
-	return os.WriteFile(path, []byte(content), 0644)
+	pro := map[string]any{
+		"meta": map[string]any{
+			"filename": filepath.Base(path),
+			"version":  3,
+		},
+		"schematic": map[string]any{
+			"meta": map[string]any{"version": 1},
+		},
+		"erc": map[string]any{
+			"erc_exclusions": []any{},
+			"meta":           map[string]any{"version": 0},
+			"rule_severities": map[string]any{
+				"lib_symbol_issues":     "ignore",
+				"lib_symbol_mismatch":   "ignore",
+				"footprint_link_issues": "ignore",
+				"duplicate_pins":        "ignore",
+				"different_unit_net":    "warning",
+				"endpoint_off_grid":     "warning",
+			},
+		},
+	}
+	data, err := json.MarshalIndent(pro, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0644)
 }

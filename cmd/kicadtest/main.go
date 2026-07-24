@@ -41,9 +41,13 @@ func main() {
 	}
 
 	doc := schematic.GenerateSchematic(state)
-	if layout := schematic.LoadLayout(projPath); layout != nil {
-		restored := schematic.ApplyLayout(doc, layout)
-		fmt.Printf("applied saved layout: %d symbols restored\n", restored)
+	if os.Getenv("FRESH_LAYOUT") == "" {
+		if layout := schematic.LoadLayout(projPath); layout != nil {
+			restored := schematic.ApplyLayout(doc, layout)
+			fmt.Printf("applied saved layout: %d symbols restored\n", restored)
+		}
+	} else {
+		fmt.Println("using fresh auto-layout (FRESH_LAYOUT set)")
 	}
 
 	fmt.Printf("sheets=%d symbols=%d wires=%d labels=%d powerports=%d offsheet=%d routeFallbacks=%d\n",

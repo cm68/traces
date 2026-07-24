@@ -114,7 +114,11 @@ A PCB reverse engineering tool written in Go with a GTK3 GUI. Designed for traci
 - Schematic sheets (.kicad_sch) with embedded symbols, validated against KiCad 9
 - Board layout (.kicad_pcb): footprints at detected component positions, pads at
   detected pin locations, vias, traces with detected widths on F.Cu/B.Cu, edge
-  connector pads — dimensionally faithful via scan DPI
+  connector pads, mounting holes — dimensionally faithful via scan DPI
+- Board outline captured from the scans as an Edge.Cuts polygon (tongue,
+  chamfers, and notches preserved; Board > Detect Board Outline to preview)
+- Footprints linked to schematic symbols — Update PCB from Schematic works
+- Project file presets ERC severities so a fresh seed shows only real findings
 - Nets shared by name between schematic and board
 - Collision-aware schematic wire routing (no shorts from crossing/overlap)
 - "Open in KiCad" button in the schematic viewer launches eeschema directly

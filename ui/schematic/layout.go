@@ -381,13 +381,13 @@ func AutoLayout(doc *SchematicDoc) {
 	}
 	placed := make(map[string]bool)
 
+	type slot struct {
+		si      *symInfo
+		desired float64
+		half    float64
+	}
 	for c := 0; c <= maxCol; c++ {
 		col := columns[c]
-		type slot struct {
-			si      *symInfo
-			desired float64
-			half    float64
-		}
 		slots := make([]slot, len(col))
 		for i, si := range col {
 			desired := startY + float64(si.row)*rowSpacing
@@ -417,6 +417,90 @@ func AutoLayout(doc *SchematicDoc) {
 			slots[i].si.sym.Row = slots[i].si.row
 			minY = y + slots[i].half + colGap
 			placed[slots[i].si.sym.ID] = true
+		}
+	}
+
+	// ── Orientation: flip symbols vertically when that shortens wires ──
+	// A symbol whose pins connect to partners in the opposite vertical order
+	// forces crossing wires and u-turns; flipping uncrosses them.
+	netMembers := make(map[string][]*symInfo)
+	for _, si := range syms {
+		seen := make(map[string]bool)
+		for _, pin := range si.sym.Pins {
+			if pin.NetID != "" && !seen[pin.NetID] {
+				seen[pin.NetID] = true
+				netMembers[pin.NetID] = append(netMembers[pin.NetID], si)
+			}
+		}
+	}
+	for _, si := range syms {
+		if si.sym.GateType == "CONNECTOR" {
+			continue
+		}
+		def := GetSymbolDef(si.sym.GateType,
+			countPinsByDir(si.sym, "input"),
+			countPinsByDir(si.sym, "output"),
+			countPinsByDir(si.sym, "enable"),
+			countPinsByDir(si.sym, "clock"))
+		stubs := assignStubs(si.sym, def)
+
+		// Gather (pin tip Y offset, partner Y) pairs for connected pins.
+		type link struct{ tipY, partnerY float64 }
+		var links []link
+		for i, pin := range si.sym.Pins {
+			if pin.NetID == "" || stubs[i] == nil {
+				continue
+			}
+			sum, count := 0.0, 0
+			for _, other := range netMembers[pin.NetID] {
+				if other != si {
+					sum += other.sym.Y
+					count++
+				}
+			}
+			if count == 0 {
+				continue
+			}
+			links = append(links, link{tipY: stubs[i].TipY, partnerY: sum / float64(count)})
+		}
+		if len(links) < 2 {
+			si.sym.FlipV = false
+			continue
+		}
+
+		// Crossings: pairs whose pin order disagrees with partner order.
+		// Flipping negates tip offsets, reversing the pin order.
+		inversions := func(sign float64) int {
+			inv := 0
+			for a := 0; a < len(links); a++ {
+				for b := a + 1; b < len(links); b++ {
+					dPin := sign * (links[a].tipY - links[b].tipY)
+					dPartner := links[a].partnerY - links[b].partnerY
+					if dPin*dPartner < 0 {
+						inv++
+					}
+				}
+			}
+			return inv
+		}
+		normalInv := inversions(1)
+		flippedInv := inversions(-1)
+
+		// Tie-break by total vertical offset distance.
+		dist := func(sign float64) float64 {
+			d := 0.0
+			for _, l := range links {
+				d += math.Abs(si.sym.Y + sign*l.tipY - l.partnerY)
+			}
+			return d
+		}
+		switch {
+		case flippedInv < normalInv:
+			si.sym.FlipV = true
+		case flippedInv == normalInv:
+			si.sym.FlipV = dist(-1) < dist(1)*0.95
+		default:
+			si.sym.FlipV = false
 		}
 	}
 }

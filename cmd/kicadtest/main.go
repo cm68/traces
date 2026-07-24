@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"sort"
 
@@ -50,10 +51,64 @@ func main() {
 		fmt.Println("using fresh auto-layout (FRESH_LAYOUT set)")
 	}
 
+	wireLen := 0.0
+	bends := 0
+	for _, w := range doc.Wires {
+		for i := 1; i < len(w.Points); i++ {
+			wireLen += math.Abs(w.Points[i].X-w.Points[i-1].X) +
+				math.Abs(w.Points[i].Y-w.Points[i-1].Y)
+		}
+		if len(w.Points) > 2 {
+			bends += len(w.Points) - 2
+		}
+	}
+	flips := 0
+	for _, s := range doc.Symbols {
+		if s.FlipV || s.FlipH {
+			flips++
+		}
+	}
 	fmt.Printf("sheets=%d symbols=%d wires=%d labels=%d powerports=%d offsheet=%d routeFallbacks=%d\n",
 		len(doc.Sheets), len(doc.Symbols), len(doc.Wires),
 		len(doc.NetLabels), len(doc.PowerPorts), len(doc.OffSheetConnectors),
 		schematic.RouteFallbackCount)
+	// Count crossings between wires of different nets — the visual-clutter
+	// metric layout changes should drive down.
+	type seg struct {
+		x1, y1, x2, y2 float64
+		net            string
+	}
+	var segs []seg
+	for _, w := range doc.Wires {
+		for i := 1; i < len(w.Points); i++ {
+			segs = append(segs, seg{
+				w.Points[i-1].X, w.Points[i-1].Y,
+				w.Points[i].X, w.Points[i].Y, w.NetID,
+			})
+		}
+	}
+	crossings := 0
+	for i := range segs {
+		for j := i + 1; j < len(segs); j++ {
+			a, b := segs[i], segs[j]
+			if a.net == b.net {
+				continue
+			}
+			// horizontal a vs vertical b (and vice versa), strict interior crossing
+			cross := func(h, v seg) bool {
+				if math.Abs(h.y1-h.y2) > 0.01 || math.Abs(v.x1-v.x2) > 0.01 {
+					return false
+				}
+				xlo, xhi := math.Min(h.x1, h.x2), math.Max(h.x1, h.x2)
+				ylo, yhi := math.Min(v.y1, v.y2), math.Max(v.y1, v.y2)
+				return v.x1 > xlo+0.01 && v.x1 < xhi-0.01 && h.y1 > ylo+0.01 && h.y1 < yhi-0.01
+			}
+			if cross(a, b) || cross(b, a) {
+				crossings++
+			}
+		}
+	}
+	fmt.Printf("wireLen=%.0f bends=%d flips=%d crossings=%d\n", wireLen, bends, flips, crossings)
 
 	for _, e := range schematic.RouteFallbackEdges {
 		fmt.Println("fallback:", e)
